@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPeek</title>
+  <link rel="stylesheet" href="vendor/uPlot.min.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -13,25 +14,44 @@
       <span class="total-down">↓ <b id="totalDown">0 B/s</b></span>
       <span class="total-up">↑ <b id="totalUp">0 B/s</b></span>
     </div>
-    <div class="status" id="status">占位模式（未连接采集服务）</div>
+    <div class="view-toggle" id="viewToggle">
+      <button class="vt active" data-view="process">按进程</button>
+      <button class="vt" data-view="app">按应用</button>
+    </div>
+    <input id="search" class="search" type="text" placeholder="搜索进程名 / PID" autocomplete="off" />
+    <div class="status" id="status">未连接采集服务</div>
   </header>
 
-  <main>
+  <section class="chart-panel">
+    <div class="chart-head">
+      <span class="chart-title">实时速率</span>
+      <div class="chips">
+        <button class="chip active" data-window="10">10s</button>
+        <button class="chip" data-window="60">1m</button>
+        <button class="chip" data-window="300">5m</button>
+      </div>
+    </div>
+    <div id="rateChart" class="rate-chart"></div>
+  </section>
+
+  <main class="viewport" id="viewport">
     <table class="proc-table">
       <thead>
         <tr>
-          <th>应用</th>
-          <th class="num">PID</th>
-          <th class="num">下载</th>
-          <th class="num">上传</th>
-          <th class="num">下载总量</th>
-          <th class="num">上传总量</th>
+          <th data-sort="name">应用 <span class="sort-mark"></span></th>
+          <th class="num" data-sort="pid"><span class="pid-label">PID</span> <span class="sort-mark"></span></th>
+          <th class="num" data-sort="download">下载 <span class="sort-mark"></span></th>
+          <th class="num" data-sort="upload">上传 <span class="sort-mark"></span></th>
+          <th class="num" data-sort="downloadTotal">下载总量 <span class="sort-mark"></span></th>
+          <th class="num" data-sort="uploadTotal">上传总量 <span class="sort-mark"></span></th>
+          <th class="num" data-sort="retransmit">重传 <span class="sort-mark"></span></th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
   </main>
 
+  <script src="vendor/uPlot.iife.min.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

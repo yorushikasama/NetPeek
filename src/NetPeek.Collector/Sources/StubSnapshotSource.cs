@@ -9,6 +9,11 @@ namespace NetPeek.Collector.Sources;
 public sealed class StubSnapshotSource : ISnapshotSource
 {
     private readonly Random _random = new();
+    private bool _paused;
+
+    public bool IsPaused => _paused;
+    public void Pause() => _paused = true;
+    public void Resume() => _paused = false;
 
     // 每个假进程独立累计，避免全局总量混入单个进程的 DownloadTotal/UploadTotal。
     private readonly ulong[] _downTotal = new ulong[3];
@@ -24,8 +29,9 @@ public sealed class StubSnapshotSource : ISnapshotSource
 
         for (int i = 0; i < Names.Length; i++)
         {
-            var down = (ulong)_random.Next(1000, 200_000);
-            var up = (ulong)_random.Next(200, 40_000);
+            // 暂停时本周期速率置 0、不累计，恢复后继续累计。
+            var down = _paused ? 0UL : (ulong)_random.Next(1000, 200_000);
+            var up = _paused ? 0UL : (ulong)_random.Next(200, 40_000);
             totalDown += down;
             totalUp += up;
 
@@ -49,7 +55,7 @@ public sealed class StubSnapshotSource : ISnapshotSource
             TotalDownloadBytes = totalDown,
             TotalUploadBytes = totalUp,
             EventsLost = 0,
-            Status = "ok",
+            Status = _paused ? "paused" : "ok",
             Processes = processes,
         };
     }

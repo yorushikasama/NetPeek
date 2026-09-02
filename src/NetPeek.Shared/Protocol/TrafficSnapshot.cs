@@ -20,6 +20,9 @@ public sealed class ProcessTraffic
 
     /// <summary>本次会话累计上传。</summary>
     public ulong UploadTotal { get; set; }
+
+    /// <summary>本次会话累计重传字节（单独统计，不混入上传量）。</summary>
+    public ulong RetransmitTotal { get; set; }
 }
 
 /// <summary>采集服务每秒推送给 UI 的一帧快照。</summary>

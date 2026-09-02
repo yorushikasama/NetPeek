@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light dark; /* 滚动条/原生控件跟随主题 */
   --bg: #111418;
   --panel: #1b1f26;
   --border: #2a2f38;
@@ -6,18 +7,45 @@
   --muted: #a89184;
   --down: #f0913f;
   --up: #7fa8c9;
+  --ok: #6fb87a;
+  --warn: #d9b44a;
+  --error: #e14b3a;
+}
+
+/* 浅色主题：跟随系统 prefers-color-scheme。色值与深色同族、对比度 ≥ 4.5:1。 */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f2ee;
+    --panel: #ffffff;
+    --border: #ddd6cc;
+    --text: #2a211b;
+    --muted: #7a6a5e;
+    --down: #c96a1a;
+    --up: #2e6f9e;
+    --ok: #2e7d4f;
+    --warn: #9a7414;
+    --error: #c03a2b;
+  }
 }
 
 * { box-sizing: border-box; }
 
+html, body {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   font-family: "Segoe UI", system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
 }
 
 .topbar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -28,23 +56,149 @@ body {
 
 .brand { font-weight: 600; font-size: 16px; }
 
+.search {
+  flex: 1;
+  max-width: 320px;
+  margin-left: auto;
+  margin-right: 16px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  color-scheme: light dark; /* 让表单控件/滚动条跟随主题 */
+}
+.search:focus { border-color: var(--down); }
+
 .totals { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
 .total-down b { color: var(--down); }
 .total-up b { color: var(--up); }
 
 .status { margin-left: auto; color: var(--muted); font-size: 13px; }
+.status.ok { color: var(--ok); }
+.status.warn { color: var(--warn); }
+.status.error { color: var(--error); }
+.status.paused { color: var(--warn); }
+
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.vt {
+  padding: 5px 14px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.vt + .vt { border-left: 1px solid var(--border); }
+.vt:hover { color: var(--text); }
+.vt.active { background: var(--border); color: var(--text); }
+
+/* 实时速率折线图 */
+.chart-panel {
+  flex-shrink: 0;
+  padding: 12px 20px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.chart-title { font-size: 13px; color: var(--muted); }
+
+.chips { display: flex; gap: 6px; }
+
+.chip {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.chip:hover { color: var(--text); border-color: var(--muted); }
+.chip.active { color: var(--text); border-color: var(--down); }
+
+#rateChart {
+  display: block;
+  width: 100%;
+  height: 120px;
+}
+
+/* uPlot 图例与主题对齐 */
+.uplot .u-legend {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.uplot .u-legend .u-label { color: var(--muted); }
+.uplot .u-legend .u-value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* 滚动容器：进程列表在此区域内虚拟滚动，表头吸顶。 */
+.viewport {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  position: relative;
+}
 
 .proc-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
+
 .proc-table th, .proc-table td {
-  padding: 10px 20px;
+  height: 43px;
+  padding: 0 20px;
   text-align: left;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.proc-table th { color: var(--muted); font-weight: 500; font-size: 13px; }
+
+.proc-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 13px;
+}
+.proc-table th[data-sort] { cursor: pointer; user-select: none; }
+.proc-table th[data-sort]:hover { color: var(--text); }
+.proc-table th .sort-mark { color: var(--down); font-size: 11px; }
+
+/* 虚拟滚动占位行：只撑高度，无内容。 */
+.proc-table .spacer { padding: 0; }
+.proc-table .spacer td { padding: 0; border-bottom: none; height: auto; }
+
 .num { text-align: right; }
 .down { color: var(--down); }
 .up { color: var(--up); }
+.retrans { color: var(--muted); }
+.name { color: var(--text); }
+
+.empty-row td {
+  height: 72px;
+  text-align: center;
+  color: var(--muted);
+  padding: 24px 20px;
+}
