@@ -1,0 +1,13 @@
+{
+  "name": "netpeek-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NetPeek 桌面 UI（Tauri 2）",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

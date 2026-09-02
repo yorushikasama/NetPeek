@@ -1,0 +1,21 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+src/NetPeek.App/src-tauri/target/
+src/NetPeek.App/src-tauri/gen/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# 系统
+Thumbs.db
+Desktop.ini

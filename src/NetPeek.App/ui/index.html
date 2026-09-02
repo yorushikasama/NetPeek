@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetPeek</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">NetPeek</div>
+    <div class="totals">
+      <span class="total-down">↓ <b id="totalDown">0 B/s</b></span>
+      <span class="total-up">↑ <b id="totalUp">0 B/s</b></span>
+    </div>
+    <div class="status" id="status">占位模式（未连接采集服务）</div>
+  </header>
+
+  <main>
+    <table class="proc-table">
+      <thead>
+        <tr>
+          <th>应用</th>
+          <th class="num">PID</th>
+          <th class="num">下载</th>
+          <th class="num">上传</th>
+          <th class="num">下载总量</th>
+          <th class="num">上传总量</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>

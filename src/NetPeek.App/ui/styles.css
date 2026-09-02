@@ -1,0 +1,50 @@
+:root {
+  --bg: #111418;
+  --panel: #1b1f26;
+  --border: #2a2f38;
+  --text: #f2e6dc;
+  --muted: #a89184;
+  --down: #f0913f;
+  --up: #7fa8c9;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand { font-weight: 600; font-size: 16px; }
+
+.totals { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
+.total-down b { color: var(--down); }
+.total-up b { color: var(--up); }
+
+.status { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.proc-table th, .proc-table td {
+  padding: 10px 20px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.proc-table th { color: var(--muted); font-weight: 500; font-size: 13px; }
+.num { text-align: right; }
+.down { color: var(--down); }
+.up { color: var(--up); }
