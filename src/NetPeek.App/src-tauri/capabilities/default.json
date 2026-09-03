@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "NetPeek 默认能力",
   "windows": ["main", "mini"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }
