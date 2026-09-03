@@ -37,14 +37,21 @@ let query = '';
 let sortKey = 'downloadTotal';
 let sortDir = -1; // 1 升序 / -1 降序
 let viewMode = 'process'; // 'process' 按进程明细 / 'app' 按应用聚合
+let rateUnit = 'auto'; // 由设置面板（settings-ui.js）更新
 
 function fmtRate(bytesPerSec) {
+  if (rateUnit === 'kb') return (bytesPerSec / 1e3).toFixed(1) + ' KB/s';
+  if (rateUnit === 'mb') return (bytesPerSec / 1e6).toFixed(1) + ' MB/s';
+  if (rateUnit === 'gb') return (bytesPerSec / 1e9).toFixed(2) + ' GB/s';
   if (bytesPerSec >= 1e6) return (bytesPerSec / 1e6).toFixed(1) + ' MB/s';
   if (bytesPerSec >= 1e3) return (bytesPerSec / 1e3).toFixed(1) + ' KB/s';
   return bytesPerSec + ' B/s';
 }
 
 function fmtBytes(bytes) {
+  if (rateUnit === 'kb') return (bytes / 1e3).toFixed(1) + ' KB';
+  if (rateUnit === 'mb') return (bytes / 1e6).toFixed(1) + ' MB';
+  if (rateUnit === 'gb') return (bytes / 1e9).toFixed(2) + ' GB';
   if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + ' GB';
   if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
   if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + ' KB';
@@ -144,6 +151,14 @@ function rebuildChart() {
 
 // 主题变化（三模式主题系统）时重建图表以应用新配色。
 window.addEventListener('netpeek-themechange', () => {
+  rebuildChart();
+  rebuildDetailChart();
+});
+
+// 设置变化（速率单位等）时重建图表与表格以应用新格式。
+window.addEventListener('netpeek-settingschange', (e) => {
+  if (e.detail && e.detail.rateUnit) rateUnit = e.detail.rateUnit;
+  if (lastSnapshot) render(lastSnapshot);
   rebuildChart();
   rebuildDetailChart();
 });
@@ -641,6 +656,13 @@ function render(snap) {
   renderStatusBar(snap);
   renderRows();
   renderDetail();
+  if (window.NetPeekSettingsUI) {
+    if (snap.Status === 'ok' || snap.Status === 'paused') {
+      window.NetPeekSettingsUI.updateService(snap);
+    } else {
+      window.NetPeekSettingsUI.updateServiceOffline();
+    }
+  }
 }
 
 function updateSortMarks() {
@@ -741,6 +763,7 @@ listen('pipe-status', (e) => {
   if (e.payload !== 'connected') {
     statusEl.textContent = '未连接采集服务';
     statusEl.className = 'status';
+    if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateServiceOffline();
   }
 });
 
@@ -752,4 +775,9 @@ renderRows();
 // 三模式主题系统：加载持久化配置并应用（异步，完成后经 netpeek-themechange 重建图表）
 if (window.NetPeekThemeUI) {
   window.NetPeekThemeUI.init().catch((err) => console.error('主题初始化失败：', err));
+}
+
+// 设置面板（阶段 4）：加载设置并回填控件
+if (window.NetPeekSettingsUI) {
+  window.NetPeekSettingsUI.init().catch((err) => console.error('设置初始化失败：', err));
 }

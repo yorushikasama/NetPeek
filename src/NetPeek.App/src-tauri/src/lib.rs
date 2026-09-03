@@ -2,7 +2,9 @@
 // - 后台线程接入命名管道客户端，把采集服务推来的 TrafficSnapshot 经 Tauri event 转发给前端。
 // - 系统托盘：左键唤出主窗，右键菜单含「打开主界面 / 退出」；关闭主窗时隐藏到托盘常驻。
 
+mod history;
 mod pipe;
+mod settings;
 mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +24,30 @@ pub fn run() {
             theme::save_theme_config,
             theme::save_background_image,
             theme::read_background_image,
+            settings::load_settings,
+            settings::save_settings,
+            settings::get_autostart,
+            settings::set_autostart,
+            history::query_history,
+            history::history_stats,
+            history::clear_history,
+            history::set_retention,
         ])
         .setup(|app| {
+            // 历史数据（SQLite 分钟聚合）与设置（settings.json + 注册表）。
+            let history_state = history::HistoryState::new();
+            history::init(app.handle(), &history_state)
+                .map_err(|e| e.to_string())
+                .expect("初始化历史数据库失败");
+            app.manage(history_state.clone());
+            history::spawn(history_state);
+
+            let settings_state = settings::SettingsState::default();
+            settings::init(app.handle(), &settings_state)
+                .map_err(|e| e.to_string())
+                .expect("初始化设置失败");
+            app.manage(settings_state);
+
             pipe::spawn(app.handle().clone());
 
             let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;

@@ -20,6 +20,7 @@
     </div>
     <input id="search" class="search" type="text" placeholder="搜索进程名 / PID" autocomplete="off" />
     <button id="themeBtn" class="theme-btn" title="外观与主题">外观</button>
+    <button id="settingsBtn" class="theme-btn" title="设置">设置</button>
     <div class="status" id="status">未连接采集服务</div>
   </header>
 
@@ -200,9 +201,70 @@
     </div>
   </div>
 
+  <!-- 设置面板（阶段 4） -->
+  <div class="theme-overlay" id="settingsOverlay" hidden>
+    <div class="theme-panel" role="dialog" aria-label="设置">
+      <div class="theme-head">
+        <div class="theme-title">设置</div>
+        <button id="settingsClose" class="detail-close" title="关闭">×</button>
+      </div>
+
+      <div class="tsec">
+        <div class="tsec-title">常规</div>
+        <label class="tfield">速率显示单位
+          <select id="setRateUnit" class="tselect">
+            <option value="auto">自动（B / KB / MB / GB）</option>
+            <option value="kb">固定 KB</option>
+            <option value="mb">固定 MB</option>
+            <option value="gb">固定 GB</option>
+          </select>
+        </label>
+        <label class="tconsent">
+          <input type="checkbox" id="setAutostart" />
+          <span>登录时自动启动（写入注册表 HKCU\...\Run）</span>
+        </label>
+      </div>
+
+      <div class="tsec">
+        <div class="tsec-title">历史数据</div>
+        <label class="tfield">保留周期
+          <select id="setRetention" class="tselect">
+            <option value="7">7 天</option>
+            <option value="30">30 天</option>
+            <option value="90">90 天</option>
+            <option value="365">365 天</option>
+            <option value="0">永久保留</option>
+          </select>
+        </label>
+        <div id="histStats" class="tnote">暂无历史数据</div>
+        <div class="bg-actions">
+          <button id="histRefresh" class="tbtn">刷新概览</button>
+          <button id="histClear" class="tbtn ghost">清空历史</button>
+        </div>
+      </div>
+
+      <div class="tsec">
+        <div class="tsec-title">服务状态</div>
+        <div id="svcStatus" class="tnote">未连接采集服务</div>
+        <div id="svcEventsLost" class="tnote"></div>
+      </div>
+
+      <div class="tsec">
+        <div class="tsec-title">外观</div>
+        <button id="openThemeBtn" class="tbtn">打开外观与主题面板…</button>
+      </div>
+
+      <div class="tsec">
+        <div class="tsec-title">关于</div>
+        <div class="tnote">NetPeek v0.1.0（阶段 4 开发版）</div>
+      </div>
+    </div>
+  </div>
+
   <script src="vendor/uPlot.iife.min.js"></script>
   <script src="theme.js"></script>
   <script src="theme-ui.js"></script>
+  <script src="settings-ui.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

@@ -9,7 +9,9 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::history;
 
 const PIPE_PATH: &str = r"\\.\pipe\NetPeekCollector";
 const CONTROL_PIPE_PATH: &str = r"\\.\pipe\NetPeekCollectorControl";
@@ -61,7 +63,10 @@ fn read_session(app: &AppHandle) -> std::io::Result<()> {
 
             // 帧为 JSON，原样解析后交给前端；解析失败只丢弃本帧，不中断读取。
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) {
-                let _ = app.emit("snapshot", value);
+                let _ = app.emit("snapshot", value.clone());
+                // 同一帧同时喂给历史聚合（内存分钟桶，整分钟落 SQLite）。
+                let state = app.state::<std::sync::Arc<history::HistoryState>>();
+                history::record(&state, &value);
             }
         }
     })();
