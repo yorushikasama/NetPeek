@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark; /* 滚动条/原生控件跟随主题 */
+  color-scheme: light dark; /* 滚动条/原生控件跟随主题（三模式主题系统会按需覆盖） */
   --bg: #111418;
   --panel: #1b1f26;
   --border: #2a2f38;
@@ -10,22 +10,10 @@
   --ok: #6fb87a;
   --warn: #d9b44a;
   --error: #e14b3a;
-}
-
-/* 浅色主题：跟随系统 prefers-color-scheme。色值与深色同族、对比度 ≥ 4.5:1。 */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f5f2ee;
-    --panel: #ffffff;
-    --border: #ddd6cc;
-    --text: #2a211b;
-    --muted: #7a6a5e;
-    --down: #c96a1a;
-    --up: #2e6f9e;
-    --ok: #2e7d4f;
-    --warn: #9a7414;
-    --error: #c03a2b;
-  }
+  /* 玻璃面板（三模式主题系统注入）：面板底色透明度与背景模糊强度 */
+  --panel-opacity: 0.92;
+  --blur: 12px;
+  --theme-bg-image: none;
 }
 
 * { box-sizing: border-box; }
@@ -42,6 +30,41 @@ body {
   font-family: "Segoe UI", system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
+}
+
+/* 三模式主题：有背景图时启用玻璃面板（半透明 + 背景模糊 + 暗色叠层保证可读性） */
+body.has-bg {
+  background-image: var(--theme-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+body.has-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.35);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.topbar,
+.chart-panel,
+.cards,
+.statusbar,
+.detail {
+  position: relative;
+  z-index: 1;
+}
+body.has-bg .topbar,
+body.has-bg .chart-panel,
+body.has-bg .cards,
+body.has-bg .statusbar,
+body.has-bg .detail,
+body.has-bg .card {
+  background: color-mix(in srgb, var(--panel) calc(var(--panel-opacity) * 100%), transparent);
+  backdrop-filter: blur(var(--blur));
+  -webkit-backdrop-filter: blur(var(--blur));
 }
 
 .topbar {
@@ -232,6 +255,7 @@ body {
   flex: 1 1 auto;
   overflow-y: auto;
   position: relative;
+  z-index: 1;
 }
 
 /* 右侧详情面板：选中行后显示。 */
@@ -429,3 +453,205 @@ body {
 .statusbar .ok { color: var(--ok); }
 .statusbar .warn { color: var(--warn); }
 .statusbar .error { color: var(--error); }
+
+/* ---------- 三模式主题面板 ---------- */
+
+.theme-btn {
+  margin-left: auto;
+  margin-right: 16px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.theme-btn:hover { border-color: var(--down); }
+
+.theme-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  z-index: 100;
+}
+.theme-overlay[hidden] { display: none; }
+
+.theme-panel {
+  width: 380px;
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  backdrop-filter: blur(var(--blur));
+  -webkit-backdrop-filter: blur(var(--blur));
+}
+
+.theme-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.theme-title { font-size: 15px; font-weight: 600; }
+
+.theme-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tmode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--bg);
+}
+.tmode:hover { border-color: var(--muted); }
+.tmode input { accent-color: var(--down); }
+.tmode span { display: flex; flex-direction: column; }
+.tmode b { font-size: 13px; }
+.tmode small { color: var(--muted); font-size: 12px; }
+
+.tsec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tsec-title {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.bg-actions, .save-row, .preset-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.tbtn {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tbtn:hover { border-color: var(--down); }
+.tbtn.ghost { background: transparent; color: var(--muted); }
+.tbtn.ghost:hover { color: var(--text); border-color: var(--muted); }
+
+.tnote { font-size: 12px; color: var(--muted); }
+.tnote.err { color: var(--error); }
+.tnote.ok { color: var(--ok); }
+
+.tslider {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tslider input[type="range"] {
+  flex: 1;
+  margin-left: 12px;
+  accent-color: var(--down);
+}
+
+.tfield {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tfield input {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.tfield input:focus { border-color: var(--down); }
+
+.tconsent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tconsent input { accent-color: var(--down); margin-top: 2px; }
+
+.color-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.color-grid label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.color-grid input[type="color"] {
+  width: 40px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.theme-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.titem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.titem.active { border-color: var(--down); }
+.titem .tname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titem .tag {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.titem .tact {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.titem .tact:hover { color: var(--text); background: var(--border); }
+
+.theme-foot { border-top: 1px solid var(--border); padding-top: 10px; }

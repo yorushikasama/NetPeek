@@ -25,6 +25,7 @@ const detailUpTotalEl = document.getElementById('detailUpTotal');
 const detailRetransEl = document.getElementById('detailRetrans');
 const detailChartEl = document.getElementById('detailChart');
 const detailCloseEl = document.getElementById('detailClose');
+const themeBtn = document.getElementById('themeBtn');
 
 const { listen } = window.__TAURI__.event;
 
@@ -141,13 +142,11 @@ function rebuildChart() {
   renderChart();
 }
 
-if (window.matchMedia) {
-  const mq = window.matchMedia('(prefers-color-scheme: light)');
-  (mq.addEventListener || mq.addListener).call(mq, 'change', () => {
-    rebuildChart();
-    rebuildDetailChart();
-  });
-}
+// 主题变化（三模式主题系统）时重建图表以应用新配色。
+window.addEventListener('netpeek-themechange', () => {
+  rebuildChart();
+  rebuildDetailChart();
+});
 
 function pushSample(snap) {
   const t = (snap.TimestampUnixMs || Date.now()) / 1000;
@@ -749,3 +748,8 @@ updateSortMarks();
 initChart();
 renderChart();
 renderRows();
+
+// 三模式主题系统：加载持久化配置并应用（异步，完成后经 netpeek-themechange 重建图表）
+if (window.NetPeekThemeUI) {
+  window.NetPeekThemeUI.init().catch((err) => console.error('主题初始化失败：', err));
+}

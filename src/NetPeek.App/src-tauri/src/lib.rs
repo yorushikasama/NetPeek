@@ -3,6 +3,7 @@
 // - 系统托盘：左键唤出主窗，右键菜单含「打开主界面 / 退出」；关闭主窗时隐藏到托盘常驻。
 
 mod pipe;
+mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,6 +17,12 @@ use tauri::{
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            theme::load_theme_config,
+            theme::save_theme_config,
+            theme::save_background_image,
+            theme::read_background_image,
+        ])
         .setup(|app| {
             pipe::spawn(app.handle().clone());
 

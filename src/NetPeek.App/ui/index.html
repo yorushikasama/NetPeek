@@ -19,6 +19,7 @@
       <button class="vt" data-view="app">按应用</button>
     </div>
     <input id="search" class="search" type="text" placeholder="搜索进程名 / PID" autocomplete="off" />
+    <button id="themeBtn" class="theme-btn" title="外观与主题">外观</button>
     <div class="status" id="status">未连接采集服务</div>
   </header>
 
@@ -95,7 +96,113 @@
     <span id="sb-coverage"></span>
   </footer>
 
+  <!-- 三模式主题面板 -->
+  <div class="theme-overlay" id="themeOverlay" hidden>
+    <div class="theme-panel" role="dialog" aria-label="外观与主题">
+      <div class="theme-head">
+        <div class="theme-title">外观与主题</div>
+        <button id="themeClose" class="detail-close" title="关闭">×</button>
+      </div>
+
+      <div class="theme-modes">
+        <label class="tmode">
+          <input type="radio" name="tmode" value="standard" checked />
+          <span><b>标准离线取色</b><small>背景图自动配色，完全离线</small></span>
+        </label>
+        <label class="tmode">
+          <input type="radio" name="tmode" value="ai" />
+          <span><b>AI 自适应</b><small>多模态模型生成，可保存</small></span>
+        </label>
+        <label class="tmode">
+          <input type="radio" name="tmode" value="custom" />
+          <span><b>定制化主题</b><small>预设 / 手动调色</small></span>
+        </label>
+      </div>
+
+      <!-- 背景（模式 1/2 共用） -->
+      <div class="tsec" id="bgSection">
+        <div class="tsec-title">背景图</div>
+        <div class="bg-actions">
+          <button id="bgPick" class="tbtn">选择图片…</button>
+          <button id="bgClear" class="tbtn ghost">无背景</button>
+          <input type="file" id="bgFile" accept="image/*" hidden />
+        </div>
+        <div id="bgStatus" class="tnote">未设置背景（使用面板底色）</div>
+      </div>
+
+      <!-- 模式 1：标准离线取色 -->
+      <div class="tsec" id="stdSection">
+        <div class="tsec-title">微调</div>
+        <label class="tslider">面板不透明度
+          <input type="range" id="stdOpacity" min="0.3" max="1" step="0.01" value="0.92" />
+        </label>
+        <label class="tslider">背景模糊
+          <input type="range" id="stdBlur" min="0" max="40" step="1" value="12" />
+        </label>
+      </div>
+
+      <!-- 模式 2：AI 自适应 -->
+      <div class="tsec" id="aiSection" hidden>
+        <div class="tsec-title">AI 提供方</div>
+        <label class="tfield">接口地址
+          <input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label class="tfield">API Key
+          <input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" />
+        </label>
+        <label class="tfield">模型
+          <input type="text" id="aiModel" placeholder="gpt-4o-mini" />
+        </label>
+        <label class="tconsent">
+          <input type="checkbox" id="aiConsent" />
+          <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
+        </label>
+        <button id="aiGenerate" class="tbtn">生成并应用</button>
+        <div id="aiStatus" class="tnote"></div>
+      </div>
+
+      <!-- 模式 3：定制化主题 -->
+      <div class="tsec" id="customSection" hidden>
+        <div class="tsec-title">预设</div>
+        <div class="preset-row">
+          <button class="tbtn preset" data-preset="dark">经典深色</button>
+          <button class="tbtn preset" data-preset="light">经典浅色</button>
+          <button class="tbtn preset" data-preset="contrast">高对比</button>
+        </div>
+        <div class="tsec-title">手动调色</div>
+        <div class="color-grid">
+          <label>背景<input type="color" id="cBg" value="#111418" /></label>
+          <label>面板<input type="color" id="cPanel" value="#1b1f26" /></label>
+          <label>边框<input type="color" id="cBorder" value="#2a2f38" /></label>
+          <label>文字<input type="color" id="cText" value="#f2e6dc" /></label>
+          <label>次要文字<input type="color" id="cMuted" value="#a89184" /></label>
+          <label>下载<input type="color" id="cDown" value="#f0913f" /></label>
+          <label>上传<input type="color" id="cUp" value="#7fa8c9" /></label>
+          <label>正常<input type="color" id="cOk" value="#6fb87a" /></label>
+          <label>警告<input type="color" id="cWarn" value="#d9b44a" /></label>
+          <label>错误<input type="color" id="cError" value="#e14b3a" /></label>
+        </div>
+      </div>
+
+      <!-- 保存 / 主题列表 -->
+      <div class="tsec">
+        <div class="tsec-title">保存与主题列表</div>
+        <div class="save-row">
+          <input type="text" id="themeName" class="tfield" placeholder="主题名称" />
+          <button id="themeSave" class="tbtn">保存主题</button>
+        </div>
+        <div id="themeList" class="theme-list"></div>
+      </div>
+
+      <div class="theme-foot">
+        <button id="themeReset" class="tbtn ghost">还原默认</button>
+      </div>
+    </div>
+  </div>
+
   <script src="vendor/uPlot.iife.min.js"></script>
+  <script src="theme.js"></script>
+  <script src="theme-ui.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
