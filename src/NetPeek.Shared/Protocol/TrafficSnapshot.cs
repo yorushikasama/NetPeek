@@ -15,6 +15,9 @@ public sealed class ProcessTraffic
     /// <summary>应用图标（base64 PNG 的 data URL，可能为空：无权限或无图标）。</summary>
     public string IconBase64 { get; set; } = "";
 
+    /// <summary>进程启动时刻（Unix 毫秒，取自进程创建时间），UI 据此显示进程会话时长；0 表示未知。</summary>
+    public long StartTimeUnixMs { get; set; }
+
     /// <summary>本周期下载字节数（含 TCP/UDP，IPv4/IPv6）。</summary>
     public ulong DownloadBytes { get; set; }
 

@@ -213,12 +213,134 @@ body {
 .uplot .u-legend .u-label { color: var(--muted); }
 .uplot .u-legend .u-value { color: var(--text); font-variant-numeric: tabular-nums; }
 
+/* 主体区域：左列（图表+卡片+进程表）与右侧详情面板水平排列 */
+.content {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+.main-col {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 /* 滚动容器：进程列表在此区域内虚拟滚动，表头吸顶。 */
 .viewport {
   flex: 1 1 auto;
   overflow-y: auto;
   position: relative;
 }
+
+/* 右侧详情面板：选中行后显示。 */
+.detail {
+  flex-shrink: 0;
+  width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.detail[hidden] { display: none; }
+
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+.detail-icon.placeholder {
+  background: var(--border);
+  border-radius: 6px;
+}
+
+.detail-title { min-width: 0; flex: 1; }
+
+.detail-name {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-sub {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.detail-close:hover { color: var(--text); background: var(--border); }
+
+.detail-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.detail-fields dt { color: var(--muted); }
+.detail-fields dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detail-fields dd#detailPath { white-space: normal; word-break: break-all; text-align: left; }
+
+.detail-chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.detail-chart { width: 100%; height: 110px; }
+
+.detail-attrib summary {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.detail-attrib summary:hover { color: var(--text); }
+.detail-attrib ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* 选中行高亮 */
+.proc-table tr.selected td { background: var(--border); }
+.proc-table tbody tr { cursor: pointer; }
 
 .proc-table {
   width: 100%;

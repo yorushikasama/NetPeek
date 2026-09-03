@@ -236,6 +236,9 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 Name = counter.Name,
                 Path = counter.Path,
                 IconBase64 = _icons.GetDataUrl(counter.Path),
+                StartTimeUnixMs = counter.StartTimeUtcFileTime > 0
+                    ? (counter.StartTimeUtcFileTime - 116444736000000000) / 10000
+                    : 0,
                 DownloadBytes = (ulong)Math.Max(0, downDelta),
                 UploadBytes = (ulong)Math.Max(0, upDelta),
                 DownloadTotal = (ulong)down,
