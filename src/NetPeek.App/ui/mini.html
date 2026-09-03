@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetPeek 小窗</title>
+  <link rel="stylesheet" href="mini.css" />
+</head>
+<body>
+  <!-- 能量球形态（默认，100x100） -->
+  <!-- 不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
+       球点不开。拖动由 mini.js 的位移阈值 + startDragging() 自己处理。 -->
+  <div id="orb" class="orb">
+    <div class="orb-down" id="orbDown">--</div>
+    <div class="orb-up" id="orbUp">--</div>
+    <div class="orb-pause" id="orbPause" hidden>⏸</div>
+  </div>
+
+  <!-- 迷你窗形态（点击能量球展开，320x300） -->
+  <div id="panel" class="panel" hidden>
+    <div class="panel-head">
+      <span class="panel-title">NetPeek</span>
+      <span class="panel-status" id="panelStatus">--</span>
+      <button id="btnCollapse" class="pbtn" title="收起为能量球">—</button>
+      <button id="btnClose" class="pbtn" title="隐藏小窗">×</button>
+    </div>
+
+    <div class="panel-total">
+      <span class="pt-down">↓ <b id="ptDown">--</b></span>
+      <span class="pt-up">↑ <b id="ptUp">--</b></span>
+    </div>
+
+    <div class="panel-list" id="panelList"></div>
+
+    <div class="panel-foot">
+      <button id="btnPause" class="pact">暂停</button>
+      <button id="btnMain" class="pact">主界面</button>
+      <button id="btnQuit" class="pact">退出</button>
+    </div>
+  </div>
+
+  <script src="mini.js"></script>
+</body>
+</html>

@@ -16,6 +16,21 @@
         "resizable": true,
         "minWidth": 900,
         "minHeight": 560
+      },
+      {
+        "label": "mini",
+        "title": "NetPeek 小窗",
+        "url": "mini.html",
+        "width": 100,
+        "height": 100,
+        "resizable": false,
+        "minimizable": false,
+        "maximizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
       }
     ],
     "security": {

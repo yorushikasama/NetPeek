@@ -3,6 +3,7 @@
 // - 系统托盘：左键唤出主窗，右键菜单含「打开主界面 / 退出」；关闭主窗时隐藏到托盘常驻。
 
 mod history;
+mod mini;
 mod pipe;
 mod settings;
 mod theme;
@@ -32,18 +33,23 @@ pub fn run() {
             history::history_stats,
             history::clear_history,
             history::set_retention,
+            mini::toggle_mini,
+            mini::set_mini_shape,
+            mini::send_control_command,
+            mini::show_main_window,
+            mini::quit_app,
         ])
         .setup(|app| {
             // 历史数据（SQLite 分钟聚合）与设置（settings.json + 注册表）。
+            // 先 manage 状态再初始化，保证任何窗口前端尽早 invoke 也不会命中未注册状态。
             let history_state = history::HistoryState::new();
+            app.manage(history_state.clone());
             history::init(app.handle(), &history_state)
                 .map_err(|e| e.to_string())
                 .expect("初始化历史数据库失败");
-            app.manage(history_state.clone());
             history::spawn(history_state);
 
-            let settings_state = settings::SettingsState::default();
-            settings::init(app.handle(), &settings_state)
+            let settings_state = settings::init(app.handle())
                 .map_err(|e| e.to_string())
                 .expect("初始化设置失败");
             app.manage(settings_state);
@@ -51,9 +57,10 @@ pub fn run() {
             pipe::spawn(app.handle().clone());
 
             let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
+            let mini = MenuItem::with_id(app, "mini", "打开迷你窗", true, None::<&str>)?;
             let pause = MenuItem::with_id(app, "pause", "暂停监控", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &pause, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &mini, &pause, &quit])?;
 
             // 本地跟踪暂停状态以切换菜单文案；真实状态以采集服务快照为准（前端据此显示）。
             let paused = Arc::new(AtomicBool::new(false));
@@ -69,6 +76,9 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main(app),
+                    "mini" => {
+                        let _ = mini::toggle_mini((*app).clone());
+                    }
                     "pause" => {
                         let new_paused = !paused_flag.load(Ordering::SeqCst);
                         paused_flag.store(new_paused, Ordering::SeqCst);

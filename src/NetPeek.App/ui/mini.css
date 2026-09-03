@@ -1,0 +1,168 @@
+/* NetPeek 小窗样式：能量球（100x100 透明窗口）与迷你窗（320x300 面板）双形态。
+   窗口透明（transparent: true），所以 body 本身无底色，只有形态元素有背景。 */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* 下面的 .orb / .panel / .orb-pause 都用 display: flex 布局，作者样式优先级高于
+   浏览器默认表里的 [hidden] { display: none }，不加这条 hidden 属性会失效、
+   两种形态同时渲染。 */
+[hidden] { display: none !important; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: system-ui, "Microsoft YaHei", "Segoe UI", sans-serif;
+  user-select: none;
+  color: var(--text, #f2e6dc);
+}
+
+/* ---------- 能量球 ---------- */
+
+.orb {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 28%, #2b3542 0%, #14181f 70%);
+  border: 1px solid var(--border, #2a2f38);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+  cursor: grab;
+  text-align: center;
+}
+.orb:active { cursor: grabbing; }
+
+.orb-down {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--down, #f0913f);
+  line-height: 1.1;
+  max-width: 92px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.orb-up {
+  font-size: 11px;
+  color: var(--up, #7fa8c9);
+  line-height: 1.1;
+}
+.orb-pause {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  background: rgba(10, 12, 16, 0.55);
+  border-radius: 50%;
+  color: var(--warn, #d9b44a);
+}
+
+/* ---------- 迷你窗 ---------- */
+
+.panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, rgba(27, 31, 38, 0.97));
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border, #2a2f38);
+  cursor: grab;
+}
+.panel-head:active { cursor: grabbing; }
+.panel-title { font-size: 13px; font-weight: 600; flex: 1; }
+.panel-status { font-size: 11px; color: var(--muted, #a89184); }
+.panel-status.ok { color: var(--ok, #6fb87a); }
+.panel-status.warn { color: var(--warn, #d9b44a); }
+.panel-status.err { color: var(--error, #e14b3a); }
+
+.pbtn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted, #a89184);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pbtn:hover { background: var(--border, #2a2f38); color: var(--text, #f2e6dc); }
+
+.panel-total {
+  display: flex;
+  justify-content: space-around;
+  padding: 10px 8px;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border, #2a2f38);
+}
+.pt-down { color: var(--down, #f0913f); }
+.pt-up { color: var(--up, #7fa8c9); }
+
+.panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.pitem img { width: 18px; height: 18px; border-radius: 4px; flex: none; }
+.pitem .pname {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pitem .prate { font-size: 11px; color: var(--muted, #a89184); }
+.pitem .prate.down { color: var(--down, #f0913f); }
+.pitem .prate.up { color: var(--up, #7fa8c9); }
+
+.panel-foot {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border, #2a2f38);
+}
+.pact {
+  flex: 1;
+  padding: 7px 0;
+  border: 1px solid var(--border, #2a2f38);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #f2e6dc);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pact:hover { border-color: var(--down, #f0913f); }

@@ -40,8 +40,8 @@ fn defaults() -> serde_json::Value {
     })
 }
 
-/// 启动时加载 settings.json 到内存（缺字段补默认值），随后 load_settings 直接返回内存态。
-pub fn init(app: &AppHandle, state: &SettingsState) -> Result<(), String> {
+/// 启动时加载 settings.json 到内存（缺字段补默认值），返回就绪状态供 app.manage()。
+pub fn init(app: &AppHandle) -> Result<SettingsState, String> {
     let path = data_dir(app)?.join(SETTINGS_FILE);
     let mut inner = defaults();
     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -56,16 +56,37 @@ pub fn init(app: &AppHandle, state: &SettingsState) -> Result<(), String> {
             }
         }
     }
-    *state.inner.lock().unwrap() = inner;
-    Ok(())
+    Ok(SettingsState {
+        inner: Mutex::new(inner),
+    })
 }
 
 /// 读取设置（内存态 JSON 字符串）。
 #[tauri::command]
 pub fn load_settings(app: AppHandle) -> Result<String, String> {
-    let state = app.state::<SettingsState>();
-    let inner = state.inner.lock().unwrap();
-    serde_json::to_string(&*inner).map_err(|e| format!("设置序列化失败: {e}"))
+    // 窗口页面可能在 setup 完成前就 invoke（如 visible 的窗口提前加载），
+    // 此时 state 尚未 manage：回退到文件/默认值，不 panic。
+    let inner = match app.try_state::<SettingsState>() {
+        Some(state) => state.inner.lock().unwrap().clone(),
+        None => {
+            let path = data_dir(&app)?.join(SETTINGS_FILE);
+            let mut v = defaults();
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(file) = serde_json::from_str::<serde_json::Value>(&text) {
+                    for (k, dv) in defaults().as_object().unwrap() {
+                        if !file.get(k).is_some() {
+                            v.as_object_mut().unwrap().insert(k.clone(), dv.clone());
+                        }
+                    }
+                    for (k, vv) in file.as_object().unwrap() {
+                        v.as_object_mut().unwrap().insert(k.clone(), vv.clone());
+                    }
+                }
+            }
+            v
+        }
+    };
+    serde_json::to_string(&inner).map_err(|e| format!("设置序列化失败: {e}"))
 }
 
 /// 覆盖保存设置（整体写入，避免并发写局部字段），并同步注册表 autostart。
@@ -79,8 +100,9 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
         set_autostart_impl(autostart)?;
     }
 
-    let state = app.state::<SettingsState>();
-    *state.inner.lock().unwrap() = value.clone();
+    if let Some(state) = app.try_state::<SettingsState>() {
+        *state.inner.lock().unwrap() = value.clone();
+    }
     let path = data_dir(&app)?.join(SETTINGS_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
         .map_err(|e| format!("保存设置失败: {e}"))

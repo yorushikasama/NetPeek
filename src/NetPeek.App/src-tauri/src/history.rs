@@ -263,8 +263,10 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
 /// 调整保留天数（0 = 永久保留），并立即清理一次。
 #[tauri::command]
 pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
-    let state = app.state::<Arc<HistoryState>>();
-    state.retention_days.store(days.max(0), Ordering::SeqCst);
-    prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
+    // 用 try_state：窗口页面可能在 setup 完成前就 invoke，state 未就绪时仅落文件。
+    if let Some(state) = app.try_state::<Arc<HistoryState>>() {
+        state.retention_days.store(days.max(0), Ordering::SeqCst);
+        prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
+    }
     Ok(())
 }
