@@ -137,6 +137,70 @@ body {
   height: 120px;
 }
 
+/* Top 4 应用卡片 */
+.cards {
+  flex-shrink: 0;
+  display: flex;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.card {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.card-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 5px;
+}
+.card-icon.placeholder {
+  background: var(--border);
+  border-radius: 5px;
+}
+
+.card-body { min-width: 0; flex: 1; }
+
+.card-name {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-rates {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin: 2px 0 6px;
+}
+
+.card-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.card-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--down);
+  transition: width 0.4s ease;
+}
+
 /* uPlot 图例与主题对齐 */
 .uplot .u-legend {
   font-size: 12px;
@@ -194,7 +258,24 @@ body {
 .down { color: var(--down); }
 .up { color: var(--up); }
 .retrans { color: var(--muted); }
-.name { color: var(--text); }
+
+.name {
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proc-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+.proc-icon.placeholder {
+  background: var(--border);
+  border-radius: 4px;
+}
 
 .empty-row td {
   height: 72px;
@@ -202,3 +283,27 @@ body {
   color: var(--muted);
   padding: 24px 20px;
 }
+
+/* 底部状态栏 */
+.statusbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar .sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+}
+
+.statusbar .ok { color: var(--ok); }
+.statusbar .warn { color: var(--warn); }
+.statusbar .error { color: var(--error); }

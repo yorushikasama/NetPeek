@@ -8,6 +8,10 @@ const statusEl = document.getElementById('status');
 const searchEl = document.getElementById('search');
 const viewportEl = document.getElementById('viewport');
 const chartEl = document.getElementById('rateChart');
+const cardsEl = document.getElementById('cards');
+const sbServiceEl = document.getElementById('sb-service');
+const sbSessionEl = document.getElementById('sb-session');
+const sbCoverageEl = document.getElementById('sb-coverage');
 
 const { listen } = window.__TAURI__.event;
 
@@ -160,6 +164,114 @@ function resizeChart() {
   if (uplot) uplot.setSize({ width: chartEl.clientWidth, height: CHART_HEIGHT });
 }
 
+// ===== Top 4 应用卡片 =====
+
+// 按应用聚合（同名进程合并），取累计流量最高的 4 个。
+function topApps(snap, n) {
+  const map = new Map();
+  for (const p of snap.Processes || []) {
+    const name = (p.Name || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    let agg = map.get(key);
+    if (!agg) {
+      agg = {
+        Name: name,
+        IconBase64: p.IconBase64 || '',
+        DownloadBytes: 0,
+        UploadBytes: 0,
+        DownloadTotal: 0,
+        UploadTotal: 0,
+      };
+      map.set(key, agg);
+    }
+    agg.DownloadBytes += p.DownloadBytes || 0;
+    agg.UploadBytes += p.UploadBytes || 0;
+    agg.DownloadTotal += p.DownloadTotal || 0;
+    agg.UploadTotal += p.UploadTotal || 0;
+    if (!agg.IconBase64 && p.IconBase64) agg.IconBase64 = p.IconBase64;
+  }
+  const apps = Array.from(map.values());
+  apps.sort((a, b) => (b.DownloadTotal + b.UploadTotal) - (a.DownloadTotal + a.UploadTotal));
+  return apps.slice(0, n);
+}
+
+function renderCards(snap) {
+  const apps = topApps(snap, 4);
+  const grandTotal = apps.reduce((s, a) => s + a.DownloadTotal + a.UploadTotal, 0);
+  const frag = document.createDocumentFragment();
+
+  for (const a of apps) {
+    const pct = grandTotal > 0 ? Math.round(((a.DownloadTotal + a.UploadTotal) / grandTotal) * 100) : 0;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.title = a.Name;
+    card.innerHTML = `
+      ${a.IconBase64
+        ? `<img class="card-icon" src="${a.IconBase64}" alt="" />`
+        : '<span class="card-icon placeholder"></span>'}
+      <div class="card-body">
+        <div class="card-name">${esc(a.Name)}</div>
+        <div class="card-rates">
+          <span class="down">↓ ${fmtRate(a.DownloadBytes || 0)}</span>
+          <span class="up">↑ ${fmtRate(a.UploadBytes || 0)}</span>
+        </div>
+        <div class="card-bar"><div class="card-bar-fill" style="width:${pct}%"></div></div>
+      </div>`;
+    frag.appendChild(card);
+  }
+
+  cardsEl.replaceChildren(frag);
+}
+
+// ===== 底部状态栏 =====
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function renderStatusBar(snap) {
+  const lost = snap.EventsLost || 0;
+  if (snap.Status === 'paused') {
+    sbServiceEl.textContent = '已暂停';
+    sbServiceEl.className = 'warn';
+  } else if (snap.Status !== 'ok') {
+    sbServiceEl.textContent = '采集服务异常';
+    sbServiceEl.className = 'error';
+  } else if (lost > 0) {
+    sbServiceEl.textContent = `监控中 · 丢事件 ${lost}`;
+    sbServiceEl.className = 'warn';
+  } else {
+    sbServiceEl.textContent = '监控中';
+    sbServiceEl.className = 'ok';
+  }
+
+  const started = snap.SessionStartedUnixMs || 0;
+  const now = Date.now();
+  sbSessionEl.textContent = started > 0
+    ? `会话 ${fmtDuration((now - started) / 1000)}`
+    : '会话 --';
+
+  // 归因覆盖率：能解析出进程名的字节占比。ETW 全量按 PID 归因，
+  // 未解析到名称的主要是系统/受保护进程。
+  let totalBytes = 0;
+  let namedBytes = 0;
+  for (const p of snap.Processes || []) {
+    const b = (p.DownloadTotal || 0) + (p.UploadTotal || 0);
+    totalBytes += b;
+    if ((p.Name || '').trim()) namedBytes += b;
+  }
+  sbCoverageEl.textContent = totalBytes > 0
+    ? `归因 ${Math.round((namedBytes / totalBytes) * 100)}%`
+    : '归因 --';
+}
+
 // ===== 进程列表 =====
 
 const sortAccessors = {
@@ -190,6 +302,7 @@ function getVisibleProcesses(snap) {
       if (!agg) {
         agg = {
           Name: name,
+          IconBase64: '',
           Pid: 0,
           DownloadBytes: 0,
           UploadBytes: 0,
@@ -205,6 +318,7 @@ function getVisibleProcesses(snap) {
       agg.DownloadTotal += p.DownloadTotal || 0;
       agg.UploadTotal += p.UploadTotal || 0;
       agg.RetransmitTotal += p.RetransmitTotal || 0;
+      if (!agg.IconBase64 && p.IconBase64) agg.IconBase64 = p.IconBase64;
     }
     procs = Array.from(map.values());
   }
@@ -223,9 +337,12 @@ function getVisibleProcesses(snap) {
 function processRow(p) {
   const name = p.Name || '(系统/未归因)';
   const pidCell = viewMode === 'app' ? `×${p.Pid}` : p.Pid;
+  const icon = p.IconBase64
+    ? `<img class="proc-icon" src="${p.IconBase64}" alt="" />`
+    : '<span class="proc-icon placeholder"></span>';
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td class="name">${esc(name)}</td>
+    <td class="name">${icon}${esc(name)}</td>
     <td class="num">${pidCell}</td>
     <td class="num down">${fmtRate(p.DownloadBytes || 0)}</td>
     <td class="num up">${fmtRate(p.UploadBytes || 0)}</td>
@@ -304,6 +421,8 @@ function render(snap) {
   }
 
   pushSample(snap);
+  renderCards(snap);
+  renderStatusBar(snap);
   renderRows();
 }
 

@@ -12,6 +12,7 @@ builder.Services.AddWindowsService(options =>
 // 数据源：ETW 采集（订阅内核网络事件，按 payload PID 聚合）。
 // 需管理员权限；在开发机前台调试时请以管理员身份运行。如需无权限跑通链路可临时改回 StubSnapshotSource。
 builder.Services.AddSingleton<ProcessMetadataCache>();
+builder.Services.AddSingleton<ProcessIconCache>();
 builder.Services.AddSingleton<ISnapshotSource, EtwSnapshotSource>();
 builder.Services.AddSingleton<SnapshotPipeServer>();
 builder.Services.AddHostedService<CollectorService>();

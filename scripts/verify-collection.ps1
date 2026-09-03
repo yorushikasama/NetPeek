@@ -15,7 +15,7 @@ if (-not $isAdmin) {
 }
 
 $repo    = Split-Path -Parent $PSScriptRoot
-$exe     = Join-Path $repo 'src\NetPeek.Collector\bin\Debug\net8.0\NetPeek.Collector.exe'
+$exe     = Join-Path $repo 'src\NetPeek.Collector\bin\Debug\net8.0-windows\NetPeek.Collector.exe'
 $dotnet  = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
 
 # ---------- 构建 ----------

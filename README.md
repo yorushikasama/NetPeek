@@ -34,7 +34,7 @@ docs/                     技术选型、执行计划、功能清单、开发进
 
 ```bash
 dotnet build NetPeek.sln
-pwsh -NoProfile -Command "Start-Process 'src\NetPeek.Collector\bin\Debug\net8.0\NetPeek.Collector.exe' -Verb RunAs -WindowStyle Hidden"
+pwsh -NoProfile -Command "Start-Process 'src\NetPeek.Collector\bin\Debug\net8.0-windows\NetPeek.Collector.exe' -Verb RunAs -WindowStyle Hidden"
 ```
 
 ### UI（普通权限运行）

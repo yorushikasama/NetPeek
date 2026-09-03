@@ -28,6 +28,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
     private readonly ILogger<EtwSnapshotSource> _logger;
     private readonly ProcessMetadataCache _metadata;
+    private readonly ProcessIconCache _icons;
+    private readonly long _sessionStartedUnixMs;
     private readonly ConcurrentDictionary<uint, ProcessCounter> _counters = new();
 
     private TraceEventSession? _session;
@@ -50,10 +52,12 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         _logger.LogInformation("监控已恢复");
     }
 
-    public EtwSnapshotSource(ILogger<EtwSnapshotSource> logger, ProcessMetadataCache metadata)
+    public EtwSnapshotSource(ILogger<EtwSnapshotSource> logger, ProcessMetadataCache metadata, ProcessIconCache icons)
     {
         _logger = logger;
         _metadata = metadata;
+        _icons = icons;
+        _sessionStartedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         StartSession();
     }
 
@@ -155,6 +159,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             TimestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             Status = !_started ? "error" : (paused ? "paused" : "ok"),
             EventsLost = (ulong)ReadEventsLost(),
+            SessionStartedUnixMs = _sessionStartedUnixMs,
         };
 
         if (!_started)
@@ -200,6 +205,11 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                     counter.Name = meta.Name;
                 }
 
+                if (!string.IsNullOrEmpty(meta.Path))
+                {
+                    counter.Path = meta.Path;
+                }
+
                 downDelta = down - counter.LastDownloadTotal;
                 upDelta = up - counter.LastUploadTotal;
                 counter.LastDownloadTotal = down;
@@ -224,6 +234,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             {
                 Pid = pid,
                 Name = counter.Name,
+                Path = counter.Path,
+                IconBase64 = _icons.GetDataUrl(counter.Path),
                 DownloadBytes = (ulong)Math.Max(0, downDelta),
                 UploadBytes = (ulong)Math.Max(0, upDelta),
                 DownloadTotal = (ulong)down,
@@ -320,6 +332,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         public long LastUploadTotal;
         public long StartTimeUtcFileTime;
         public string Name = "";
+        public string Path = "";
         public int StaleFrames;
     }
 }

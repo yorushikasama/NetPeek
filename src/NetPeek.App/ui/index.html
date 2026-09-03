@@ -34,6 +34,8 @@
     <div id="rateChart" class="rate-chart"></div>
   </section>
 
+  <section class="cards" id="cards" aria-label="流量最高的应用"></section>
+
   <main class="viewport" id="viewport">
     <table class="proc-table">
       <thead>
@@ -50,6 +52,14 @@
       <tbody id="rows"></tbody>
     </table>
   </main>
+
+  <footer class="statusbar" id="statusbar">
+    <span id="sb-service"></span>
+    <span class="sep"></span>
+    <span id="sb-session"></span>
+    <span class="sep"></span>
+    <span id="sb-coverage"></span>
+  </footer>
 
   <script src="vendor/uPlot.iife.min.js"></script>
   <script src="main.js"></script>

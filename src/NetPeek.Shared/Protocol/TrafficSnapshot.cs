@@ -9,6 +9,12 @@ public sealed class ProcessTraffic
     /// <summary>进程名（如 chrome.exe），可能为空（权限不足时）。</summary>
     public string Name { get; set; } = "";
 
+    /// <summary>进程可执行文件完整路径（可能为空：权限不足或进程已退出）。</summary>
+    public string Path { get; set; } = "";
+
+    /// <summary>应用图标（base64 PNG 的 data URL，可能为空：无权限或无图标）。</summary>
+    public string IconBase64 { get; set; } = "";
+
     /// <summary>本周期下载字节数（含 TCP/UDP，IPv4/IPv6）。</summary>
     public ulong DownloadBytes { get; set; }
 
@@ -39,6 +45,9 @@ public sealed class TrafficSnapshot
 
     /// <summary>ETW 丢失事件累计值（用于 UI 健康提示）。</summary>
     public ulong EventsLost { get; set; }
+
+    /// <summary>采集服务启动时刻（Unix 毫秒），UI 据此计算会话时长。</summary>
+    public long SessionStartedUnixMs { get; set; }
 
     /// <summary>采集状态：ok / paused / error。</summary>
     public string Status { get; set; } = "ok";
