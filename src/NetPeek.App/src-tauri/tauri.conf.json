@@ -38,6 +38,15 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["msi"],
+    "icon": ["icons/icon.ico", "icons/icon-32.png", "icons/icon-128.png"],
+    "windows": {
+      "wix": {
+        "upgradeCode": "060676ca-7130-5fa3-9fb8-4bc7559b65d1",
+        "fragmentPaths": ["installer/collector.wxs"],
+        "componentGroupRefs": ["NetPeekCollectorComponents"]
+      }
+    }
   }
 }

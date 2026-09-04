@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NetPeek 采集服务安装片段（Tauri 2 MSI bundler 通过 fragment_paths 合并）。
+     服务文件由 scripts/build-installer.ps1 发布到 installer/collector/NetPeek.Collector.exe
+     （self-contained 单文件），Fragment 内 File Source 相对本文件所在目录解析。 -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Fragment>
+        <DirectoryRef Id="INSTALLDIR">
+            <Directory Id="CollectorDir" Name="collector">
+                <Component Id="NetPeekCollectorService" Guid="*" Win64="yes">
+                    <File Id="CollectorExe"
+                          Source="..\..\NetPeek.Collector.exe"
+                          KeyPath="yes" />
+                    <!-- LocalSystem 服务：安装即启动，卸载即停止并删除服务 -->
+                    <ServiceInstall Id="NetPeekCollectorServiceInstall"
+                                    Name="NetPeek.Collector"
+                                    DisplayName="NetPeek Collector Service"
+                                    Description="Collects per-application network traffic via ETW and serves it to the NetPeek UI over a named pipe"
+                                    Type="ownProcess"
+                                    Start="auto"
+                                    ErrorControl="normal"
+                                    Account="LocalSystem"
+                                    Vital="yes" />
+                    <ServiceControl Id="NetPeekCollectorServiceControl"
+                                    Name="NetPeek.Collector"
+                                    Start="install"
+                                    Stop="both"
+                                    Remove="uninstall"
+                                    Wait="yes" />
+                </Component>
+            </Directory>
+        </DirectoryRef>
+        <ComponentGroup Id="NetPeekCollectorComponents">
+            <ComponentRef Id="NetPeekCollectorService" />
+        </ComponentGroup>
+    </Fragment>
+</Wix>

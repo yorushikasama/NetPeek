@@ -19,3 +19,7 @@ src/NetPeek.App/src-tauri/gen/
 # 系统
 Thumbs.db
 Desktop.ini
+
+# 安装包构建产物（服务发布目录 / WiX 中间产物）
+src/NetPeek.App/src-tauri/installer/collector/
+*.wixobj
