@@ -1,8 +1,10 @@
-<svg width="64" height="64" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <!-- 小尺寸档（16/24/32/48 + 托盘）专用：背景略提亮，边缘一圈弱白线，
+         否则深色圆角方在深色任务栏上轮廓会糊成一片 -->
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#282c34"/>
-      <stop offset="1" stop-color="#121419"/>
+      <stop offset="0" stop-color="#2e333d"/>
+      <stop offset="1" stop-color="#14171c"/>
     </linearGradient>
     <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#ffd08a"/>
@@ -11,8 +13,13 @@
     </linearGradient>
   </defs>
   <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#bg)"/>
-  <g transform="translate(512 512) scale(34) translate(-12 -12)"
-     fill="none" stroke="url(#amber)" stroke-width="3"
+  <rect x="35" y="35" width="954" height="954" rx="217" fill="none"
+        stroke="#ffffff" stroke-opacity="0.10" stroke-width="6"/>
+
+  <!-- 主脉冲：与大图标同一条路径，但描边 4、无回声线/光晕。
+       stroke 4 * scale 36 = 144px@1024，缩到 32px 仍有 4.5px 的硬边 -->
+  <g transform="translate(512 512) scale(36) translate(-12 -12)"
+     fill="none" stroke="url(#amber)" stroke-width="4"
      stroke-linecap="round" stroke-linejoin="round">
     <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
   </g>

@@ -31,14 +31,14 @@
 
   <!-- 琥珀光晕：主线下垫一条更粗的低透明度描边，不用 filter（Chromium 链式 feDropShadow 会把整个
        filter region 刷上 flood 色，缩到 ICO 尺寸也会糊） -->
-  <g transform="translate(512 450) scale(30) translate(-12 -12)"
-     fill="none" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="3.8"
+  <g transform="translate(512 448) scale(31) translate(-12 -12)"
+     fill="none" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="4.2"
      stroke-linecap="round" stroke-linejoin="round">
     <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
   </g>
   <!-- 主脉冲：amber = 下载，与顶栏 brand-mark 同一条路径（Lucide activity 系，ISC） -->
-  <g transform="translate(512 450) scale(30) translate(-12 -12)"
-     fill="none" stroke="url(#amber)" stroke-width="2.3"
+  <g transform="translate(512 448) scale(31) translate(-12 -12)"
+     fill="none" stroke="url(#amber)" stroke-width="2.6"
      stroke-linecap="round" stroke-linejoin="round">
     <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
   </g>
