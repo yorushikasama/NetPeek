@@ -41,9 +41,11 @@ public sealed class CollectorService : BackgroundService
             {
                 break;
             }
-            catch (IOException ex)
+            catch (Exception ex)
             {
-                _logger.LogWarning(ex, "管道通信异常，准备重新监听");
+                // 一并兜住非 IO 异常（如快照构建中的意外错误）：BackgroundService 未处理
+                // 异常会停掉整个宿主，而服务应保持存活、等下一帧或数据源自愈。
+                _logger.LogWarning(ex, "推送循环异常，准备重新监听");
                 await Task.Delay(500, stoppingToken);
             }
         }

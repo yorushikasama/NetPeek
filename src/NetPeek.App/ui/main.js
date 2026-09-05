@@ -453,7 +453,7 @@ function renderOverview(snap, procs) {
   const all = snap.Processes || [];
   els.inspDownTotal.textContent = fmtBytes(all.reduce((s, p) => s + (p.DownloadTotal || 0), 0));
   els.inspUpTotal.textContent = fmtBytes(all.reduce((s, p) => s + (p.UploadTotal || 0), 0));
-  els.inspUpLabel.textContent = '累计上传';
+  els.inspUpLabel.textContent = '启动以来上传';
 
   els.inspLiveSec.hidden = true;
   els.inspFieldsSec.hidden = false;
@@ -490,7 +490,7 @@ function renderDetail(snap, p) {
 
   els.inspDownTotal.textContent = fmtBytes(p.DownloadTotal || 0);
   els.inspUpTotal.textContent = fmtBytes(p.UploadTotal || 0);
-  els.inspUpLabel.textContent = '累计上传';
+  els.inspUpLabel.textContent = '启动以来上传';
 
   els.inspFieldsSec.hidden = true;
   els.inspLiveSec.hidden = false;
@@ -540,30 +540,101 @@ function setFieldsOffline() {
 // 底部带宽图答「总带宽这一分钟怎么走的」；检查栏实时图答「这个应用这一分钟怎么走的」；
 // 30 天图答「这个应用一个月用了多少」。三个问题不重叠（§3.7 第 9 条）。
 
-function chartOpts(extra) {
-  return Object.assign({
-    window: WINDOW_SECS,
-    xLabels: [`-${WINDOW_SECS}s`, '现在'],
-    formatY: C.axisRate,
-  }, extra);
-}
-
 // 暂停时曲线尾巴转虚线，从暂停那一刻的下标开始（§2.8）
 let pausedIndex = -1;
 
+// ===== 实时折线（ECharts）=====
+// 1Hz × 60 点的小数据量，交互与美观优先；真正的海量高频流才需要
+// uPlot 级别的方案（§4.2）。与统计页共用同一份 vendored ECharts。
+// 平滑用 smoothMonotone:'x' 抑制曲线过冲 —— 速率读数不许画出比峰值还高的鼓包。
+
+function ensureLineChart(el) {
+  let inst = echarts.getInstanceByDom(el);
+  if (!inst) inst = echarts.init(el);
+  // init 落在布局完成前会拿到 0×0（ECharts 回退 100×100），尺寸不符就重量测
+  if (inst.getWidth() !== el.clientWidth || inst.getHeight() !== el.clientHeight) inst.resize();
+  return inst;
+}
+
+// defs: [{ name, color, points: [[tMs, v]...], dashFrom }]；dashFrom ≥ 0 时该下标起转虚线，
+// 虚线段补上边界前一点保持视觉接续。opt: { area, yMax, tooltip, grid, windowMs }
+function liveLineOption(defs, opt = {}) {
+  const mut = C.cssVar('--text-muted') || '#b4a99e';
+  const txt = C.cssVar('--text') || '#f6efe8';
+  const line = 'rgba(255,255,255,0.08)';
+  const now = Date.now();
+  const windowMs = (opt.windowSecs || WINDOW_SECS) * 1000;
+  const series = [];
+  for (const d of defs) {
+    const solid = [];
+    const dash = [];
+    const cut = Number.isInteger(d.dashFrom) ? d.dashFrom : -1;
+    d.points.forEach(([t, v], i) => {
+      if (cut >= 0 && i >= cut) {
+        dash.push([t, v]);
+      } else {
+        solid.push([t, v]);
+        if (cut >= 0 && i === cut - 1) dash.push([t, v]);
+      }
+    });
+    const lineBase = {
+      type: 'line', showSymbol: false, smooth: true, smoothMonotone: 'x',
+      lineStyle: { width: 2, color: d.color },
+    };
+    series.push({
+      ...lineBase, name: d.name,
+      areaStyle: opt.area ? {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: d.color + '38' },
+          { offset: 1, color: d.color + '00' },
+        ]),
+      } : undefined,
+      data: solid,
+    });
+    if (cut >= 0) {
+      series.push({
+        ...lineBase, name: `${d.name}（暂停）`,
+        lineStyle: { width: 2, color: d.color, type: 'dashed', opacity: 0.7 },
+        data: dash,
+      });
+    }
+  }
+  return {
+    animation: false,
+    grid: opt.grid || { left: 52, right: 12, top: 12, bottom: 8 },
+    xAxis: { type: 'time', min: now - windowMs, max: now,
+      axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false },
+      splitLine: { show: false } },
+    yAxis: { type: 'value', min: 0, max: opt.yMax, splitNumber: 2,
+      axisLabel: { color: mut, fontSize: 10, formatter: C.axisRate },
+      splitLine: { lineStyle: { color: line, type: 'dashed' } } },
+    tooltip: opt.tooltip ? {
+      trigger: 'axis',
+      backgroundColor: C.cssVar('--surface') || '#1e1a16',
+      borderColor: 'rgba(255,255,255,0.12)',
+      textStyle: { color: txt, fontSize: 12 },
+      valueFormatter: (v) => C.axisRate(v),
+    } : undefined,
+    series,
+  };
+}
+
 function drawBandwidth() {
   if (!els.bandwidthChart) return;
+  const inst = ensureLineChart(els.bandwidthChart);
   if (!lastSnapshot) {
-    C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
+    // 断线：只留空坐标轴（§2.8），连接恢复后下一帧自然填上
+    inst.setOption(liveLineOption([], { yMax: 1 }), true);
     return;
   }
-  C.line(els.bandwidthChart, chartOpts({
-    series: [
-      { values: samples.map((s) => s.down), color: C.cssVar('--down') },
-      { values: samples.map((s) => s.up), color: C.cssVar('--up') },
-    ],
-    dashFrom: pausedIndex,
-  }));
+  const pts = (pick) => samples.map((s) => [s.t * 1000, pick(s)]);
+  const peak = samples.reduce((m, s) => Math.max(m, s.down, s.up), 1);
+  inst.setOption(liveLineOption([
+    { name: '下载', color: C.cssVar('--down') || '#f0913f', points: pts((s) => s.down), dashFrom: pausedIndex },
+    { name: '上传', color: C.cssVar('--up') || '#7fa8c9', points: pts((s) => s.up), dashFrom: pausedIndex },
+  ], { yMax: C.niceMax(peak), area: true }), true);
+  // 不给实时图配 tooltip：1Hz setOption 会每秒把浮层重置掉（一闪一灭），
+  // 且当前精确值就在顶栏大数字里 —— 这张图只负责「趋势形状」。
 }
 
 // 选中行的 60 秒曲线。按应用聚合时把成员进程逐槽相加，
@@ -591,17 +662,20 @@ function seriesFor(p) {
 function drawProcChart(p) {
   if (!els.inspLiveChart || els.inspLiveSec.hidden) return;
   const s = seriesFor(p);
+  const inst = ensureLineChart(els.inspLiveChart);
   if (!s.down.length) {
-    C.line(els.inspLiveChart, chartOpts({ axesOnly: true, yMax: 1 }));
+    inst.setOption(liveLineOption([], { yMax: 1, grid: { left: 44, right: 8, top: 8, bottom: 6 } }), true);
     return;
   }
-  C.line(els.inspLiveChart, chartOpts({
-    series: [
-      { values: s.down, color: C.cssVar('--down') },
-      { values: s.up, color: C.cssVar('--up') },
-    ],
-    dashFrom: pausedIndex,
-  }));
+  // 槽位右对齐：最右一个槽就是当前秒
+  const len = s.down.length;
+  const now = Date.now() / 1000;
+  const toPoints = (arr) => arr.map((v, i) => [(now - (len - 1 - i)) * 1000, v]);
+  const peak = s.down.reduce((m, v) => Math.max(m, v), s.up.reduce((m2, v) => Math.max(m2, v), 1));
+  inst.setOption(liveLineOption([
+    { name: '下载', color: C.cssVar('--down') || '#f0913f', points: toPoints(s.down), dashFrom: pausedIndex },
+    { name: '上传', color: C.cssVar('--up') || '#7fa8c9', points: toPoints(s.up), dashFrom: pausedIndex },
+  ], { yMax: C.niceMax(peak), area: true, grid: { left: 44, right: 8, top: 8, bottom: 6 } }), true);
 }
 
 // 30 天下载柱图。检查栏只有 296px 宽，挤不开双色分组柱，上传去历史屏看（§2.4）。
@@ -626,7 +700,10 @@ async function render30Day(name, force) {
     els.insp30Total.textContent = total > 0 ? `合计 ${fmtBytes(total)}` : '暂无数据';
     C.bars(els.insp30Chart, {
       groups: points.map((p) => ({ label: p.label, values: [p.value] })),
+      colors: [C.cssVar('--down') || '#f0913f'],
       formatY: C.axisBytes,
+      tipFormat: fmtBytes,
+      seriesNames: ['下载'],
       xLabels: points.length ? [points[0].label, points[points.length - 1].label] : [],
       emptyText: '暂无历史数据',
     });
@@ -681,7 +758,7 @@ function onDisconnected() {
   setStatus('offline');
   setProcState('offline');
   setFieldsOffline();
-  C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
+  drawBandwidth(); // lastSnapshot 为空 → 空坐标轴分支
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateServiceOffline();
 }
 
@@ -692,6 +769,8 @@ function onDisconnected() {
 function setScreen(next) {
   if (next === screen) return;
   screen = next;
+  // 当前屏挂到 body 上：CSS 按屏调骨架（如历史屏把数据岛加高），JS 不感知具体值
+  document.body.dataset.screen = next;
   for (const pane of document.querySelectorAll('.pane[data-screen]')) {
     pane.hidden = pane.dataset.screen !== next;
   }
@@ -933,10 +1012,21 @@ async function boot() {
   // 主题要在首绘之前起来：图里的颜色是从 --down / --up 读出来画上去的
   if (window.NetPeekThemeUI) { try { await window.NetPeekThemeUI.init(); } catch { /* 用默认令牌 */ } }
   if (window.NetPeekSettingsUI) { try { await window.NetPeekSettingsUI.init(); } catch { /* 用默认设置 */ } }
-  await loadTodayBase();
 
   drawBandwidth();
+  // 首绘就绪，显示窗口（此前窗口隐藏，WebView2 冷启动期的空白帧不会露出来）
+  showWindow();
+  console.log('[netpeek] 界面就绪', Math.round(performance.now() - (window.__BOOT_T0 || 0)), 'ms');
+
+  // 非关键路径后置：今日合计底数从历史库补，晚到几百毫秒只影响顶栏一个读数
+  loadTodayBase();
   render30Day(null, true);
+}
+
+function showWindow() {
+  try {
+    window.__TAURI__?.window?.getCurrentWindow?.().show();
+  } catch { /* 浏览器预览没有窗口对象 */ }
 }
 
 boot();

@@ -1,0 +1,45 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#282c34"/>
+      <stop offset="1" stop-color="#121419"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffd08a"/>
+      <stop offset="0.45" stop-color="#f8a839"/>
+      <stop offset="1" stop-color="#ee8432"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.25" stop-color="#ffffff" stop-opacity="0.02"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 岛屿底：窗口底的深色圆角方，顶部一点高光 -->
+  <rect x="64" y="64" width="896" height="896" rx="204" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="204" fill="url(#sheen)"/>
+  <rect x="67.5" y="67.5" width="889" height="889" rx="200.5" fill="none"
+        stroke="#ffffff" stroke-opacity="0.07" stroke-width="5"/>
+
+  <!-- 上传的回声线：钢蓝细线，在主脉冲下方留足空隙 -->
+  <g transform="translate(512 676) scale(30) translate(-12 -12)"
+     fill="none" stroke="#4a5a78" stroke-opacity="0.38" stroke-width="1.5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
+  </g>
+
+  <!-- 琥珀光晕：主线下垫一条更粗的低透明度描边，不用 filter（Chromium 链式 feDropShadow 会把整个
+       filter region 刷上 flood 色，缩到 ICO 尺寸也会糊） -->
+  <g transform="translate(512 450) scale(30) translate(-12 -12)"
+     fill="none" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="3.8"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
+  </g>
+  <!-- 主脉冲：amber = 下载，与顶栏 brand-mark 同一条路径（Lucide activity 系，ISC） -->
+  <g transform="translate(512 450) scale(30) translate(-12 -12)"
+     fill="none" stroke="url(#amber)" stroke-width="2.3"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22"/>
+  </g>
+</svg>

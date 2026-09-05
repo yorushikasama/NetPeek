@@ -41,6 +41,11 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     // 暂停状态的读-改-写需原子完成，否则并发的 toggle 命令会互相抵消。
     private readonly object _pauseGate = new();
 
+    // ETW 启动失败的自动重试：系统启动早期抢跑、其他分析工具占用内核会话等
+    // 瞬时失败只需低频重试即可自愈，不必重启整个服务。
+    private const int RetryIntervalMs = 30_000;
+    private Timer? _retryTimer;
+
     // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
     private int _cachedEventsLost;
     private long _lastEventsLostReadMs;
@@ -91,6 +96,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
     private void StartSession()
     {
+        // 声明在 try 外，任一步失败时 catch 都能释放已创建的会话对象（否则内核会话残留）。
+        TraceEventSession? session = null;
         try
         {
             // 服务异常退出后可能残留同名会话，不清理的话重启会因会话已存在而失败。
@@ -102,7 +109,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 residual.Dispose();
             }
 
-            var session = new TraceEventSession(SessionName);
+            session = new TraceEventSession(SessionName);
             session.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
 
             var parser = new KernelTraceEventParser(session.Source);
@@ -127,15 +134,37 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             _processThread.Start();
 
             _started = true;
+            _retryTimer?.Dispose();
+            _retryTimer = null;
             _logger.LogInformation("ETW 会话已启动：{Session}", SessionName);
         }
         catch (Exception ex)
         {
             _started = false;
-            _logger.LogError(ex, "ETW 会话启动失败（需要管理员权限）。");
-            _session?.Dispose();
+            _logger.LogError(ex, "ETW 会话启动失败（需要管理员权限），{Seconds} 秒后重试。", RetryIntervalMs / 1000);
+            session?.Dispose();
             _session = null;
+
+            // 一次性定时器：每次失败重新排程，成功后清掉。
+            if (!_disposed && _retryTimer == null)
+            {
+                _retryTimer = new Timer(_ => RetryStartSession(), null, RetryIntervalMs, Timeout.Infinite);
+            }
         }
+    }
+
+    private void RetryStartSession()
+    {
+        _retryTimer?.Dispose();
+        _retryTimer = null;
+
+        if (_disposed || _started)
+        {
+            return;
+        }
+
+        _logger.LogInformation("重试启动 ETW 会话…");
+        StartSession();
     }
 
     private void OnTcpSend(TcpIpSendTraceData data) => Add(data.ProcessID, data.size, isUpload: true);
@@ -330,6 +359,9 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         _disposed = true;
         _started = false;
+
+        _retryTimer?.Dispose();
+        _retryTimer = null;
 
         var session = _session;
         _session = null;

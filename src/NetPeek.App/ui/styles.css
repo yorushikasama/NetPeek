@@ -124,16 +124,22 @@ body:not(.has-bg) .scrim { display: none; }
   height: 100%;
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) 380px;
-  grid-template-rows: 58px minmax(356px, 1fr) 250px;
+  /* 行高必须满足窗口最小高 620：58+256+250+行距28+内边距28 = 620。
+     之前中行下限 356 时最小总高 720，数据岛底部 86px 会被窗口裁掉。
+     中行上限钉在 356：更高窗口的余量全部给数据岛换表格行数，
+     而不是把留白区越撑越大 —— 留白区的价值不随尺寸线性涨，行数涨。 */
+  grid-template-rows: 58px minmax(256px, 356px) minmax(250px, 1fr);
   gap: 14px;
   padding: 14px;
 }
 
 .island--top { grid-area: 1 / 1 / 2 / 4; }
 /* 导航岛例外：它的 tooltip 要飘到岛外（§2.3 图标导航必须有悬浮标签） */
-.island--nav { grid-area: 2 / 1 / 3 / 2; align-self: start; height: 268px; overflow: visible; }
+/* 高度交给内容（4×56 + 上下 padding 28 = 252）：中行在最小窗口收 to 256，
+   写死 268 会探出行底 12px，压到数据岛顶边上形成玻璃叠玻璃。 */
+.island--nav { grid-area: 2 / 1 / 3 / 2; align-self: start; height: auto; overflow: visible; }
 .stage       { grid-area: 2 / 2 / 3 / 3; }
-.island--inspector { grid-area: 2 / 3 / 3 / 4; min-height: 356px; }
+.island--inspector { grid-area: 2 / 3 / 3 / 4; }
 .island--data { grid-area: 3 / 1 / 4 / 4; }
 
 /* 密集模式（§2.5）：数据岛向上吃掉留白区与检查栏，表格可见 15 行。
@@ -160,6 +166,12 @@ body:not(.has-bg) .scrim { display: none; }
   background: transparent;
   backdrop-filter: none;
   box-shadow: none;
+}
+
+/* 历史屏是数据主屏：留白区与检查栏压到下限，余量给数据岛换图表高度
+   （720 窗口下数据岛 326px，双 grid 图才放得开）。 */
+body[data-screen="history"] .shell {
+  grid-template-rows: 58px minmax(220px, 280px) minmax(250px, 1fr);
 }
 
 /* ---------- 岛屿材质（§3.2）---------- */
@@ -282,11 +294,12 @@ body:not(.has-bg) .island {
 .today {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 6px;
   white-space: nowrap;
 }
-.today-label { font-size: 13px; color: var(--text-muted); }
-.today-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; }
+.today-label { font-size: 12px; color: var(--text-muted); }
+/* 今日合计与实时速率同为核心读数（功能清单 §屏1）：17px 保住层级，又不压过 30px 的瞬时速率 */
+.today-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 17px; font-weight: 600; }
 
 /* ---------- 控件：胶囊档位组 / 搜索 / 图标钮（§3.5）---------- */
 
@@ -313,7 +326,8 @@ body:not(.has-bg) .island {
 .segmented button:hover { color: var(--text); }
 .segmented button.is-active {
   background: var(--surface-hi);
-  color: var(--down);
+  /* 激活态用底色区分就足够：琥珀留给下载数据（这一栏紧挨着表格的琥珀下载列） */
+  color: var(--text);
 }
 
 .search {
@@ -331,7 +345,9 @@ body:not(.has-bg) .island {
   transition: border-color var(--t-fast) var(--ease);
 }
 .search:hover { border-color: rgba(255, 255, 255, 0.26); }
-.search:focus-within { border-color: var(--down); outline: none; }
+/* 琥珀是下载的专属语义（§1.2）：搜索框与两个大速率数字同排，focus 描边用中性亮色，
+   不和下载数字抢语义。 */
+.search:focus-within { border-color: color-mix(in srgb, var(--text) 45%, transparent); outline: none; }
 .search svg { width: 14px; height: 14px; color: var(--text-muted); flex: none; }
 
 .search input {
@@ -397,8 +413,8 @@ body:not(.has-bg) .island {
 }
 .nav-item {
   position: relative;
-  width: 60px;
-  height: 60px;
+  width: 56px;
+  height: 56px;
   display: grid;
   place-items: center;
   appearance: none;
@@ -482,7 +498,9 @@ body:not(.has-bg) .backdrop {
   flex-direction: column;
   height: 100%;
   padding: 16px;
-  overflow: hidden;
+  /* 设置屏的归因边界有四条，挤不下 356px 的硬底；超出的部分滚动露出，不无声裁掉 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .insp-sec { padding: 8px 0; }
 .insp-sec + .insp-sec { border-top: 1px solid var(--line); }
@@ -551,7 +569,8 @@ body:not(.has-bg) .backdrop {
 .chart canvas { display: block; width: 100%; height: 100%; }
 
 /* 总览态的字段组（未选中任何行时替换「实时用量」段，§2.4） */
-.insp-fields { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; align-items: baseline; }
+/* dl 的 UA 默认 margin: 1em 0 没清掉的话，检查栏每段凭空多 26px —— 356px 的硬底装不下这个浪费 */
+.insp-fields { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; align-items: baseline; margin: 0; }
 .insp-fields dt { font-size: 12px; color: var(--text-muted); }
 .insp-fields dd { margin: 0; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; }
 /* 归因覆盖率这类可点字段：琥珀是下载的专属语义（§1.2），这里只能用正文色。
@@ -575,6 +594,20 @@ body:not(.has-bg) .backdrop {
   color: var(--text-muted);
 }
 .attrib-note ul { margin: 0; padding-left: 16px; }
+
+/* 设置屏检查栏：服务健康 / 关于 / 归因边界三段必须装进 356px 的岛（§2.7，窗口固定 1180×720）。
+   大头是 .insp-fields 上清掉的 UA margin；这里段距再收一档（8→6、6→4），留出余量 ——
+   归因四条不折叠、不裁切，全文可见。 */
+.pane[data-screen="settings"] .insp-sec { padding: 6px 0; }
+.pane[data-screen="settings"] .sec-head { margin-bottom: 4px; }
+.pane[data-screen="settings"] .insp-fields { gap: 4px 12px; }
+.pane[data-screen="settings"] .attrib-note {
+  /* 与「关于」同为段标题下的无框注记；盒子留给实时屏（说明弹出在数字旁边，需要边界） */
+  margin-top: 0;
+  padding: 2px 0 0;
+  background: none;
+  line-height: 1.5;
+}
 
 /* ---------- 数据岛（§2.5）---------- */
 
@@ -612,7 +645,10 @@ body:not(.has-bg) .backdrop {
   /* 行必须显式约束成 1fr：隐式 auto 行会被 10 行表格顶成 392px，
      把图和表一起挤出 250px 高的数据岛。 */
   grid-template-rows: minmax(0, 1fr);
-  grid-template-columns: 448px 1px minmax(0, 1fr);
+  /* 图表:表格按 448:655 分宽（≈默认窗口的实际占比），各带下限。
+     写死 448px 的话，1081~1180 之间表格应用列会被压到 130px 以下；
+     fr 比例让图表从 448 平滑让位到 300，与下方 ≤1080/≤980 断点衔接。 */
+  grid-template-columns: minmax(300px, 448fr) 1px minmax(360px, 655fr);
   gap: 16px;
   padding: 16px;
 }
@@ -658,6 +694,9 @@ body:not(.has-bg) .backdrop {
   /* 半透明岛屿上表头必须自己不透明，否则滚动的行会从字缝里透出来 */
   background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   backdrop-filter: blur(var(--blur));
+  /* 表头与数据行的分界：滚动时行从表头下穿过，没有这条线表头和首行会粘在一起。
+     行与行之间仍然不画线（§3.7 #3），这条只属于表头。 */
+  box-shadow: inset 0 -1px 0 var(--line);
 }
 body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-filter: none; }
 .proc-table thead th.is-num { text-align: right; }
@@ -772,6 +811,103 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .hist-toolbar .spacer { flex: 1; }
 .hist-note { font-size: 11px; color: var(--text-muted); }
+
+/* 历史屏双 grid：下载主图 + 上传窄条（各自量程），由 ECharts 在一个容器内绘制。 */
+.hist-main { min-height: 120px; position: relative; }
+/* ECharts 挂载点：所有图表容器共用（历史屏与实时屏） */
+.echart { width: 100%; height: 100%; }
+
+/* 图内序列标签：主图标签贴 grid 顶部，上传标签贴下网格顶部（与 option 里的 grid 百分比一致）。
+   pointer-events:none 让标签不吃悬浮命中。left 60px 对齐 y 轴槽。 */
+.plot-tag {
+  position: absolute;
+  left: 60px;
+  z-index: 1;
+  font-size: 11px;
+  pointer-events: none;
+}
+.plot-tag.down { color: var(--down); top: 10px; }
+.plot-tag.up { color: var(--up); top: 76%; }
+
+/* 自定义时间区间弹层：挂在工具栏下方的一块玻璃面板 */
+.hist-data { position: relative; }
+.hist-custom {
+  position: absolute;
+  top: 52px;
+  left: 16px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-block);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+.hist-custom-row { display: flex; align-items: end; gap: 8px; }
+.hist-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.hist-custom-field input {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hist-custom-field input:focus { border-color: color-mix(in srgb, var(--text) 45%, transparent); outline: none; }
+.hist-custom-sep { color: var(--text-muted); padding-bottom: 8px; }
+.hist-custom-quick { display: flex; gap: 6px; }
+.hist-custom-quick .btn { height: 26px; padding: 0 10px; font-size: 12px; }
+
+/* ---- Flatpickr 主题化：默认外观全走我们的令牌，深浅色随主题切换 ---- */
+.flatpickr-calendar {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--r-block);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  font-family: var(--font-ui);
+}
+.flatpickr-calendar.arrowTop::before { border-bottom-color: var(--line); }
+.flatpickr-calendar.arrowTop::after { border-bottom-color: var(--surface); }
+.flatpickr-months .flatpickr-month,
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-current-month input.cur-year { color: var(--text); font-weight: 500; }
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-current-month input.cur-year { background: var(--surface); }
+span.flatpickr-weekday { color: var(--text-muted); }
+.flatpickr-day { color: var(--text); border-radius: var(--r-ctl); }
+.flatpickr-day:hover { background: var(--surface-hi); border-color: transparent; }
+.flatpickr-day.today { border-color: var(--down); }
+.flatpickr-day.today:hover { background: var(--down); color: #1a0f0e; }
+.flatpickr-day.selected,
+.flatpickr-day.selected:hover,
+.flatpickr-day.inRange { background: var(--surface-hi); border-color: transparent; color: var(--text); }
+.flatpickr-day.prevMonthDay,
+.flatpickr-day.nextMonthDay { color: var(--text-muted); opacity: 0.45; }
+.flatpickr-months .flatpickr-prev-month svg,
+.flatpickr-months .flatpickr-next-month svg { fill: var(--text-muted); }
+.flatpickr-months .flatpickr-prev-month:hover svg,
+.flatpickr-months .flatpickr-next-month:hover svg { fill: var(--down); }
+.flatpickr-time { background: transparent; border-top: 1px solid var(--line); }
+.flatpickr-time input,
+.flatpickr-time .flatpickr-time-separator,
+.flatpickr-time .flatpickr-am-pm { color: var(--text); }
+.flatpickr-time input:hover,
+.flatpickr-time input:focus { background: var(--surface-hi); }
+.flatpickr-time .numInputWrapper:hover { background: var(--surface-hi); }
+.flatpickr-time .numInputWrapper span.arrowUp::after { border-bottom-color: var(--text-muted); }
+.flatpickr-time .numInputWrapper span.arrowDown::after { border-top-color: var(--text-muted); }
 
 .rank-list {
   display: flex;
@@ -896,6 +1032,12 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 .note.is-ok { color: var(--ok); }
 .note.is-warn { color: var(--warn); }
 .note.is-error { color: var(--error); }
+
+/* 服务健康读数（settings-ui.js）直接在 <dd> 上挂状态类，不带 .note；
+   不做成全局 .is-*，顶栏状态胶囊的 is-ok 只染圆点不染文字，全局规则会破坏它 */
+.insp-fields dd.is-ok { color: var(--ok); }
+.insp-fields dd.is-warn { color: var(--warn); }
+.insp-fields dd.is-error { color: var(--error); }
 
 /* 语义色块。下载与上传语义锁定，不许改（§1.2）。 */
 .swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; }

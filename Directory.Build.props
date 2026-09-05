@@ -1,0 +1,13 @@
+<!--
+  仓库级构建配置。
+
+  MicrosoftNETCoreAppRefPackageVersion：本机 SDK 8.0.424 自带的 targeting pack
+  Microsoft.NETCore.App.Ref/8.0.424 是空的（无任何引用程序集），选中它的工程会报
+  一堆 CS0246（连 BCL 类型都找不到）。这里把 targeting pack 钉到最后一个完好的
+  8.0.30。SDK 修复/升级后（确认 packs 目录下对应版本的 ref/net8.0 非空）可移除。
+-->
+<Project>
+  <PropertyGroup>
+    <MicrosoftNETCoreAppRefPackageVersion>8.0.30</MicrosoftNETCoreAppRefPackageVersion>
+  </PropertyGroup>
+</Project>

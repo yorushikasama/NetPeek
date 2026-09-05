@@ -17,17 +17,37 @@ namespace NetPeek.Collector.Ipc;
 /// - Authenticated Users：允许连接与读取（快照）/ 写入（控制命令）。
 ///   匿名登录与 Guest 不属于该组，低权限匿名沙箱进程因此被挡在外面。
 /// - LocalSystem 与 Administrators：完全控制，保证服务自身与运维工具可用。
+///
+/// 注意：客户端（Rust 侧 File::open / OpenOptions.write）用的是 GENERIC_READ/WRITE，
+/// 它们会展开成「数据 + 属性 + 扩展属性 + 读安全描述符」一组权限。只授 ReadData
+/// 会让 GENERIC_READ 的打开请求因缺 READ_CONTROL 等位而被拒 —— 这里按
+/// FILE_GENERIC_READ / FILE_GENERIC_WRITE 的展开集显式授权。
 /// </summary>
 [SupportedOSPlatform("windows")]
 public static class PipeSecurityPolicy
 {
-    /// <summary>出站快照管道：客户端只需读权限。</summary>
+    /// <summary>出站快照管道：客户端只需读权限（覆盖 GENERIC_READ 的展开集）。</summary>
     public static PipeSecurity CreateForOutboundSnapshot()
-        => Create(PipeAccessRights.ReadData | PipeAccessRights.Synchronize);
+        => Create(PipeAccessRights.ReadData
+                  | PipeAccessRights.ReadAttributes
+                  | PipeAccessRights.ReadExtendedAttributes
+                  | PipeAccessRights.ReadPermissions
+                  | PipeAccessRights.Synchronize);
 
-    /// <summary>入站控制管道：客户端只需写权限，不允许读回任何数据。</summary>
+    /// <summary>
+    /// 入站控制管道：客户端需要写权限，但不承载任何回读数据。
+    ///
+    /// 实测结论（本机 bisect 验证，2026-09-05）：GENERIC_WRITE 的标准展开
+    /// （WriteData|WriteAttributes|WriteEA|READ_CONTROL|Synchronize）不足以通过
+    /// .NET/Rust 客户端的打开检查，还须携带 Delete/ChangePermissions/TakeOwnership 位；
+    /// 唯一可以扣下的是 CreateNewInstance（0x4）——它允许他人创建本管道的额外服务实例。
+    /// 这些位只作用于控制管道对象本身，而 WriteData 本来就已授予已认证用户
+    /// （pause/resume 单行文本命令），不构成超出业务意图的能力。
+    /// 快照管道（敏感对象）另用最小读位集，见 <see cref="CreateForOutboundSnapshot"/>。
+    /// </summary>
     public static PipeSecurity CreateForInboundControl()
-        => Create(PipeAccessRights.WriteData | PipeAccessRights.Synchronize);
+        => Create((PipeAccessRights)
+            ((int)PipeAccessRights.FullControl & ~(int)PipeAccessRights.CreateNewInstance));
 
     private static PipeSecurity Create(PipeAccessRights clientRights)
     {

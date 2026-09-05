@@ -179,9 +179,44 @@
   }
 
   // 柱状图。groups = [{ label, values: [down] 或 [down, up] }]。
-  // 检查栏 30 天图只画下载（296px 宽挤不开双色分组柱）；历史屏画双色分组。
-  // selectedIndex 那一组加 2px 顶帽标出（§2.6）。返回 hitTest 供点柱选中用。
+  // 检查栏 30 天图只画下载（296px 宽挤不开双色分组柱）；历史屏把上传拆成
+  // 独立量程的窄条图 —— 双序列共享量程时 15:1 的量级差会把上传压成贴地条。
+  // selectedIndex 那一组加 2px 顶帽、其余组降到 45%（过滤范围直接读在图上）。
+  // 悬浮：组高亮带 + 数值浮层（需要 opt.tipFormat，值由调用方格式化）。
+  // 监听器按 canvas 只绑一次，重复调用只更新 opt；hover 变化整帧重画
+  // （几十根柱的矢量重画远低于 1Hz 的刷新预算）。
   function bars(canvas, opt) {
+    const state = canvas.__npBars || (canvas.__npBars = { hoverIdx: -1, bound: false });
+    state.opt = opt;
+    if (!state.bound) {
+      state.bound = true;
+      canvas.addEventListener('mousemove', (e) => {
+        const st = canvas.__npBars;
+        const idx = st.rects ? barIndexAt(st.rects, canvas, e.clientX) : -1;
+        canvas.style.cursor = idx >= 0 ? 'pointer' : 'default';
+        if (idx !== st.hoverIdx) { st.hoverIdx = idx; drawBars(canvas); }
+      });
+      canvas.addEventListener('mouseleave', () => {
+        const st = canvas.__npBars;
+        canvas.style.cursor = 'default';
+        if (st.hoverIdx !== -1) { st.hoverIdx = -1; drawBars(canvas); }
+      });
+    }
+    return drawBars(canvas);
+  }
+
+  function barIndexAt(rects, canvas, clientX) {
+    const box = canvas.getBoundingClientRect();
+    const x = clientX - box.left;
+    for (const rect of rects) if (x >= rect.x0 && x < rect.x1) return rect.index;
+    return -1;
+  }
+
+  function drawBars(canvas) {
+    const state = canvas.__npBars;
+    const opt = state.opt || {};
+    const hoverIdx = state.hoverIdx;
+    state.rects = null;
     const p = prepare(canvas);
     if (!p) return null;
     const { ctx, w, h } = p;
@@ -214,10 +249,21 @@
     const groupW = Math.max(2, pitch - groupGap);
     const barW = Math.max(1.5, (groupW - innerGap * (seriesCount - 1)) / seriesCount);
 
+    // 选中过滤态：未选中的组整体降到 45%，被选中的组保持全亮
+    const alphaFor = (gi) =>
+      (opt.selectedIndex >= 0 && gi !== opt.selectedIndex ? 0.45 : 1);
+
+    // 悬浮高亮带：给「这一列是哪一组」一个载体，也提升窄柱的命中感
+    if (hoverIdx >= 0 && hoverIdx < groups.length) {
+      ctx.fillStyle = rgba(cssVar('--surface-hi') || '#2f2924', 0.55);
+      ctx.fillRect(r.left + hoverIdx * pitch, r.top, pitch, r.plotH);
+    }
+
     const rects = [];
     for (let gi = 0; gi < groups.length; gi++) {
       const gx = r.left + gi * pitch + groupGap / 2;
       rects.push({ x0: r.left + gi * pitch, x1: r.left + (gi + 1) * pitch, index: gi });
+      ctx.globalAlpha = alphaFor(gi);
       for (let si = 0; si < seriesCount; si++) {
         const v = groups[gi].values[si] || 0;
         const bh = Math.max(v > 0 ? 1 : 0, (Math.min(v, yMax) / yMax) * r.plotH);
@@ -225,6 +271,7 @@
         ctx.fillStyle = colors[si] || colors[0];
         ctx.fillRect(x, r.bottom - bh, barW, bh);
       }
+      ctx.globalAlpha = 1;
       if (opt.selectedIndex === gi) {
         ctx.fillStyle = cssVar('--down') || '#f0913f';
         ctx.fillRect(gx, r.top - 2, groupW, 2);
@@ -252,13 +299,48 @@
       }
     }
 
+    // 悬浮数值浮层：标签 + 各序列值（值经 opt.tipFormat 格式化，行色随序列色）
+    if (hoverIdx >= 0 && hoverIdx < groups.length && opt.tipFormat) {
+      const g = groups[hoverIdx];
+      const arrows = seriesCount > 1 ? ['▼ ', '▲ '] : [''];
+      ctx.font = FONT_NUM;
+      const rows = [];
+      for (let si = 0; si < seriesCount; si++) {
+        rows.push({
+          color: colors[si] || colors[0],
+          text: (arrows[si] || '') + opt.tipFormat(g.values[si] || 0),
+        });
+      }
+      const valW = Math.max(...rows.map((row) => ctx.measureText(row.text).width));
+      const uiFont = '11px "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif';
+      ctx.font = uiFont;
+      const label = String(g.label);
+      const boxW = Math.max(valW, ctx.measureText(label).width) + 20;
+      const boxH = 30 + rows.length * 16;
+      let bx = r.left + (hoverIdx + 0.5) * pitch - boxW / 2;
+      bx = Math.max(r.left, Math.min(bx, r.right - boxW));
+      const by = r.top + 4;
+      ctx.fillStyle = rgba(cssVar('--surface') || '#1e1a16', 0.92);
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bx, by, boxW, boxH, 8); else ctx.rect(bx, by, boxW, boxH);
+      ctx.fill();
+      ctx.strokeStyle = cssVar('--line') || 'rgba(255,255,255,0.1)';
+      ctx.stroke();
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.font = uiFont;
+      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+      ctx.fillText(label, bx + 10, by + 15);
+      ctx.font = FONT_NUM;
+      for (let i = 0; i < rows.length; i++) {
+        ctx.fillStyle = rows[i].color;
+        ctx.fillText(rows[i].text, bx + 10, by + 31 + i * 16);
+      }
+    }
+
+    state.rects = rects;
     return {
-      indexAt(clientX) {
-        const box = canvas.getBoundingClientRect();
-        const x = clientX - box.left;
-        for (const rect of rects) if (x >= rect.x0 && x < rect.x1) return rect.index;
-        return -1;
-      },
+      indexAt: (clientX) => barIndexAt(rects, canvas, clientX),
     };
   }
 
@@ -279,5 +361,5 @@
   const axisBytes = (v) => axisNum(v, '');
   const axisRate = (v) => axisNum(v, '/s');
 
-  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };
+  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate, niceMax };
 })();

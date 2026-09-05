@@ -178,40 +178,41 @@
         await invoke('send_control_command', { command: paused ? 'resume' : 'pause' });
       } catch {
         els.svcPause.disabled = false;
-        els.svcStatus.textContent = '采集服务：控制命令发送失败（管道未连接）';
-        els.svcStatus.className = 'note is-error';
+        els.svcStatus.textContent = '控制命令发送失败（管道未连接）';
+        els.svcStatus.className = 'is-error';
       }
     });
   }
 
   // 服务状态：由 main.js 每次快照转发，避免重复监听管道。
   // 措辞和顶栏状态胶囊共用一套（监控中 / 已暂停 / 异常），否则同一个信号在两个岛上叫两个名字。
+  // 这两处是 <dl> 的值格，字段名已由左侧 <dt> 印出，值里不再重复「采集服务：」「ETW 丢事件：」。
   function updateService(snap) {
     const status = snap.Status;
     if (status === 'paused') {
-      els.svcStatus.textContent = '采集服务：已暂停';
-      els.svcStatus.className = 'note is-warn';
+      els.svcStatus.textContent = '已暂停';
+      els.svcStatus.className = 'is-warn';
     } else if (status === 'ok') {
-      els.svcStatus.textContent = '采集服务：监控中';
-      els.svcStatus.className = 'note is-ok';
+      els.svcStatus.textContent = '监控中';
+      els.svcStatus.className = 'is-ok';
     } else {
-      els.svcStatus.textContent = '采集服务：异常（ETW 会话需要管理员权限）';
-      els.svcStatus.className = 'note is-error';
+      els.svcStatus.textContent = '异常（ETW 会话需要管理员权限）';
+      els.svcStatus.className = 'is-error';
     }
     const lost = snap.EventsLost || 0;
     els.svcEventsLost.textContent = lost > 0
-      ? `ETW 丢事件：${lost} 条 · 实际用量可能高于显示值`
-      : 'ETW 丢事件：无丢失';
-    els.svcEventsLost.className = lost > 0 ? 'note is-warn' : 'note is-ok';
+      ? `${lost} 条 · 实际用量可能高于显示值`
+      : '无丢失';
+    els.svcEventsLost.className = lost > 0 ? 'is-warn' : 'is-ok';
     paused = status === 'paused';
     els.svcPause.textContent = paused ? '恢复采集' : '暂停采集';
     els.svcPause.disabled = false;
   }
 
   function updateServiceOffline() {
-    els.svcStatus.textContent = '采集服务：未连接';
-    els.svcStatus.className = 'note';
-    els.svcEventsLost.textContent = '';
+    els.svcStatus.textContent = '未连接';
+    els.svcStatus.className = '';
+    els.svcEventsLost.textContent = '—';
     els.svcPause.disabled = true;
   }
 

@@ -24,6 +24,22 @@ use tauri::{AppHandle, Manager};
 const DB_FILE: &str = "history.db";
 const LOG_FILE: &str = "netpeek.log";
 const DEFAULT_RETENTION_DAYS: i64 = 30;
+const HOUR: i64 = 3600;
+const WEEK: i64 = 7 * 86400;
+
+/// 建表 SQL。init() 用于真实库；单测用同一份 SQL 在内存库上建表，
+/// 保证测试与生产的表结构永不漂移。
+const SCHEMA_SQL: &str = "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS minute_stats (
+           ts       INTEGER NOT NULL,
+           pid      INTEGER NOT NULL,
+           start_ts INTEGER NOT NULL DEFAULT 0,
+           name     TEXT NOT NULL,
+           down     INTEGER NOT NULL,
+           up       INTEGER NOT NULL,
+           PRIMARY KEY (ts, pid, start_ts)
+         );
+         CREATE INDEX IF NOT EXISTS idx_minute_stats_ts ON minute_stats(ts);";
 
 /// 分钟聚合桶：(pid, 启动时间 unix 秒) -> (进程名, 本分钟下载字节, 本分钟上传字节)
 /// 用 pid+start_ts 作身份键，区分同一分钟内被复用的 PID。
@@ -96,20 +112,7 @@ pub fn init(app: &AppHandle, state: &Arc<HistoryState>) -> Result<(), String> {
     let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS minute_stats (
-           ts       INTEGER NOT NULL,
-           pid      INTEGER NOT NULL,
-           start_ts INTEGER NOT NULL DEFAULT 0,
-           name     TEXT NOT NULL,
-           down     INTEGER NOT NULL,
-           up       INTEGER NOT NULL,
-           PRIMARY KEY (ts, pid, start_ts)
-         );
-         CREATE INDEX IF NOT EXISTS idx_minute_stats_ts ON minute_stats(ts);",
-    )
-    .map_err(|e| format!("初始化历史库失败: {e}"))?;
+    conn.execute_batch(SCHEMA_SQL).map_err(|e| format!("初始化历史库失败: {e}"))?;
     migrate_schema(&conn).map_err(|e| format!("迁移历史库失败: {e}"))?;
 
     *state.conn.lock().unwrap() = conn;
@@ -362,6 +365,68 @@ pub fn history_stats(app: AppHandle) -> Result<String, String> {
     .map_err(|e| format!("历史概览序列化失败: {e}"))
 }
 
+/// 任意时间区间的聚合查询：按桶（秒）分组。bucket 取值：
+/// 3600 = 小时（整小时偏移的时区下与本地小时对齐）、604800 = 7 天、
+/// 0 = 本地日（strftime start of day，跨夏令时也对）。
+/// SQL 抽成独立函数供单测直接打内存库。
+fn query_range_buckets(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+    bucket: i64,
+) -> rusqlite::Result<Vec<RangeRow>> {
+    let sql = if bucket == HOUR {
+        "SELECT (ts/3600)*3600 AS bts, name, SUM(down) AS down, SUM(up) AS up
+         FROM minute_stats WHERE ts >= ?1 AND ts < ?2
+         GROUP BY bts, name ORDER BY bts"
+    } else if bucket == WEEK {
+        "SELECT (ts/604800)*604800 AS bts, name, SUM(down) AS down, SUM(up) AS up
+         FROM minute_stats WHERE ts >= ?1 AND ts < ?2
+         GROUP BY bts, name ORDER BY bts"
+    } else {
+        "SELECT CAST(strftime('%s', ts, 'unixepoch', 'localtime', 'start of day') AS INTEGER) AS bts,
+                name, SUM(down) AS down, SUM(up) AS up
+         FROM minute_stats WHERE ts >= ?1 AND ts < ?2
+         GROUP BY bts, name ORDER BY bts"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![start, end], |r| {
+        Ok(RangeRow {
+            ts: r.get(0)?,
+            name: r.get(1)?,
+            down: r.get(2)?,
+            up: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 区间聚合结果行。ts 为桶起点（本地日桶 = 本地零点）。
+#[derive(serde::Serialize)]
+pub struct RangeRow {
+    ts: i64,
+    name: String,
+    down: i64,
+    up: i64,
+}
+
+/// 任意时间区间的聚合查询：统计屏「自定义时间」的数据源。
+/// 与 history_daily（按天、给检查栏 30 天小图复用）不同，这里支持小时粒度。
+#[tauri::command]
+pub fn history_range(app: AppHandle, start: i64, end: i64, bucket: i64) -> Result<String, String> {
+    let path = data_dir(&app)?.join(DB_FILE);
+    let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(3))
+        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+    let rows = query_range_buckets(&conn, start, end, bucket)
+        .map_err(|e| format!("查询区间聚合失败: {e}"))?;
+    serde_json::to_string(&rows).map_err(|e| format!("区间聚合序列化失败: {e}"))
+}
+
 /// 清空全部历史并 VACUUM 回收空间。
 #[tauri::command]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
@@ -382,4 +447,138 @@ pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
         prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn minute_of_floors_to_minute_boundary() {
+        assert_eq!(minute_of(0), 0);
+        assert_eq!(minute_of(59), 0);
+        assert_eq!(minute_of(60), 60);
+        assert_eq!(minute_of(119), 60);
+        assert_eq!(minute_of(120), 120);
+    }
+
+    #[test]
+    fn record_accumulates_within_minute() {
+        let state = HistoryState::new();
+        let snap = json!({
+            "Status": "ok",
+            "TimestampUnixMs": 1_700_000_050_000i64,
+            "Processes": [
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 100, "UploadBytes": 10},
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 50, "UploadBytes": 0},
+            ],
+        });
+        record(&state, &snap);
+
+        let bucket = state.bucket.lock().unwrap();
+        assert_eq!(bucket.len(), 1, "同 (pid, start_ts) 应合并为一行");
+        let (name, down, up) = bucket.get(&(1, 1)).expect("应有该进程条目");
+        assert_eq!((name.as_str(), *down, *up), ("a.exe", 150, 10));
+    }
+
+    #[test]
+    fn record_skips_paused_and_zero_traffic() {
+        let state = HistoryState::new();
+        record(&state, &json!({"Status": "paused", "Processes": []}));
+        record(&state, &json!({"Status": "ok", "Processes": [
+            {"Pid": 1, "DownloadBytes": 0, "UploadBytes": 0},
+        ]}));
+        let bucket = state.bucket.lock().unwrap();
+        assert!(bucket.is_empty(), "暂停帧与零流量进程不应占行");
+    }
+
+    #[test]
+    fn record_distinguishes_reused_pid_by_start_ts() {
+        let state = HistoryState::new();
+        let snap = json!({"Status": "ok", "Processes": [
+            {"Pid": 7, "StartTimeUnixMs": 1000, "Name": "old.exe", "DownloadBytes": 1, "UploadBytes": 0},
+            {"Pid": 7, "StartTimeUnixMs": 2000, "Name": "new.exe", "DownloadBytes": 2, "UploadBytes": 0},
+        ]});
+        record(&state, &snap);
+        let bucket = state.bucket.lock().unwrap();
+        assert_eq!(bucket.len(), 2, "PID 复用按启动时间拆分为两个身份");
+        assert!(bucket.contains_key(&(7, 1)));
+        assert!(bucket.contains_key(&(7, 2)));
+    }
+
+    #[test]
+    fn flush_minute_upserts_cumulatively() {
+        let state = HistoryState::new();
+        let mut conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        let ts = 1_700_000_040;
+        let mut first: Bucket = HashMap::new();
+        first.insert((1, 100), ("a.exe".into(), 100, 10));
+        flush_minute(&mut conn, &first, ts).unwrap();
+
+        let mut second: Bucket = HashMap::new();
+        second.insert((1, 100), ("a.exe".into(), 50, 5));
+        flush_minute(&mut conn, &second, ts).unwrap();
+
+        let (down, up): (i64, i64) = conn
+            .query_row(
+                "SELECT down, up FROM minute_stats WHERE ts = ?1 AND pid = 1 AND start_ts = 100",
+                params![ts],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((down, up), (150, 15), "同分钟重复落库应累加而非覆盖");
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    use rusqlite::params;
+
+    #[test]
+    fn query_range_buckets_groups_by_hour() {
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        // 小时桶与时区无关，可精确断言。三行分钟数据落在两个相邻小时。
+        let base = 1_700_000_040; // 分钟对齐
+        for (ts, down, up) in [(base, 10i64, 1i64), (base + 60, 20, 2), (base + 3660, 40, 4)] {
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', ?2, ?3)",
+                params![ts, down, up],
+            )
+            .unwrap();
+        }
+
+        let b0 = (base / HOUR) * HOUR;
+        let b1 = ((base + 3660) / HOUR) * HOUR;
+        let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR).unwrap();
+        assert_eq!(rows.len(), 2, "两个小时的桶");
+        assert_eq!((rows[0].ts, rows[0].down, rows[0].up), (b0, 30, 3));
+        assert_eq!((rows[1].ts, rows[1].down, rows[1].up), (b1, 40, 4));
+        assert!(rows[1].ts % HOUR == 0, "桶起点对齐到整小时");
+    }
+
+    #[test]
+    fn query_range_buckets_filters_out_of_range() {
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        let base = 1_700_000_040;
+        for ts in [base - 3600, base, base + 3600] {
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', 1, 0)",
+                params![ts],
+            )
+            .unwrap();
+        }
+        // 左闭右开：只包含 [base, base+3600)
+        let rows = query_range_buckets(&conn, base, base + 3600, HOUR).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts, (base / HOUR) * HOUR);
+    }
 }

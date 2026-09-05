@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPeek</title>
+  <!-- Flatpickr（MIT）默认外观在前，styles.css 里的令牌覆盖在后才能生效 -->
+  <link rel="stylesheet" href="vendor/flatpickr/flatpickr.min.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -145,11 +147,11 @@
           <div class="insp-sec insp-totals">
             <div class="insp-total-row">
               <span class="insp-total-value down" id="inspDownTotal">—</span>
-              <span class="insp-total-label">累计下载</span>
+              <span class="insp-total-label">启动以来下载</span>
             </div>
             <div class="insp-total-row">
               <span class="insp-total-value up" id="inspUpTotal">—</span>
-              <span class="insp-total-label" id="inspUpLabel">累计上传</span>
+              <span class="insp-total-label" id="inspUpLabel">启动以来上传</span>
             </div>
           </div>
 
@@ -162,7 +164,7 @@
                 <span class="up" id="inspLiveUp">▲ —</span>
               </span>
             </div>
-            <div class="chart"><canvas id="inspLiveChart"></canvas></div>
+            <div class="chart"><div class="echart" id="inspLiveChart"></div></div>
           </div>
 
           <!-- 总览态：字段组。归因说明挂在归因覆盖率上，不另设入口。 -->
@@ -248,13 +250,14 @@
           </div>
         </div>
       </div>
-      <!-- 屏 4 设置（检查栏侧）：服务健康实时读数 + 关于 + 归因边界（均为不可操作项） -->
+      <!-- 屏 4 设置（检查栏侧）：服务健康实时读数 + 关于 + 归因边界（均为不可操作项）。
+           三段必须装进 356px 的岛（§2.4，窗口固定 1180×720），段的密度靠 styles.css 的设置屏专属规则收紧。 -->
       <div class="pane" data-screen="settings" hidden>
         <div class="inspector">
           <div class="insp-sec">
             <div class="sec-head"><span class="sec-title">服务健康</span></div>
             <dl class="insp-fields">
-              <dt>采集服务</dt><dd id="svcStatus">未连接采集服务</dd>
+              <dt>采集服务</dt><dd id="svcStatus">未连接</dd>
               <dt>ETW 丢事件</dt><dd id="svcEventsLost">—</dd>
               <dt>数据目录</dt><dd class="insp-path num" id="aboutDataDir">—</dd>
             </dl>
@@ -290,9 +293,10 @@
             <span class="legend">
               <span class="down"><i></i>▼ 下载</span>
               <span class="up"><i></i>▲ 上传</span>
+              <span class="win-note">近 60 秒</span>
             </span>
           </div>
-          <div class="chart"><canvas id="bandwidthChart"></canvas></div>
+          <div class="chart"><div class="echart" id="bandwidthChart"></div></div>
         </div>
 
         <div class="vrule"></div>
@@ -334,7 +338,10 @@
           </div>
         </div>
       </div>
-      <!-- 屏 3 历史（§2.6）：柱状图直接可比、可点，这一屏不放折线图 -->
+      <!-- 屏 3 历史（§2.6）：柱状图用 vendored ECharts（ui/vendor/echarts.min.js，Apache-2.0）。
+           上传拆成独立量程的下网格：30 天里上传只有下载的 ~15%，同量程下只剩贴地条。
+           区间支持预设与自定义起止（历史屏 onEnter 经 history_range 命令取数，
+           ≤48h 按小时聚合、更长按本地日/周聚合）。 -->
       <div class="pane hist-data" data-screen="history" hidden>
         <div class="hist-toolbar">
           <div class="segmented" id="histRange">
@@ -342,11 +349,33 @@
             <button type="button" class="is-active" data-days="30">近 30 天</button>
             <button type="button" data-days="90">近 90 天</button>
           </div>
+          <button type="button" class="btn" id="histCustom" aria-expanded="false">自定义</button>
           <span class="hist-note" id="histAggNote" hidden>按周聚合</span>
           <span class="spacer"></span>
           <button type="button" class="btn" id="histExport">导出 CSV</button>
         </div>
-        <div class="chart"><canvas id="histChart"></canvas></div>
+        <div class="hist-custom" id="histCustomPop" hidden>
+          <div class="hist-custom-row">
+            <label class="hist-custom-field">开始<input type="text" id="histFrom" readonly placeholder="选择时间" /></label>
+            <span class="hist-custom-sep">→</span>
+            <label class="hist-custom-field">结束<input type="text" id="histTo" readonly placeholder="选择时间" /></label>
+          </div>
+          <div class="hist-custom-quick">
+            <button type="button" class="btn" data-quick="24h">最近 24 小时</button>
+            <button type="button" class="btn" data-quick="today">今天</button>
+            <button type="button" class="btn" data-quick="yesterday">昨天</button>
+          </div>
+          <div class="bg-actions">
+            <button type="button" class="btn is-primary" id="histApply">应用</button>
+            <button type="button" class="btn" id="histCustomClose">取消</button>
+          </div>
+          <div class="note" id="histCustomErr" hidden></div>
+        </div>
+        <div class="chart hist-main" id="histChartBox">
+          <span class="plot-tag down" aria-hidden="true">▼ 下载</span>
+          <span class="plot-tag up" aria-hidden="true">▲ 上传</span>
+          <div class="echart" id="histChart"></div>
+        </div>
       </div>
 
       <!-- 屏 0 外观：壁纸条 → 材质滑杆 → 高级折叠（语义色 / AI）。
@@ -519,6 +548,13 @@
   <div class="resize-edge" data-dir="SouthEast"></div>
 </div><!-- /.frame -->
 
+  <script>window.__BOOT_T0 = performance.now();</script>
+  <!-- ECharts 以原始文件 vendored 进仓库（离线桌面应用不走 CDN），Apache-2.0 许可内嵌于文件头。
+     只有历史屏用它；实时屏的 1Hz 折线仍是手绘 canvas（性能纪律，见 docs/技术选型.md §4.2）。 -->
+<script src="vendor/echarts.min.js"></script>
+<!-- Flatpickr（MIT）+ 中文语言包：自定义区间弹层的时间选择器 -->
+<script src="vendor/flatpickr/flatpickr.min.js"></script>
+<script src="vendor/flatpickr/zh.js"></script>
 <script src="charts.js"></script>
 <script src="theme.js"></script>
 <script src="theme-ui.js"></script>

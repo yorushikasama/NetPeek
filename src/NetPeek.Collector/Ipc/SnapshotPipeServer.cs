@@ -22,12 +22,14 @@ public sealed class SnapshotPipeServer
     /// <summary>
     /// 阻塞等待一个客户端连接，然后在其存续期间按 intervalMs 推送 <paramref name="produceSnapshot"/> 的结果。
     /// 客户端断开后返回，由调用方决定是否重新监听。
+    /// <paramref name="pipeName"/> 仅供测试注入（默认用生产管道名），避免测试与真实服务争抢管道。
     /// </summary>
-    public async Task ServeAsync(Func<TrafficSnapshot> produceSnapshot, int intervalMs, CancellationToken ct)
+    public async Task ServeAsync(Func<TrafficSnapshot> produceSnapshot, int intervalMs, CancellationToken ct,
+        string? pipeName = null)
     {
         // 必须用带 PipeSecurity 的重载：默认 DACL 会放通本机任意用户读取全部进程流量。
         await using var server = NamedPipeServerStreamAcl.Create(
-            IpcConstants.PipeName,
+            pipeName ?? IpcConstants.PipeName,
             PipeDirection.Out,
             1,
             PipeTransmissionMode.Byte,
@@ -36,7 +38,7 @@ public sealed class SnapshotPipeServer
             outBufferSize: 0,
             PipeSecurityPolicy.CreateForOutboundSnapshot());
 
-        _logger.LogInformation("等待 UI 连接命名管道 {Pipe}", IpcConstants.PipeName);
+        _logger.LogInformation("等待 UI 连接命名管道 {Pipe}", pipeName ?? IpcConstants.PipeName);
         await server.WaitForConnectionAsync(ct);
         _logger.LogInformation("UI 已连接");
 

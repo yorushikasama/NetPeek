@@ -17,7 +17,9 @@
         "minWidth": 940,
         "minHeight": 620,
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "visible": false,
+        "shadow": false
       },
       {
         "label": "mini",
@@ -32,7 +34,8 @@
         "skipTaskbar": true,
         "decorations": false,
         "transparent": true,
-        "visible": false
+        "visible": false,
+        "shadow": false
       }
     ],
     "security": {

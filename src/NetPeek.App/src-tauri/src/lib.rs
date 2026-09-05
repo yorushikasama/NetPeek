@@ -44,6 +44,7 @@ pub fn run() {
             settings::data_dir_path,
             history::query_history,
             history::history_daily,
+            history::history_range,
             history::history_stats,
             history::clear_history,
             history::set_retention,
@@ -53,15 +54,37 @@ pub fn run() {
             mini::show_main_window,
         ])
         .setup(|app| {
-            // 历史数据（SQLite 分钟聚合）与设置（settings.json + 注册表）。
-            // 先 manage 状态再初始化，保证任何窗口前端尽早 invoke 也不会命中未注册状态。
+            let setup_start = std::time::Instant::now();
+
+            // 历史库初始化挪出关键路径：setup 阻塞着窗口与 WebView 的创建，
+            // 开库 + 过期清理不该让用户等。占位内存库先顶住，真实库就绪后热替换。
             let history_state = history::HistoryState::new();
             app.manage(history_state.clone());
-            // 历史库初始化失败不阻断启动：用占位内存库继续运行，历史仅不落盘。
-            if let Err(e) = history::init(app.handle(), &history_state) {
-                history::log_error(&history_state, &format!("初始化历史数据库失败：{e}"));
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    if let Err(e) = history::init(&app_handle, &history_state) {
+                        history::log_error(&history_state, &format!("初始化历史数据库失败：{e}"));
+                    }
+                    eprintln!("[netpeek] history init {}ms", t.elapsed().as_millis());
+                    history::spawn(history_state);
+                });
             }
-            history::spawn(history_state);
+
+            // 兜底：前端 8 秒内没把窗口显示出来（脚本崩溃等极端情况），
+            // 强制显示，避免「托盘有图标、桌面无窗口」的死局。
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        if !w.is_visible().unwrap_or(true) {
+                            let _ = w.show();
+                        }
+                    }
+                });
+            }
 
             // 设置加载失败回退默认值，不让启动崩溃。
             let settings_state = settings::init(app.handle()).unwrap_or_else(|e| {
@@ -120,6 +143,7 @@ pub fn run() {
             // 保持托盘图标存活（否则 setup 结束后会被释放）。
             app.manage(tray);
 
+            eprintln!("[netpeek] setup {}ms", setup_start.elapsed().as_millis());
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetPeek.Shared", "src\NetPe
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetPeek.Collector", "src\NetPeek.Collector\NetPeek.Collector.csproj", "{AE6EBCE7-8A30-469E-A826-D6141DD7AD46}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetPeek.Collector.Tests", "src\NetPeek.Collector.Tests\NetPeek.Collector.Tests.csproj", "{8095F663-9A4F-4171-99C5-9BE8B63A8E10}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,9 +28,14 @@ Global
 		{AE6EBCE7-8A30-469E-A826-D6141DD7AD46}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{AE6EBCE7-8A30-469E-A826-D6141DD7AD46}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{AE6EBCE7-8A30-469E-A826-D6141DD7AD46}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8095F663-9A4F-4171-99C5-9BE8B63A8E10}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8095F663-9A4F-4171-99C5-9BE8B63A8E10}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8095F663-9A4F-4171-99C5-9BE8B63A8E10}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8095F663-9A4F-4171-99C5-9BE8B63A8E10}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{48680ABF-8505-4271-A7E8-52D1A2500595} = {A4B3B65B-F18C-4FEF-95AB-B150E32F882D}
 		{AE6EBCE7-8A30-469E-A826-D6141DD7AD46} = {A4B3B65B-F18C-4FEF-95AB-B150E32F882D}
+		{8095F663-9A4F-4171-99C5-9BE8B63A8E10} = {A4B3B65B-F18C-4FEF-95AB-B150E32F882D}
 	EndGlobalSection
 EndGlobal

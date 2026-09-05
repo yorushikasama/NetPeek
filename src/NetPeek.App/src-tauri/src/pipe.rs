@@ -152,3 +152,39 @@ fn read_session(app: &AppHandle, icons: &IconTable) -> std::io::Result<()> {
     let _ = app.emit("pipe-status", "disconnected");
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rehydrate_stores_first_frame_and_backfills_rest() {
+        let table = IconTable::new();
+
+        // 首帧：带 base64 的图标入表；空 IconId 的不入表
+        let mut first = serde_json::json!({
+            "Processes": [
+                {"IconId": "A", "IconBase64": "b64-a"},
+                {"IconId": "", "IconBase64": "b64-no-id"},
+            ]
+        });
+        table.rehydrate(&mut first);
+
+        // 后续帧：A 只带 id → 回填；B 首次带 base64 → 记录；C 未知 → 保持空走占位图
+        let mut second = serde_json::json!({
+            "Processes": [
+                {"IconId": "A", "IconBase64": ""},
+                {"IconId": "B", "IconBase64": "b64-b"},
+                {"IconId": "C", "IconBase64": ""},
+            ]
+        });
+        table.rehydrate(&mut second);
+        assert_eq!(second["Processes"][0]["IconBase64"], "b64-a", "应按 id 回填");
+        assert_eq!(second["Processes"][2]["IconBase64"], "", "未知 id 不应凭空造图");
+
+        // 第三帧：B 只带 id 也能回填（说明第二帧的 base64 已入表）
+        let mut third = serde_json::json!({"Processes": [{"IconId": "B", "IconBase64": ""}]});
+        table.rehydrate(&mut third);
+        assert_eq!(third["Processes"][0]["IconBase64"], "b64-b");
+    }
+}
