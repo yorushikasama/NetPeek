@@ -1,11 +1,45 @@
-/* NetPeek 小窗样式：能量球（100x100 透明窗口）与迷你窗（320x300 面板）双形态。
-   窗口透明（transparent: true），所以 body 本身无底色，只有形态元素有背景。 */
+/* NetPeek 小窗样式（§2.9）：能量球（窗口 108×108，球 92×92）与迷你窗（320×300）双形态。
+   窗口 transparent: true，body 无底色，只有形态元素有背景。
+
+   三条和主界面不同的规定：
+   - 不做 backdrop-filter。透明窗口后面没有网页内容可采样，Windows 上这一项在透明窗口里
+     行为不一致（有时糊成灰块、有时完全无效），靠 0.88 的底色 + 外发光已经够。
+   - 令牌在这里自带一整套默认值。小窗是独立 webview，主界面 setTheme 设在
+     documentElement 上的变量不会继承过来；mini.js 启动时自己读一遍主题配置覆盖颜色，
+     但那是异步的，第一帧必须能看。
+   - 字体与圆角不是主题项（applyTheme 只改颜色和三个调节量），所以只在这里定义一次，
+     值与 styles.css 保持一致 —— 两个窗口的数字必须是同一套字身宽度。 */
+
+:root {
+  --surface: #1e1a16;
+  --surface-hi: #2f2924;
+  --text: #f6efe8;
+  --text-muted: #b4a99e;
+  --down: #f0913f;
+  --up: #7fa8c9;
+  --ok: #6fc884;
+  --warn: #ebbd57;
+  --error: #f97770;
+  --line: rgba(255, 255, 255, 0.10);
+  --stroke: rgba(255, 255, 255, 0.18);
+  --edge: rgba(240, 145, 63, 0.26);
+  --glow-warm: rgba(240, 145, 63, 0.10);
+  --island-op: 0.88;
+
+  --r-island: 16px;
+  --r-ctl: 8px;
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+  --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
+
+  --t-fast: 150ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* 下面的 .orb / .panel / .orb-pause 都用 display: flex 布局，作者样式优先级高于
-   浏览器默认表里的 [hidden] { display: none }，不加这条 hidden 属性会失效、
-   两种形态同时渲染。 */
+/* .orb / .panel / .orb-nums 都是 display: flex，作者样式优先级高于浏览器默认表里的
+   [hidden] { display: none }，不加这条 hidden 属性会失效、两种形态同时渲染。 */
 [hidden] { display: none !important; }
 
 html, body {
@@ -13,60 +47,73 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: transparent;
-  font-family: system-ui, "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   user-select: none;
-  color: var(--text, #f2e6dc);
+  color: var(--text);
 }
 
 /* ---------- 能量球 ---------- */
 
 .orb {
   position: absolute;
-  width: 100px;
-  height: 100px;
+  /* 92 的球放在 108 的窗口里居中，四周各 8px —— 外发光是 20px 半径，
+     窗口再小一点就被边缘裁成一圈硬边。 */
+  width: 92px;
+  height: 92px;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
+  border: 1px solid var(--edge);
+  box-shadow: 0 0 20px var(--glow-warm);
+  cursor: grab;
+}
+.orb:active { cursor: grabbing; }
+
+/* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开） */
+.orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.orb-gauge .track { stroke: var(--line); }
+.orb-gauge .arc-down { stroke: var(--down); }
+.orb-gauge .arc-up { stroke: var(--up); }
+
+/* 92px 的球扣掉两圈环，中心可写字的圆直径只剩约 76px，最上面那行更窄（约 66px）。
+   所以球上的下载只排「数值 + 单位」，方向靠琥珀色和下面那行的 ↑ 区分；
+   数值也压到最多 3 个字身（见 mini.js 的 fmtOrb）。 */
+.orb-nums {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 30% 28%, #2b3542 0%, #14181f 70%);
-  border: 1px solid var(--border, #2a2f38);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
-  cursor: grab;
+  gap: 1px;
+  pointer-events: none;
   text-align: center;
 }
-.orb:active { cursor: grabbing; }
-
 .orb-down {
-  font-size: 17px;
-  font-weight: 700;
-  color: var(--down, #f0913f);
-  line-height: 1.1;
-  max-width: 92px;
-  overflow: hidden;
+  color: var(--down);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.orb-up {
-  font-size: 11px;
-  color: var(--up, #7fa8c9);
   line-height: 1.1;
 }
-.orb-pause {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 30px;
-  background: rgba(10, 12, 16, 0.55);
-  border-radius: 50%;
-  color: var(--warn, #d9b44a);
+.orb-down .v { font-size: 20px; font-weight: 600; }
+.orb-down .u { font-size: 10px; font-weight: 500; margin-left: 2px; }
+.orb-up {
+  color: var(--up);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  white-space: nowrap;
+  line-height: 1.1;
 }
+.orb-up .a { font-family: var(--font-ui); margin-right: 2px; }
+.orb-up .u { margin-left: 2px; }
+
+/* 暂停：环变虚线（虚线段由 mini.js 算进 stroke-dasharray）+ 数字降到 60%。
+   不再盖一层半透明遮罩加 30px 的 ⏸ —— 那把球上唯一的数字整个糊掉了。 */
+.orb.is-paused .orb-nums { opacity: 0.6; }
 
 /* ---------- 迷你窗 ---------- */
 
@@ -75,94 +122,165 @@ html, body {
   inset: 0;
   display: flex;
   flex-direction: column;
-  background: var(--panel, rgba(27, 31, 38, 0.97));
-  border: 1px solid var(--border, #2a2f38);
-  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-island);
   overflow: hidden;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
+/* 头 40 / 总量 52 / 脚 44 定高（§2.9 分段表），列表吃掉剩下的 162。
+   横向内边距一律 14：列表行的内容左沿是 8（列表内边距）+ 6（行内边距）= 14，
+   头、总量、脚跟着对齐，四段的左右边才在一条线上。 */
 .panel-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border, #2a2f38);
+  gap: 8px;
+  flex: none;
+  height: 40px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--line);
   cursor: grab;
 }
 .panel-head:active { cursor: grabbing; }
 .panel-title { font-size: 13px; font-weight: 600; flex: 1; }
-.panel-status { font-size: 11px; color: var(--muted, #a89184); }
-.panel-status.ok { color: var(--ok, #6fb87a); }
-.panel-status.warn { color: var(--warn, #d9b44a); }
-.panel-status.err { color: var(--error, #e14b3a); }
+
+/* 状态圆点：颜色就是状态，完整文案挂在 title / aria-label 上 */
+.panel-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.panel-dot.is-ok { background: var(--ok); }
+.panel-dot.is-warn { background: var(--warn); }
+.panel-dot.is-error { background: var(--error); }
 
 .pbtn {
   width: 24px;
   height: 24px;
+  flex: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   background: transparent;
-  color: var(--muted, #a89184);
+  color: var(--text-muted);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
 }
-.pbtn:hover { background: var(--border, #2a2f38); color: var(--text, #f2e6dc); }
+.pbtn:hover { background: var(--surface-hi); color: var(--text); }
+.pbtn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
 
 .panel-total {
   display: flex;
-  justify-content: space-around;
-  padding: 10px 8px;
-  font-size: 15px;
-  font-weight: 600;
-  border-bottom: 1px solid var(--border, #2a2f38);
+  align-items: center;
+  flex: none;
+  height: 52px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
 }
-.pt-down { color: var(--down, #f0913f); }
-.pt-up { color: var(--up, #7fa8c9); }
+.pt {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 上传靠右：两个数都左对齐时，右边会空出 60 多像素，而下面每行的速率列都顶到右沿，
+   总量带就成了一条没写完的行。下载贴左、上传贴右，和列表的两个边正好对齐。 */
+.pt.is-up { justify-content: flex-end; }
+.pt .a { font-family: var(--font-ui); font-size: 12px; font-style: normal; }
+.pt .v { font-size: 20px; font-weight: 600; }
+.pt .u { font-size: 12px; font-weight: 500; font-style: normal; }
+.pt.is-down { color: var(--down); }
+.pt.is-up { color: var(--up); }
 
 .panel-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 6px 10px;
+  /* 上下不留内边距：面板 300 减去 1px 边框两条、头 40、总量 52、脚 44，列表净高只有
+     162 —— 再加 2px 上下内边距，5 行 32 就是 164，会多出一条 6px 滚动条把行挤窄。 */
+  padding: 0 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
+/* flex:none：列向 flex 里的行默认可压缩，5 行 32 塞进 160 的槽时任何一点内边距都会
+   把行一起压矮、图标跟着挤扁 —— 宁可溢出滚动，不要偷偷变矮。 */
 .pitem {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  flex: none;
+  height: 32px;
+  padding: 0 6px;
+  border-radius: var(--r-ctl);
+  background-repeat: no-repeat;
 }
-.pitem img { width: 18px; height: 18px; border-radius: 4px; flex: none; }
-.pitem .pname {
-  flex: 1;
-  font-size: 12px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.pitem img { width: 18px; height: 18px; border-radius: 4px; flex: none; object-fit: contain; }
+/* 取不到真实图标时退回首字母牌，和主界面进程表一套观感；空灰方块会在行首读成一条竖色条 */
+.pitem .pico {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: var(--surface-hi);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
 }
-.pitem .prate { font-size: 11px; color: var(--muted, #a89184); }
-.pitem .prate.down { color: var(--down, #f0913f); }
-.pitem .prate.up { color: var(--up, #7fa8c9); }
+.pitem .pname { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pitem .prate {
+  flex: none;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.pitem .prate.is-down { color: var(--down); }
+.pitem .prate.is-up { color: var(--up); }
+.panel-empty { padding: 10px 6px; font-size: 12px; color: var(--text-muted); }
 
+/* 脚 44：只剩「暂停 / 主界面」两个键。「退出」搬去托盘右键菜单 ——
+   和「主界面」并排等宽时误点一下就把采集停了，那不该是随手可及的位置。 */
 .panel-foot {
   display: flex;
-  gap: 6px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border, #2a2f38);
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 44px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
 }
 .pact {
   flex: 1;
-  padding: 7px 0;
-  border: 1px solid var(--border, #2a2f38);
-  border-radius: 8px;
+  height: 28px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-ctl);
   background: transparent;
-  color: var(--text, #f2e6dc);
+  color: var(--text);
+  font-family: inherit;
   font-size: 12px;
   cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
 }
-.pact:hover { border-color: var(--down, #f0913f); }
+.pact:hover { border-color: var(--edge); background: var(--surface-hi); }
+.pact:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
+.pact:disabled { opacity: 0.5; cursor: default; }
+
+/* 滚动条自绘：系统经典滚动条会在暗色面板里画出亮灰滑块和上下箭头按钮。
+   注意不能同时设 scrollbar-width —— 一旦设了，Chromium 就忽略下面这些规则。 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--stroke);
+  border: 1px solid transparent;
+  background-clip: padding-box;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; }

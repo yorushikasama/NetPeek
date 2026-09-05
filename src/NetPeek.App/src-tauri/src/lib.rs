@@ -39,7 +39,6 @@ pub fn run() {
             mini::set_mini_shape,
             mini::send_control_command,
             mini::show_main_window,
-            mini::quit_app,
         ])
         .setup(|app| {
             // 历史数据（SQLite 分钟聚合）与设置（settings.json + 注册表）。
@@ -89,7 +88,7 @@ pub fn run() {
                         paused_flag.store(new_paused, Ordering::SeqCst);
                         pipe::send_control(if new_paused { "pause" } else { "resume" });
                         let _ = pause_item
-                            .set_text(if new_paused { "继续监控" } else { "暂停监控" });
+                            .set_text(if new_paused { "恢复监控" } else { "暂停监控" });
                     }
                     "quit" => app.exit(0),
                     _ => {}

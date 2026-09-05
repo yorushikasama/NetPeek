@@ -7,27 +7,38 @@
   <link rel="stylesheet" href="mini.css" />
 </head>
 <body>
-  <!-- 能量球形态（默认，100x100） -->
+  <!-- 能量球形态（默认，窗口 108×108，球 92×92，四周 8px 留给外发光） -->
   <!-- 不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
        球点不开。拖动由 mini.js 的位移阈值 + startDragging() 自己处理。 -->
-  <div id="orb" class="orb">
-    <div class="orb-down" id="orbDown">--</div>
-    <div class="orb-up" id="orbUp">--</div>
-    <div class="orb-pause" id="orbPause" hidden>⏸</div>
+  <div id="orb" class="orb" title="NetPeek">
+    <!-- 环形规：外圈 4px 琥珀 = 下载速率 ÷ 近 60 秒峰值，内圈 2px 钢蓝 = 上传（§2.9）。
+         轨道垫在下面，没有轨道就只剩一段孤立弧线，读不出「相对水位」。 -->
+    <svg class="orb-gauge" viewBox="0 0 92 92" aria-hidden="true">
+      <g transform="rotate(-90 46 46)" fill="none" stroke-linecap="butt">
+        <circle class="track" cx="46" cy="46" r="44" stroke-width="4" />
+        <circle class="track" cx="46" cy="46" r="39" stroke-width="2" />
+        <circle id="orbArcDown" class="arc arc-down" cx="46" cy="46" r="44" stroke-width="4" />
+        <circle id="orbArcUp" class="arc arc-up" cx="46" cy="46" r="39" stroke-width="2" />
+      </g>
+    </svg>
+    <div class="orb-nums">
+      <div class="orb-down"><span class="v" id="orbDownV">--</span><span class="u" id="orbDownU"></span></div>
+      <div class="orb-up"><span class="a">↑</span><span class="v" id="orbUpV">--</span><span class="u" id="orbUpU"></span></div>
+    </div>
   </div>
 
-  <!-- 迷你窗形态（点击能量球展开，320x300） -->
+  <!-- 迷你窗形态（点击能量球展开，320×300） -->
   <div id="panel" class="panel" hidden>
     <div class="panel-head">
       <span class="panel-title">NetPeek</span>
-      <span class="panel-status" id="panelStatus">--</span>
-      <button id="btnCollapse" class="pbtn" title="收起为能量球">—</button>
-      <button id="btnClose" class="pbtn" title="隐藏小窗">×</button>
+      <span class="panel-dot" id="panelDot" role="img" aria-label="未连接采集服务" title="未连接采集服务"></span>
+      <button id="btnCollapse" class="pbtn" title="收起为能量球" aria-label="收起为能量球">—</button>
+      <button id="btnClose" class="pbtn" title="隐藏小窗" aria-label="隐藏小窗">×</button>
     </div>
 
     <div class="panel-total">
-      <span class="pt-down">↓ <b id="ptDown">--</b></span>
-      <span class="pt-up">↑ <b id="ptUp">--</b></span>
+      <span class="pt is-down"><i class="a">↓</i><b class="v" id="ptDownV">--</b><i class="u" id="ptDownU"></i></span>
+      <span class="pt is-up"><i class="a">↑</i><b class="v" id="ptUpV">--</b><i class="u" id="ptUpU"></i></span>
     </div>
 
     <div class="panel-list" id="panelList"></div>
@@ -35,10 +46,11 @@
     <div class="panel-foot">
       <button id="btnPause" class="pact">暂停</button>
       <button id="btnMain" class="pact">主界面</button>
-      <button id="btnQuit" class="pact">退出</button>
     </div>
   </div>
 
+  <!-- theme.js 只为拿 applyTheme / initTheme：小窗是独立 webview，CSS 变量不跨窗口共享 -->
+  <script src="theme.js"></script>
   <script src="mini.js"></script>
 </body>
 </html>

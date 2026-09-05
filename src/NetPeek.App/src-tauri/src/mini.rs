@@ -1,14 +1,16 @@
-// NetPeek 小窗（屏 2）：能量球 ⇄ 迷你窗 双形态，共用 label="mini" 的同一个窗口。
-// - 能量球形态：100x100 圆形（transparent 窗口），显示总下载/上传速率，点击展开为迷你窗。
-// - 迷你窗形态：320x300 矩形面板，Top 3 应用 + 总速率 + 暂停/主界面/退出。
+// NetPeek 小窗（屏 2，§2.9）：能量球 ⇄ 迷你窗 双形态，共用 label="mini" 的同一个窗口。
+// - 能量球形态：窗口 108×108（球 92，四周 8px 留给外发光，窗口再小发光就被边缘裁掉），
+//   环形规显示下载/上传相对近 60 秒峰值的水位，点击展开为迷你窗。
+// - 迷你窗形态：320×300 面板，Top 5 应用 + 总速率 + 暂停/主界面。
+//   「退出」在托盘右键菜单，不在这里。
 // - 页面 mini.html 独立文件（与主界面同 frontendDist，互不依赖）；
 //   数据来自主进程广播的 snapshot 事件（app.emit 会广播到所有窗口）。
 // - 形态切换 = 前端调 set_mini_shape：Rust 侧保持窗口中心不动并夹在屏幕内，再改尺寸。
 
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager};
 
-const ORB_W: f64 = 100.0;
-const ORB_H: f64 = 100.0;
+const ORB_W: f64 = 108.0;
+const ORB_H: f64 = 108.0;
 const PANEL_W: f64 = 320.0;
 const PANEL_H: f64 = 300.0;
 
@@ -82,12 +84,5 @@ pub fn show_main_window(app: AppHandle) -> Result<(), String> {
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
-    Ok(())
-}
-
-/// 退出程序（迷你窗「退出」按钮）。
-#[tauri::command]
-pub fn quit_app(app: AppHandle) -> Result<(), String> {
-    app.exit(0);
     Ok(())
 }

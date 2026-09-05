@@ -79,8 +79,21 @@
     }
     bgDataUrl = bg;
     T.applyTheme({ ...theme, background: bg });
+    broadcastTokens(theme);
     els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
     els.bgStatus.className = 'note truncate';
+  }
+
+  // 小窗是另一个 webview，documentElement 上的 CSS 变量不跨窗口继承，得把令牌广播过去
+  // 它才跟着改（§2.9）。背景图剥掉：小窗不做 backdrop，data URL 底图有几 MB，
+  // 没必要在事件里搬一遍。节流是因为拖滑块每帧都会走一次 applyWithBg。
+  let broadcastTimer = 0;
+  function broadcastTokens(theme) {
+    if (!window.__TAURI__) return;
+    clearTimeout(broadcastTimer);
+    broadcastTimer = setTimeout(() => {
+      window.__TAURI__.event.emit('theme-changed', { ...theme, background: '' }).catch(() => {});
+    }, 120);
   }
 
   // ---------- 标准模式：从背景图取色 ----------
