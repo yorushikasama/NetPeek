@@ -119,14 +119,11 @@
 
     <!-- ========== 留白区（§2.1）：底图的地盘，不放 UI ========== -->
     <div class="stage">
-      <!-- 无底图态是「留白区不放 UI」唯一的例外（§2.8）。措辞是邀请而不是故障播报：
-           不设背景图界面也完整可用，这块留白本来就是给底图的地盘。 -->
-      <div class="stage-empty">
-        <div class="stage-empty-title">这片留白是给背景图的</div>
-        <div class="stage-empty-note">
-          选一张图，四块面板会浮在它上面，主色也从图里取。不设也能用，界面走当前的暗色令牌。
-        </div>
-        <button type="button" class="btn is-primary" id="stagePickBg">选择背景图</button>
+      <!-- 无背景时唯一的提示：右下角一行小字，可关（bgHintDismissed 记住选择）。
+           壁纸主入口在外观屏的壁纸条，这里只是路过时的一句邀请，不是广告牌。 -->
+      <div class="stage-hint" id="stageHint" hidden>
+        <span>这里给壁纸留了位置</span>
+        <button type="button" class="btn" id="stagePickBg">挑一张</button>
       </div>
     </div>
     <!-- ========== 检查栏岛（§2.4）========== -->
@@ -217,42 +214,65 @@
         </div>
       </div>
 
-      <!-- 屏 0 外观（§2.7）：模式三选一 + 背景图 -->
+      <!-- 屏 0 外观（检查栏侧）：当前主题卡 + 对比度校验结果 + 保存/主题列表 -->
       <div class="pane" data-screen="theme" hidden>
-        <div class="form">
-          <div class="col-title">主题模式</div>
-          <div class="seg-radio" role="radiogroup" aria-label="主题模式">
-            <label><input type="radio" name="tmode" value="standard" checked /><span>标准取色</span></label>
-            <label><input type="radio" name="tmode" value="ai" /><span>AI 自适应</span></label>
-            <label><input type="radio" name="tmode" value="custom" /><span>定制</span></label>
+        <div class="inspector">
+          <div class="insp-sec insp-head">
+            <span class="insp-icon is-theme-chip" id="curThemeChip" aria-hidden="true"></span>
+            <div class="insp-titles">
+              <div class="insp-name truncate" id="curThemeName">默认深色</div>
+              <div class="insp-path" id="curThemeMeta">—</div>
+            </div>
           </div>
-          <div class="note" id="modeNote">从背景图提主色，完全离线、即时生效。</div>
 
-          <div class="col-title" style="margin-top:6px">背景图</div>
-          <div class="bg-thumb" id="bgThumb"></div>
-          <div class="bg-actions">
-            <button type="button" class="btn" id="bgPick">选择图片…</button>
-            <button type="button" class="btn" id="bgClear">无背景</button>
-            <input type="file" id="bgFile" accept="image/*" hidden />
+          <div class="insp-sec">
+            <div class="sec-head">
+              <span class="sec-title">对比度</span>
+              <span class="sec-aside is-ok" id="contrastBadge">✓ 全部达标</span>
+            </div>
+            <div class="note">文字与语义色以岛屿底色为参照做 WCAG 4.5:1 校正，不达标的项会被自动调亮或压暗。</div>
           </div>
-          <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
+
+          <div class="insp-sec">
+            <div class="sec-head"><span class="sec-title">保存当前为主题</span></div>
+            <div class="bg-actions">
+              <input type="text" id="themeName" class="name-input" placeholder="主题名称" />
+              <button type="button" class="btn is-primary" id="themeSave">保存</button>
+            </div>
+          </div>
+
+          <div class="insp-sec" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div class="sec-head"><span class="sec-title">我的主题</span></div>
+            <div class="theme-list" id="themeList"></div>
+            <button type="button" class="btn" id="themeReset" style="margin-top:auto">还原默认</button>
+          </div>
         </div>
       </div>
-      <!-- 屏 4 设置（§2.7）：可操作项都在数据岛，检查栏放不可操作的说明 -->
+      <!-- 屏 4 设置（检查栏侧）：服务健康实时读数 + 关于 + 归因边界（均为不可操作项） -->
       <div class="pane" data-screen="settings" hidden>
-        <div class="form">
-          <div class="col-title">关于</div>
-          <div class="note">NetPeek v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</div>
-          <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
-
-          <div class="col-title" style="margin-top:6px">归因边界</div>
-          <div class="attrib-note">
-            <ul>
-              <li>按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
-              <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
-              <li>重传单独统计，不混入上传量。</li>
-              <li>代理 / VPN / WSL 的流量归到代理进程本身，不还原到发起方。</li>
-            </ul>
+        <div class="inspector">
+          <div class="insp-sec">
+            <div class="sec-head"><span class="sec-title">服务健康</span></div>
+            <dl class="insp-fields">
+              <dt>采集服务</dt><dd id="svcStatus">未连接采集服务</dd>
+              <dt>ETW 丢事件</dt><dd id="svcEventsLost">—</dd>
+              <dt>数据目录</dt><dd class="insp-path num" id="aboutDataDir">—</dd>
+            </dl>
+          </div>
+          <div class="insp-sec">
+            <div class="sec-head"><span class="sec-title">关于</span></div>
+            <div class="note">NetPeek v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</div>
+          </div>
+          <div class="insp-sec">
+            <div class="sec-head"><span class="sec-title">归因边界</span></div>
+            <div class="attrib-note">
+              <ul>
+                <li>按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
+                <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
+                <li>重传单独统计，不混入上传量。</li>
+                <li>代理 / VPN / WSL 的流量归到代理进程本身，不还原到发起方。</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
@@ -329,79 +349,104 @@
         <div class="chart"><canvas id="histChart"></canvas></div>
       </div>
 
-      <!-- 屏 0 外观（§2.7）：留白区和其余三岛都还在画面里，改令牌当场生效，不造假预览卡 -->
-      <div class="pane cols3" data-screen="theme" hidden>
-        <div class="col">
-          <div class="col-title">微调</div>
-          <div class="slider">
-            <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
-            <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
-                   aria-label="岛屿不透明度" />
+      <!-- 屏 0 外观：壁纸条 → 材质滑杆 → 高级折叠（语义色 / AI）。
+           没有互斥的「模式」：换壁纸自动取色、AI 生成、预设起步都是往同一份当前令牌里写，
+           色板在「高级微调」开关下任何来源都可手调。检查栏放当前主题卡与主题列表。 -->
+      <div class="pane" data-screen="theme" hidden>
+        <div class="form">
+          <div class="sec-head">
+            <span class="col-title">壁纸</span>
+            <span class="note truncate" id="bgStatus">未设置背景（使用面板底色）</span>
           </div>
-          <div class="slider">
-            <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
-            <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
-                   aria-label="全局压暗" />
+          <div class="wall-strip" role="group" aria-label="壁纸">
+            <button type="button" class="wall-thumb" data-wall="builtin:wall-1" title="熔金暮色">
+              <img src="wallpapers/wall-1.jpg" alt="内置壁纸：熔金暮色" />
+            </button>
+            <button type="button" class="wall-thumb" data-wall="builtin:wall-2" title="钢蓝深海">
+              <img src="wallpapers/wall-2.jpg" alt="内置壁纸：钢蓝深海" />
+            </button>
+            <button type="button" class="wall-thumb" data-wall="builtin:wall-3" title="石墨">
+              <img src="wallpapers/wall-3.jpg" alt="内置壁纸：石墨" />
+            </button>
+            <button type="button" class="wall-thumb is-action" id="bgPick" title="选择本地图片" aria-label="选择本地图片">＋</button>
+            <button type="button" class="wall-thumb is-action" id="bgClear" title="不使用背景" aria-label="不使用背景">无</button>
+            <input type="file" id="bgFile" accept="image/*" hidden />
           </div>
-          <div class="slider">
-            <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
-            <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
-          </div>
-          <div class="note">不透明度下限 0.82 是实测值，再低会跌破 4.5:1。</div>
-          <div id="aiSection" hidden style="display:flex; flex-direction:column; gap:10px;">
-            <div class="col-title" style="margin-top:6px">AI 提供方</div>
-            <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
-            <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
-            <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
-            <label class="check">
-              <input type="checkbox" id="aiConsent" />
-              <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
-            </label>
-            <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
-            <div class="note" id="aiStatus"></div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="col-title">语义色</div>
-          <div class="swatches">
-            <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
-            <label class="swatch"><input type="color" id="cPanel" /><span>岛屿</span></label>
-            <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
-            <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
-            <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
-              <input type="color" id="cDown" /><span>下载 🔒</span></label>
-            <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
-              <input type="color" id="cUp" /><span>上传 🔒</span></label>
-            <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
-            <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
-            <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
-            <label class="swatch"><input type="color" id="cBorder" /><span>描边</span></label>
-          </div>
-          <div class="bg-actions" style="margin-top:6px">
-            <button type="button" class="btn" data-preset="dark">经典深色</button>
-            <button type="button" class="btn" data-preset="light">经典浅色</button>
-            <button type="button" class="btn" data-preset="contrast">高对比</button>
-          </div>
-          <div class="note">下载与上传语义锁定：可调明度，不能换语义。</div>
-        </div>
 
-        <div class="col">
-          <div class="col-title">主题列表</div>
-          <div class="bg-actions">
-            <input type="text" id="themeName" placeholder="主题名称"
-                   style="flex:1; min-width:0; height:30px; padding:0 10px; border-radius:8px;
-                          border:1px solid var(--stroke); background:transparent; color:var(--text);
-                          font:inherit; font-size:13px;" />
-            <button type="button" class="btn is-primary" id="themeSave">保存</button>
+          <div class="sec-head" style="margin-top:2px"><span class="col-title">材质</span></div>
+          <div class="material-row">
+            <div class="slider">
+              <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
+              <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
+                     aria-label="岛屿不透明度" />
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
+              <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
+                     aria-label="全局压暗" />
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
+              <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
+            </div>
           </div>
-          <div class="theme-list" id="themeList"></div>
-          <button type="button" class="btn" id="themeReset" style="margin-top:auto">还原默认</button>
+          <div class="note" id="materialNote" hidden>未使用背景图：不透明度、压暗与模糊暂不产生效果。</div>
+
+          <label class="check" id="followSystemWrap">
+            <input type="checkbox" id="followSystem" />
+            <span>无背景时跟随系统深浅色</span>
+          </label>
+
+          <details class="adv">
+            <summary>高级微调与 AI 自适应</summary>
+            <div class="adv-body">
+              <label class="check">
+                <input type="checkbox" id="advToggle" />
+                <span>手动微调语义色（下载 / 上传语义锁定，不能换成别的颜色）</span>
+              </label>
+              <div class="swatches">
+                <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
+                <label class="swatch"><input type="color" id="cPanel" /><span>岛屿</span></label>
+                <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
+                <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
+                <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
+                  <input type="color" id="cDown" /><span>下载 🔒</span></label>
+                <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
+                  <input type="color" id="cUp" /><span>上传 🔒</span></label>
+                <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
+                <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
+                <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
+                <label class="swatch"><input type="color" id="cBorder" /><span>描边</span></label>
+              </div>
+              <div class="bg-actions">
+                <button type="button" class="btn" data-preset="dark">经典深色</button>
+                <button type="button" class="btn" data-preset="light">经典浅色</button>
+                <button type="button" class="btn" data-preset="contrast">高对比</button>
+                <span class="note">预设直接覆盖当前语义色。</span>
+              </div>
+
+              <div class="col-title" style="margin-top:10px">AI 自适应</div>
+              <div class="ai-grid">
+                <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
+                <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
+                <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
+              </div>
+              <label class="check">
+                <input type="checkbox" id="aiConsent" />
+                <span>我已了解：壁纸缩略图（≤512px）将上传至上述服务用于生成配色</span>
+              </label>
+              <div class="bg-actions">
+                <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
+                <span class="note">同一张壁纸会复用上次结果，不重复请求；20 秒无响应自动回退离线取色。</span>
+              </div>
+              <div class="note" id="aiStatus"></div>
+            </div>
+          </details>
         </div>
       </div>
-      <!-- 屏 4 设置（§2.7）：破坏性动作原地二次确认，不弹模态框。
-           三列都是可操作项；「关于」与归因边界在检查栏，那两块没有可点的东西。 -->
+      <!-- 屏 4 设置（数据岛）：三张分组卡片，可操作项全在这里；读数在检查栏 -->
       <div class="pane cols3" data-screen="settings" hidden>
-        <div class="col">
+        <div class="col settings-card">
           <div class="col-title">常规</div>
           <label class="field">速率显示单位
             <select id="setRateUnit">
@@ -413,18 +458,18 @@
           </label>
           <label class="check">
             <input type="checkbox" id="setAutostart" />
-            <span>登录时自动启动（写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run）</span>
+            <span>登录时自动启动</span>
           </label>
           <label class="check">
             <input type="checkbox" id="setRecordUnattributed" />
-            <span>记录系统未归因流量（采集端尚未分表，字段已预留）</span>
+            <span>记录系统未归因流量<span class="muted">（采集端尚未分表，字段已预留）</span></span>
           </label>
           <div class="note">
             单位设成固定值后，速率与总量都按该单位显示；自动挡按数值大小逐级切换。
           </div>
         </div>
 
-        <div class="col">
+        <div class="col settings-card">
           <div class="col-title">历史数据</div>
           <label class="field">保留周期
             <select id="setRetention">
@@ -446,10 +491,8 @@
           </div>
         </div>
 
-        <div class="col">
+        <div class="col settings-card">
           <div class="col-title">采集服务</div>
-          <div class="note" id="svcStatus">未连接采集服务</div>
-          <div class="note" id="svcEventsLost"></div>
           <div class="bg-actions">
             <button type="button" class="btn" id="svcPause">暂停采集</button>
           </div>
@@ -459,6 +502,7 @@
           <div class="note">
             采集服务以 LocalSystem 运行，ETW 内核会话需要管理员权限。重启服务会中断当前会话计数。
           </div>
+          <div class="note">运行状态与丢事件读数在右侧「服务健康」。</div>
         </div>
       </div>
     </section>

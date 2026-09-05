@@ -261,7 +261,8 @@
     try {
       const boot = await T.initTheme();
       const { state } = boot;
-      applyTokens(state.themes[state.active] || Object.values(state.themes)[0]);
+      // v2 模型：current 才是真正生效的令牌；旧配置迁移失败时退回激活主题
+      applyTokens(state.current || state.themes[state.active] || Object.values(state.themes)[0]);
     } catch { /* 读不到配置就用兜底值 */ }
   }
 

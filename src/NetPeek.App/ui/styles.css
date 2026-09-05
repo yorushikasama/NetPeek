@@ -316,38 +316,6 @@ body:not(.has-bg) .island {
   color: var(--down);
 }
 
-/* 单选版分段控件（外观屏三模式）。保留 radio 语义给键盘和读屏，
-   视觉上和顶栏的分段控件一致 —— 三张卡片要 150px，检查栏塞不下。 */
-.seg-radio {
-  display: flex;
-  height: 28px;
-  padding: 2px;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--stroke);
-  flex: none;
-}
-.seg-radio label { flex: 1; display: flex; }
-.seg-radio input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-.seg-radio span {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-pill);
-  color: var(--text-muted);
-  font-size: 13px;
-  cursor: pointer;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
-}
-.seg-radio label:hover span { color: var(--text); }
-.seg-radio input:checked + span { background: var(--surface-hi); color: var(--down); }
-.seg-radio input:focus-visible + span { outline: 2px solid var(--down); outline-offset: 2px; }
-
 .search {
   display: flex;
   align-items: center;
@@ -478,50 +446,34 @@ body:not(.has-bg) .island {
 .nav-item:hover::after { opacity: 1; }
 
 /* ---------- 留白区（§2.1）---------- */
-/* 底图的地盘，不放任何 UI。唯一例外：没有底图时这里没有画面可保护（§2.8）。 */
+/* 底图的地盘，不放任何 UI。无背景时只在右下角留一行可关闭的小提示（不再用居中广告牌）。 */
 
 .stage { position: relative; }
 
-/* 无底图态（§2.8，也是「留白区不放 UI」唯一的例外）。
-   这一态过去是纯 --bg 上摆一句灰字加一个次要按钮：四块岛屿浮在一片死黑上，
-   浮岛构图的前提（岛下面有东西）直接没了，中间那片留白也就从「给底图的地盘」
-   变成了「没做完的地方」。所以无底图时窗口自己画一层底：同色系的暗场，
-   不是照片，但足够让岛屿浮在一个表面上而不是浮在虚空里。
-   色相全部取品牌自己的琥珀与钢蓝（§1.2 的两个语义色），不往暖中性米色偏。 */
+/* 无背景时的暗场：同色系渐变 + 品牌色微光，让岛屿浮在一个表面上而不是虚空里。
+   首启默认有内置壁纸，这一态只在用户明确选「无」后出现。 */
 body:not(.has-bg) .backdrop {
   background-image:
-    radial-gradient(120% 90% at 18% 0%, rgba(240, 145, 63, 0.10), transparent 60%),
-    radial-gradient(90% 80% at 100% 100%, rgba(127, 168, 201, 0.07), transparent 62%);
+    radial-gradient(120% 90% at 18% 0%, rgba(240, 145, 63, 0.08), transparent 60%),
+    radial-gradient(90% 80% at 100% 100%, rgba(127, 168, 201, 0.06), transparent 62%);
   background-size: auto;
 }
 
-.stage-empty {
-  display: none;
-  height: 100%;
-  flex-direction: column;
+.stage-hint {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 14px;
-  text-align: center;
-  padding: 0 24px;
-}
-body:not(.has-bg) .stage-empty { display: flex; }
-
-/* 这一句是邀请，不是故障播报：主文字色、17px，和检查栏应用名同一档（§3.3），
-   下面一行才用次要色补「不设也能用」。原来整块都是 13px 次要灰，读起来像报错。 */
-.stage-empty-title {
-  color: var(--text);
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-.stage-empty-note {
-  max-width: 34ch;
+  gap: 10px;
+  padding: 4px 6px 4px 12px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--line);
   color: var(--text-muted);
   font-size: 12px;
-  line-height: 1.6;
-  text-wrap: pretty;
 }
+.stage-hint .btn { height: 24px; padding: 0 10px; font-size: 12px; }
 
 /* ---------- 检查栏岛（§2.4）---------- */
 
@@ -939,15 +891,6 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .slider input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.1); }
 
-/* 背景图缩略图 */
-.bg-thumb {
-  height: 104px;
-  flex: none;
-  border-radius: var(--r-block);
-  border: 1px solid var(--line);
-  background: var(--surface-hi) var(--theme-bg-image) center / cover no-repeat;
-}
-.bg-actions { display: flex; gap: 8px; }
 /* 路径这类长串没有断词点，不给 anywhere 会把整列顶出横向滚动条 */
 .note { font-size: 12px; color: var(--text-muted); line-height: 1.5; overflow-wrap: anywhere; }
 .note.is-ok { color: var(--ok); }
@@ -1018,6 +961,109 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .theme-item.is-active .tag { background: color-mix(in srgb, var(--surface-hi) 80%, #000); }
 .row-actions { display: flex; gap: 8px; }
+
+/* ---------- 外观屏（v2）：壁纸条 / 材质三列 / 高级折叠 ---------- */
+
+.wall-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.wall-thumb {
+  position: relative;
+  width: 96px;
+  height: 54px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-block);
+  background: var(--surface-hi);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.wall-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.wall-thumb:hover { border-color: var(--stroke); }
+.wall-thumb.is-active {
+  border-color: var(--down);
+  box-shadow: 0 0 0 1px var(--down);
+}
+.wall-thumb.is-active::after {
+  content: "✓";
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--down);
+  color: #1a0f0e;
+  font-size: 11px;
+  font-weight: 700;
+}
+/* 「＋自选」「无」两个动作块：不是缩略图，用居中字符 */
+.wall-thumb.is-action {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 15px;
+}
+.wall-thumb.is-action:hover { color: var(--text); }
+
+/* 材质三根滑杆并排一行：数据岛高度有限，通栏竖排会顶进高级折叠区 */
+.material-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+/* 高级折叠区：语义色与 AI 都是低频操作，默认收起 */
+details.adv {
+  border: 1px solid var(--line);
+  border-radius: var(--r-block);
+  padding: 0 12px;
+}
+details.adv summary {
+  padding: 8px 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+}
+details.adv summary:hover { color: var(--text); }
+details.adv[open] summary { color: var(--text); }
+.adv-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 12px; }
+
+/* AI 提供方三项并排（折叠区内宽度足够） */
+.ai-grid {
+  display: grid;
+  grid-template-columns: 2fr 1.5fr 1fr;
+  gap: 10px;
+}
+.ai-grid .field { min-width: 0; }
+
+/* 检查栏：当前主题的双色 chip（下载/上传语义色各半）+ 主题名输入 */
+.insp-icon.is-theme-chip { border: 1px solid var(--line); }
+.name-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.name-input:focus { border-color: var(--down); outline: none; }
+
+/* 对比度校验徽标 */
+.sec-aside.is-ok { color: var(--ok); }
+.sec-aside.is-warn { color: var(--warn); }
+
+/* 设置屏分组卡片：列与列之间给一条分隔线 */
+.settings-card { gap: 12px; padding-right: 16px; }
+.settings-card + .settings-card { border-left: 1px solid var(--line); padding-left: 16px; }
 
 /* 破坏性动作原地二次确认，不弹模态框（§2.7 / §3.7 #8） */
 .confirm-inline { display: flex; gap: 8px; align-items: center; }

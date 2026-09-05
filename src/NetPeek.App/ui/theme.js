@@ -444,29 +444,74 @@ function validateTokens(tokens) {
 }
 
 // 初始化：加载配置并应用
+// v2 模型（2026-09-05）：去掉三模式互斥，「当前令牌」是唯一事实源——
+// 壁纸取色 / AI 生成 / 预设起步都是往 state.current 里写令牌的生成方式，
+// 色板微调与材质滑杆编辑的也是它。v1 的 mode/custom/standard 字段迁移后删除。
+function defaultCurrent() {
+  return {
+    source: 'standard',
+    tokens: { ...tokensFromPreset('dark').tokens },
+    background: '',
+    panelOpacity: 0.88,
+    blur: 24,
+    scrim: 0.30,
+  };
+}
+
 async function initTheme() {
   const storage = configStorage();
   const raw = await storage.load();
   const cfg = raw && typeof raw === 'object' ? raw : null;
   const fresh = !cfg;
   const state = cfg || {
-    mode: 'standard', // standard | ai | custom
-    themes: {},
+    version: 2,
     active: 'default',
-    standard: { panelOpacity: 0.88, blur: 24, scrim: 0.30 },
-    custom: tokensFromPreset('dark'),
-    ai: { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false, lastImageHash: '' },
+    themes: {},
+    current: defaultCurrent(),
+    advanced: false,
+    followSystem: false,
+    bgHintDismissed: false,
+    ai: { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false, cache: {}, lastImageHash: '' },
   };
-  // 兼容缺字段的旧配置
+
   if (!state.themes) state.themes = {};
-  if (!state.standard) state.standard = { panelOpacity: 0.88, blur: 24, scrim: 0.30 };
-  if (state.standard.scrim == null) state.standard.scrim = 0.30;
-  // 旧配置的不透明度下限是 0.30，实测在纯白底图上把次要文字压到 1.77:1 —— 抬到 0.82（§2.7）
-  state.standard.panelOpacity = clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
   if (!state.ai) state.ai = { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false };
   if (!state.ai.provider) state.ai.provider = { endpoint: '', apiKey: '', model: 'gpt-4o-mini' };
   if (!state.ai.cache) state.ai.cache = {}; // 哈希 → { tokens, panelOpacity, blur }，同图复用不发请求
-  if (!state.custom) state.custom = tokensFromPreset('dark');
+
+  // 迁移 v1 → v2：从激活主题（或旧 mode/custom/standard 字段）拼出 current
+  if (!state.version || state.version < 2) {
+    const src = state.themes[state.active] || Object.values(state.themes)[0] || null;
+    const cur = defaultCurrent();
+    if (src) {
+      cur.source = src.source || 'custom';
+      cur.tokens = { ...cur.tokens, ...(src.tokens || {}) };
+      cur.panelOpacity = clamp(src.panelOpacity ?? 0.88, 0.82, 1);
+      cur.blur = clamp(src.blur ?? 24, 0, 40);
+      cur.scrim = clamp(src.scrim ?? 0.30, 0.2, 0.6);
+    }
+    // v1 的 pendingBackground 记录着用户选过的背景（未保存成主题也可能有）
+    if (state.pendingBackground) cur.background = state.pendingBackground;
+    if (state.standard) {
+      cur.panelOpacity = clamp(state.standard.panelOpacity ?? cur.panelOpacity, 0.82, 1);
+      cur.blur = clamp(state.standard.blur ?? cur.blur, 0, 40);
+      cur.scrim = clamp(state.standard.scrim ?? cur.scrim, 0.2, 0.6);
+    }
+    state.current = cur;
+    state.advanced = false;
+    state.followSystem = false;
+    state.bgHintDismissed = false;
+    state.version = 2;
+    delete state.mode;
+    delete state.custom;
+    delete state.standard;
+    delete state.pendingBackground;
+  }
+  if (!state.current) state.current = defaultCurrent();
+  if (typeof state.advanced !== 'boolean') state.advanced = false;
+  if (typeof state.followSystem !== 'boolean') state.followSystem = false;
+  if (typeof state.bgHintDismissed !== 'boolean') state.bgHintDismissed = false;
+
   // 保证默认主题存在
   if (!state.themes.default) {
     state.themes.default = { ...tokensFromPreset('dark'), name: '默认深色', source: 'custom' };

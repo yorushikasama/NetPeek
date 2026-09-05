@@ -1,15 +1,15 @@
-// 外观屏交互层（§2.7）：这一屏是「屏」，不是覆盖层 —— 上一版把被调的界面压暗 45%
-// 再在上面调颜色，等于在失真的画面上取色。现在留白区和其余三岛都还在画面里，
-// 改不透明度或语义色时它们当场变，不需要造一张假的预览卡片。
+// 外观屏交互层。
 //
-// 状态结构（camelCase，与 Rust 持久化的 JSON 一致）：
-// {
-//   mode: 'standard' | 'ai' | 'custom',
-//   themes: { name: theme }, active: 'name',
-//   standard: { panelOpacity, blur, scrim },
-//   ai: { provider: { endpoint, apiKey, model }, consented },
-//   custom: 未保存的定制中令牌, pendingBackground: 已落盘的背景路径
-// }
+// v2 统一模型（2026-09-05 重设计）：state.current 是唯一事实源——
+// 换壁纸自动取色、AI 生成、预设起步都是往 current 里写令牌的「生成方式」，
+// 高级色板微调与材质滑杆编辑的也是 current，没有互斥的模式开关。
+// 检查栏放当前主题卡 / 对比度校验结果 / 主题列表；数据岛放壁纸条与材质。
+//
+// 背景 URL 的三种来源与解析：
+//   data:…        原样用（浏览器调试 / IPC 回退）
+//   builtin:x     ui/wallpapers/x.jpg（随前端静态资源分发，相对路径）
+//   本地文件路径   优先 asset protocol（convertFileSrc，零拷贝过 IPC），
+//                 画布取色失败（跨域污染）或 convert 不可用时回退 IPC data URL
 
 (function () {
   const T = window.NetPeekTheme;
@@ -20,22 +20,25 @@
     cBg: 'bg', cPanel: 'panel', cText: 'text', cMuted: 'muted', cDown: 'down',
     cUp: 'up', cOk: 'ok', cWarn: 'warn', cError: 'error', cBorder: 'border',
   };
+  const CONTRAST_KEYS = ['text', 'muted', 'down', 'up', 'ok', 'warn', 'error'];
+  const SOURCE_LABEL = { standard: '取色', ai: 'AI', custom: '定制' };
+  const WALLPAPER_PREFIX = 'builtin:';
 
   const els = {
-    modes: Array.from(document.querySelectorAll('input[name="tmode"]')),
-    modeNote: document.getElementById('modeNote'),
-    bgThumb: $('bgThumb'),
+    bgStatus: $('bgStatus'),
     bgPick: $('bgPick'),
     bgClear: $('bgClear'),
     bgFile: $('bgFile'),
-    bgStatus: $('bgStatus'),
-    opacity: $('stdOpacity'),
-    scrim: $('stdScrim'),
-    blur: $('stdBlur'),
+    stdOpacity: $('stdOpacity'),
+    stdScrim: $('stdScrim'),
+    stdBlur: $('stdBlur'),
     opValue: $('opValue'),
     scrimValue: $('scrimValue'),
     blurValue: $('blurValue'),
-    aiSection: $('aiSection'),
+    materialNote: $('materialNote'),
+    followSystem: $('followSystem'),
+    followSystemWrap: $('followSystemWrap'),
+    advToggle: $('advToggle'),
     aiEndpoint: $('aiEndpoint'),
     aiApiKey: $('aiApiKey'),
     aiModel: $('aiModel'),
@@ -43,101 +46,194 @@
     aiGenerate: $('aiGenerate'),
     aiStatus: $('aiStatus'),
     presets: Array.from(document.querySelectorAll('[data-preset]')),
+    wallThumbs: Array.from(document.querySelectorAll('.wall-thumb[data-wall]')),
+    curThemeChip: $('curThemeChip'),
+    curThemeName: $('curThemeName'),
+    curThemeMeta: $('curThemeMeta'),
+    contrastBadge: $('contrastBadge'),
     themeName: $('themeName'),
     themeSave: $('themeSave'),
     themeList: $('themeList'),
     themeReset: $('themeReset'),
+    stageHint: $('stageHint'),
   };
   SWATCH_IDS.forEach((id) => { els[id] = $(id); });
 
   let state = null;
   let storage = null;
-  let bgDataUrl = '';   // 当前背景的 data URL（已解析，直接给 CSS 使用）
-  let stdImage = null;  // 标准模式当前图片的 ImageData（≤512px），取色与 AI 缩略图共用
-  let thumbDataUrl = ''; // AI 请求用的 JPEG 缩略图，随 stdImage 失效
-  let stdBaseCache = { key: null, theme: null }; // 取色结果缓存：键为背景 data URL，滑杆不参与取色
+  let bgDataUrl = '';    // 当前背景的解析结果（data: / asset: / 相对路径），CSS 与画布共用
+  let stdImage = null;   // ≤512px 的 ImageData，取色与 AI 缩略图共用
+  let thumbDataUrl = ''; // AI 请求用的 JPEG 缩略图，随背景失效
 
-  // ---------- 应用主题（含背景解析） ----------
+  // ---------- 背景解析 ----------
 
-  function tuning() {
-    return {
-      panelOpacity: parseFloat(els.opacity.value),
-      blur: parseInt(els.blur.value, 10),
-      scrim: parseFloat(els.scrim.value),
-    };
-  }
-
-  function syncTuningLabels() {
-    els.opValue.textContent = parseFloat(els.opacity.value).toFixed(2);
-    els.scrimValue.textContent = parseFloat(els.scrim.value).toFixed(2);
-    // 不透明度和压暗是比例，模糊半径是长度，得带单位才知道量级
-    els.blurValue.textContent = `${els.blur.value} px`;
-  }
-
-  async function applyWithBg(theme) {
-    let bg = theme.background || '';
-    if (bg && !bg.startsWith('data:')) {
-      try { bg = await storage.readBackground(bg); } catch { bg = ''; }
+  async function resolveBgUrl(value) {
+    if (!value) return '';
+    if (value.startsWith('data:')) return value;
+    if (value.startsWith(WALLPAPER_PREFIX)) {
+      return 'wallpapers/' + value.slice(WALLPAPER_PREFIX.length) + '.jpg';
     }
-    bgDataUrl = bg;
-    T.applyTheme({ ...theme, background: bg });
-    broadcastTokens(theme);
-    els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
-    els.bgStatus.className = 'note truncate';
+    const tauri = window.__TAURI__;
+    if (tauri && tauri.core && tauri.core.convertFileSrc) {
+      try {
+        return tauri.core.convertFileSrc(value);
+      } catch { /* convert 失败走 IPC 回退 */ }
+    }
+    try { return await storage.readBackground(value); } catch { return ''; }
   }
 
-  // 小窗是另一个 webview，documentElement 上的 CSS 变量不跨窗口继承，得把令牌广播过去
-  // 它才跟着改（§2.9）。背景图剥掉：小窗不做 backdrop，data URL 底图有几 MB，
-  // 没必要在事件里搬一遍。节流是因为拖滑块每帧都会走一次 applyWithBg。
-  let broadcastTimer = 0;
-  function broadcastTokens(theme) {
-    if (!window.__TAURI__) return;
-    clearTimeout(broadcastTimer);
-    broadcastTimer = setTimeout(() => {
-      window.__TAURI__.event.emit('theme-changed', { ...theme, background: '' }).catch(() => {});
-    }, 120);
-  }
-
-  // ---------- 标准模式：从背景图取色 ----------
-
-  async function loadImageData(dataUrl) {
+  function loadImageData(src) {
     return new Promise((resolve) => {
       const img = new Image();
+      // asset 域与页面不同源，必须带 CORS 头才不会污染画布（Tauri asset protocol 带 ACAM:*）
+      if (!src.startsWith('data:')) img.crossOrigin = 'anonymous';
       img.onload = () => {
-        const max = 512; // 缩到 ≤512px 保证取色速度
-        const scale = Math.min(1, max / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0, w, h);
-        resolve(ctx.getImageData(0, 0, w, h));
+        try {
+          const max = 512; // 缩到 ≤512px：取色够用，也是发给 AI 的尺寸上限（隐私承诺）
+          const scale = Math.min(1, max / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(ctx.getImageData(0, 0, w, h));
+        } catch {
+          resolve(null); // 画布被污染 → 调用方回退 IPC data URL
+        }
       };
       img.onerror = () => resolve(null);
-      img.src = dataUrl;
+      img.src = src;
     });
   }
 
-  async function runStandard() {
-    // 取色只依赖背景图本身，滑杆（不透明度/压暗/模糊）不参与——
-    // 缓存住 medianCut 的结果，拖滑杆时不再重跑取色。
-    const key = bgDataUrl || '';
-    if (stdBaseCache.key !== key) {
-      stdBaseCache = { key, theme: stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark') };
+  async function loadStdImage() {
+    const url = await resolveBgUrl(state.current.background);
+    bgDataUrl = url;
+    stdImage = url ? await loadImageData(url) : null;
+    thumbDataUrl = '';
+    if (!stdImage && url && state.current.background && !state.current.background.startsWith(WALLPAPER_PREFIX)) {
+      try {
+        const dataUrl = await storage.readBackground(state.current.background);
+        if (dataUrl) {
+          bgDataUrl = dataUrl;
+          stdImage = await loadImageData(dataUrl);
+        }
+      } catch { /* 取色与 AI 在本轮不可用，材质不受影响 */ }
     }
-    const theme = { ...stdBaseCache.theme, tokens: { ...stdBaseCache.theme.tokens } };
-    theme.source = 'standard';
-    Object.assign(theme, tuning());
-    theme.background = bgDataUrl;
-    theme.tokens = T.validateTokens(theme.tokens);
-    fillSwatches(theme.tokens);
-    await applyWithBg(theme);
   }
 
-  // AI 请求用的缩略图（≤512px JPEG，几 KB 级）：由 stdImage 生成并缓存。
-  // 功能清单承诺「缩略图将上传至所选服务」——原图（可能好几 MB）绝不出本地。
+  // ---------- 应用当前主题（唯一出口） ----------
+
+  function syncTuningLabels() {
+    els.opValue.textContent = parseFloat(els.stdOpacity.value).toFixed(2);
+    els.scrimValue.textContent = parseFloat(els.stdScrim.value).toFixed(2);
+    // 不透明度和压暗是比例，模糊半径是长度，得带单位才知道量级
+    els.blurValue.textContent = `${els.stdBlur.value} px`;
+  }
+
+  // 校验把多少个颜色动了手（用户可见的质量信号，见检查栏「对比度」）
+  function countCorrected(before, after) {
+    let n = 0;
+    for (const k of CONTRAST_KEYS) {
+      if (String(before[k] || '').toLowerCase() !== String(after[k] || '').toLowerCase()) n++;
+    }
+    return n;
+  }
+
+  function activeThemeName() {
+    const th = state.themes[state.active];
+    if (!th) return '';
+    const saved = JSON.stringify([th.tokens, th.panelOpacity, th.blur, th.scrim, th.background]);
+    const cur = JSON.stringify([state.current.tokens, state.current.panelOpacity, state.current.blur, state.current.scrim, state.current.background]);
+    return saved === cur ? state.active : '';
+  }
+
+  // 小窗是另一个 webview，CSS 变量不跨窗口继承，把令牌广播过去（背景剥掉，data URL 太大；
+  // 拖滑杆会每帧触发，节流 120ms）。
+  let broadcastTimer = 0;
+  function broadcast(cur) {
+    if (!window.__TAURI__) return;
+    clearTimeout(broadcastTimer);
+    broadcastTimer = setTimeout(() => {
+      window.__TAURI__.event.emit('theme-changed', {
+        source: cur.source, tokens: cur.tokens,
+        panelOpacity: cur.panelOpacity, blur: cur.blur, scrim: cur.scrim,
+      }).catch(() => {});
+    }, 120);
+  }
+
+  function syncStageHint() {
+    els.stageHint.hidden = !!state.current.background || !!state.bgHintDismissed;
+  }
+
+  async function applyCurrent() {
+    const cur = state.current;
+    const tokens = T.validateTokens(cur.tokens);
+    const corrected = countCorrected(cur.tokens, tokens);
+    cur.tokens = tokens; // 校正结果写回事实源，保存主题时带出去的就是校正后的值
+
+    const bg = await resolveBgUrl(cur.background);
+    bgDataUrl = bg;
+    T.applyTheme({ source: cur.source, tokens, background: bg, panelOpacity: cur.panelOpacity, blur: cur.blur, scrim: cur.scrim });
+    broadcast(cur);
+    fillSwatches(tokens);
+
+    // 检查栏「当前主题」卡
+    const name = activeThemeName();
+    els.curThemeName.textContent = name || '未保存的定制';
+    els.curThemeMeta.textContent =
+      `${SOURCE_LABEL[cur.source] || '定制'} · 岛屿 ${Number(cur.panelOpacity).toFixed(2)} · 模糊 ${Math.round(cur.blur)}px · 压暗 ${Number(cur.scrim).toFixed(2)}`;
+    els.curThemeChip.style.background = `linear-gradient(135deg, ${tokens.down} 50%, ${tokens.up} 50%)`;
+    els.contrastBadge.textContent = corrected ? `${corrected} 项已校正` : '✓ 全部达标';
+    els.contrastBadge.className = 'sec-aside ' + (corrected ? 'is-warn' : 'is-ok');
+
+    // 材质滑杆只在有背景图时有意义（无背景时岛屿不透明、没有 scrim 可言）
+    const hasBg = !!cur.background;
+    for (const s of [els.stdOpacity, els.stdScrim, els.stdBlur]) s.disabled = !hasBg;
+    els.materialNote.hidden = hasBg;
+    els.followSystemWrap.hidden = hasBg;
+
+    // 壁纸条选中态与状态行
+    for (const b of els.wallThumbs) b.classList.toggle('is-active', b.dataset.wall === cur.background);
+    els.bgStatus.textContent = hasBg
+      ? (cur.background.startsWith(WALLPAPER_PREFIX) ? '内置壁纸' : '自定义图片')
+      : '未设置背景（使用面板底色）';
+    els.bgStatus.className = 'note truncate';
+
+    syncAiGate();
+    syncStageHint();
+  }
+
+  // ---------- 生成方式 1：从背景取色（换壁纸自动触发） ----------
+
+  function systemPrefersDark() {
+    return !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+
+  // 无背景时的兜底令牌：跟随系统开关决定深 / 浅
+  function fallbackPreset() {
+    const dark = !state.followSystem || systemPrefersDark();
+    return T.tokensFromPreset(dark ? 'dark' : 'light');
+  }
+
+  async function regenerateFromImage() {
+    const base = stdImage ? T.tokensFromImage(stdImage) : fallbackPreset();
+    state.current.tokens = T.validateTokens(base.tokens);
+    state.current.source = 'standard';
+    await applyCurrent();
+  }
+
+  async function setWallpaper(value) {
+    state.current.background = value;
+    await loadStdImage();
+    await regenerateFromImage();
+    persist();
+  }
+
+  // ---------- 生成方式 2：AI 自适应 ----------
+
   function aiThumbDataUrl() {
     if (!stdImage) return '';
     if (!thumbDataUrl) {
@@ -150,39 +246,15 @@
     return thumbDataUrl;
   }
 
-  // ---------- 定制化模式 ----------
-
-  function swatchTokens() {
-    const tokens = {};
-    for (const id of SWATCH_IDS) tokens[SWATCH_TO_TOKEN[id]] = els[id].value;
-    return tokens;
-  }
-
-  function fillSwatches(tokens) {
-    for (const id of SWATCH_IDS) {
-      const v = tokens[SWATCH_TO_TOKEN[id]];
-      if (/^#[0-9a-f]{6}$/i.test(v || '')) els[id].value = v;
-    }
-  }
-
-  async function runCustom() {
-    const theme = { source: 'custom', background: bgDataUrl, ...tuning() };
-    theme.tokens = T.validateTokens(swatchTokens());
-    fillSwatches(theme.tokens);
-    await applyWithBg(theme);
-  }
-
-  // ---------- AI 模式 ----------
-
   function syncAiGate() {
-    // 未勾选授权时「生成并应用」是 disabled 态，不是点了报错（§2.7）
-    els.aiGenerate.disabled = !els.aiConsent.checked || !bgDataUrl;
+    // 未勾选授权或没有背景图时「生成并应用」是 disabled 态，不是点了报错
+    els.aiGenerate.disabled = !els.aiConsent.checked || !stdImage;
   }
 
   async function runAi() {
     els.aiStatus.textContent = 'AI 生成中…';
     els.aiStatus.className = 'note';
-    // 同图复用：像素哈希命中缓存就直接应用，不发请求（§屏0 验收项）。
+    // 同图复用：像素哈希命中缓存就直接应用，不发请求
     const hash = T.hashImageData(stdImage);
     const cached = state.ai.cache[hash];
     if (cached) {
@@ -198,70 +270,45 @@
         apiKey: els.aiApiKey.value.trim(),
         model: els.aiModel.value.trim(),
       }, aiThumbDataUrl());
-      const applied = await applyAiResult(res);
-      // 缓存「校验并应用后」的结果；上限 5 份，超出淘汰最早的。
+      await applyAiResult(res);
+      // 缓存应用后的结果；上限 5 份，超出淘汰最早的
       state.ai.lastImageHash = hash;
-      state.ai.cache[hash] = { tokens: applied.tokens, panelOpacity: applied.panelOpacity, blur: applied.blur };
+      state.ai.cache[hash] = {
+        tokens: { ...state.current.tokens },
+        panelOpacity: state.current.panelOpacity,
+        blur: state.current.blur,
+      };
       const keys = Object.keys(state.ai.cache);
       while (keys.length > 5) delete state.ai.cache[keys.shift()];
       els.aiStatus.textContent = '已应用，可在右侧命名保存到主题列表';
       els.aiStatus.className = 'note is-ok';
     } catch (err) {
-      els.aiStatus.textContent = `AI 失败（${err.message}），已回退标准离线取色`;
+      els.aiStatus.textContent = `AI 失败（${err.message}），已回退离线取色`;
       els.aiStatus.className = 'note is-error';
-      await runStandard();
+      await regenerateFromImage();
     }
   }
 
-  // 把 AI 结果（或缓存）落到当前界面：校验 → 应用 → 回填滑杆与色板。返回应用后的主题。
   async function applyAiResult(res) {
-    const theme = {
-      source: 'ai',
-      background: bgDataUrl,
-      tokens: T.validateTokens(res.tokens),
-      panelOpacity: T.clamp(res.panelOpacity, 0.82, 1),
-      blur: T.clamp(res.blur, 0, 40),
-      scrim: tuning().scrim,
-    };
-    els.opacity.value = theme.panelOpacity;
-    els.blur.value = Math.round(theme.blur);
+    state.current.tokens = T.validateTokens(res.tokens);
+    state.current.source = 'ai';
+    state.current.panelOpacity = T.clamp(res.panelOpacity, 0.82, 1);
+    state.current.blur = T.clamp(res.blur, 0, 40);
+    els.stdOpacity.value = state.current.panelOpacity;
+    els.stdBlur.value = Math.round(state.current.blur);
     syncTuningLabels();
-    fillSwatches(theme.tokens);
-    await applyWithBg(theme);
-    state.aiApplied = true;
-    return theme;
+    await applyCurrent();
   }
 
-  // ---------- 模式切换 ----------
+  // ---------- 高级微调（语义色） ----------
 
-  // 语义色只在定制化模式可编辑；其余模式它们展示的是取色/AI 推出来的结果。
-  function setSwatchesEditable(on) {
+  function syncAdvanced() {
+    els.advToggle.checked = !!state.advanced;
     for (const id of SWATCH_IDS) {
       const locked = id === 'cDown' || id === 'cUp';
-      els[id].disabled = !on || locked;
-      els[id].closest('.swatch').style.opacity = on ? '' : '0.4';
+      els[id].disabled = !state.advanced || locked;
+      els[id].closest('.swatch').style.opacity = !state.advanced ? '0.4' : (locked ? '0.6' : '');
     }
-    els.presets.forEach((b) => { b.disabled = !on; });
-  }
-
-  // 分段控件只放得下三个词，模式之间的差别写在下面这行说明里
-  const MODE_NOTES = {
-    standard: '从背景图提主色，自动生成强调色与文字明暗。完全离线、即时生效。',
-    ai: '把背景缩略图交给多模态模型生成整套配色，可命名保存复用；失败自动回退标准取色。',
-    custom: '内置预设起步，语义色逐项手调。下载与上传两色语义锁定，不可改。',
-  };
-
-  async function setMode(mode, opts = {}) {
-    state.mode = mode;
-    els.modes.forEach((r) => { r.checked = r.value === mode; });
-    if (els.modeNote) els.modeNote.textContent = MODE_NOTES[mode] || '';
-    els.aiSection.hidden = mode !== 'ai';
-    els.aiSection.style.display = mode === 'ai' ? 'flex' : 'none';
-    setSwatchesEditable(mode === 'custom');
-    if (opts.silent) return;
-    if (mode === 'custom') await runCustom();
-    else await runStandard(); // AI 模式在生成前先用标准取色占位预览
-    persist();
   }
 
   // ---------- 主题列表 ----------
@@ -299,16 +346,20 @@
     const th = state.themes[name];
     if (!th) return;
     state.active = name;
-    state.pendingBackground = th.background || '';
-    els.opacity.value = T.clamp(th.panelOpacity ?? 0.88, 0.82, 1);
-    els.blur.value = Math.round(T.clamp(th.blur ?? 24, 0, 40));
-    els.scrim.value = T.clamp(th.scrim ?? 0.30, 0.2, 0.6);
+    state.current = {
+      source: th.source || 'custom',
+      tokens: { ...T.tokensFromPreset('dark').tokens, ...(th.tokens || {}) },
+      background: th.background || '',
+      panelOpacity: T.clamp(th.panelOpacity ?? 0.88, 0.82, 1),
+      blur: T.clamp(th.blur ?? 24, 0, 40),
+      scrim: T.clamp(th.scrim ?? 0.30, 0.2, 0.6),
+    };
+    els.stdOpacity.value = state.current.panelOpacity;
+    els.stdBlur.value = Math.round(state.current.blur);
+    els.stdScrim.value = state.current.scrim;
     syncTuningLabels();
-    if (th.tokens) fillSwatches(th.tokens);
-    await applyWithBg(th);
-    if (th.background) stdImage = await loadImageData(bgDataUrl);
-    thumbDataUrl = '';
-    await setMode(th.source === 'ai' ? 'ai' : th.source === 'standard' ? 'standard' : 'custom', { silent: true });
+    await loadStdImage();
+    await applyCurrent();
     renderThemeList();
     persist();
   }
@@ -360,23 +411,10 @@
     persist();
   }
 
-  // 当前生效主题（用于保存到列表）
-  function currentTheme() {
-    const base = { ...tuning(), background: state.pendingBackground || bgDataUrl || '' };
-    if (state.mode === 'standard') {
-      const th = stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark');
-      return { ...th, ...base, source: 'standard', tokens: T.validateTokens(th.tokens) };
-    }
-    if (state.mode === 'ai') {
-      return { ...base, source: 'ai', tokens: T.validateTokens(swatchTokens()) };
-    }
-    return { ...base, source: 'custom', tokens: T.validateTokens(swatchTokens()) };
-  }
+  // ---------- 持久化（节流 300ms） ----------
 
-  async function persist() {
-    if (!storage) return;
-    state.standard = tuning();
-    // 节流 300ms：滑杆每个 input tick 都写盘太狠，停手后半秒落一次。
+  function persist() {
+    if (!storage) return Promise.resolve();
     clearTimeout(persist._t);
     return new Promise((resolve) => {
       persist._t = setTimeout(() => { storage.save(state).then(resolve, resolve); }, 300);
@@ -385,69 +423,87 @@
 
   // ---------- 事件绑定 ----------
 
-  els.modes.forEach((r) => {
-    r.addEventListener('change', () => { if (r.checked) setMode(r.value); });
-  });
-
   els.bgPick.addEventListener('click', () => els.bgFile.click());
-  els.bgFile.addEventListener('change', async () => {
-    const file = els.bgFile.files[0];
-    if (!file) return;
-    const dataUrl = await new Promise((res) => {
+
+  for (const b of els.wallThumbs) {
+    b.addEventListener('click', () => setWallpaper(b.dataset.wall));
+  }
+
+  function readFileAsDataURL(file) {
+    return new Promise((res) => {
       const fr = new FileReader();
       fr.onload = () => res(fr.result);
       fr.readAsDataURL(file);
     });
+  }
+
+  els.bgFile.addEventListener('change', async () => {
+    const file = els.bgFile.files[0];
+    if (!file) return;
     try {
-      // 落盘到应用数据目录，避免配置 JSON 无限膨胀
-      state.pendingBackground = await storage.saveBackground(dataUrl);
-      bgDataUrl = dataUrl;
-      stdImage = await loadImageData(dataUrl);
-      thumbDataUrl = ''; // 换图后旧缩略图作废，AI 请求时按新图重新生成
-      els.bgStatus.textContent = `已选择 ${file.name}`;
-      els.bgStatus.className = 'note truncate';
-      syncAiGate();
-      if (state.mode === 'custom') await runCustom();
-      else await runStandard();
-      persist();
+      const dataUrl = await readFileAsDataURL(file);
+      // 落盘到应用数据目录（SHA-256 前缀命名去重），主题里只存路径
+      const path = await storage.saveBackground(dataUrl);
+      await setWallpaper(path);
     } catch (err) {
       els.bgStatus.textContent = `背景加载失败：${err.message}`;
       els.bgStatus.className = 'note is-error';
     }
   });
 
-  els.bgClear.addEventListener('click', async () => {
-    state.pendingBackground = '';
-    bgDataUrl = '';
-    stdImage = null;
-    thumbDataUrl = '';
-    syncAiGate();
-    if (state.mode === 'custom') await runCustom();
-    else await runStandard();
-    persist();
+  els.bgClear.addEventListener('click', () => {
+    // 用户明确选择「无背景」就是做了决定：关掉留白区的邀请提示，不再反复问
+    state.bgHintDismissed = true;
+    return setWallpaper('');
   });
 
-  for (const input of [els.opacity, els.scrim, els.blur]) {
+  for (const input of [els.stdOpacity, els.stdScrim, els.stdBlur]) {
     input.addEventListener('input', () => {
       syncTuningLabels();
-      // 滑杆只调材质。AI 已应用时同样走 runCustom（= 当前色板 + 新材质），
-      // 否则会把 AI 配色整个冲回标准取色。
-      if (state.mode === 'custom' || (state.mode === 'ai' && state.aiApplied)) runCustom();
-      else runStandard();
+      // 滑杆只动材质，令牌不重生成——任何来源（取色/AI/手调）的配色都不会被冲掉
+      state.current.panelOpacity = parseFloat(els.stdOpacity.value);
+      state.current.blur = parseInt(els.stdBlur.value, 10);
+      state.current.scrim = parseFloat(els.stdScrim.value);
+      applyCurrent();
       persist();
     });
   }
 
-  els.presets.forEach((b) => {
-    b.addEventListener('click', () => {
-      fillSwatches(T.tokensFromPreset(b.dataset.preset).tokens);
-      runCustom();
+  els.followSystem.addEventListener('change', () => {
+    state.followSystem = els.followSystem.checked;
+    if (!state.current.background) regenerateFromImage();
+    persist();
+  });
+
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    (mq.addEventListener || mq.addListener).call(mq, 'change', () => {
+      if (!state.current.background && state.followSystem) regenerateFromImage();
+    });
+  }
+
+  els.advToggle.addEventListener('change', () => {
+    state.advanced = els.advToggle.checked;
+    syncAdvanced();
+    persist();
+  });
+
+  SWATCH_IDS.forEach((id) => {
+    els[id].addEventListener('input', () => {
+      state.current.tokens[SWATCH_TO_TOKEN[id]] = els[id].value;
+      state.current.source = 'custom'; // 手调过就是定制，纯记录标签
+      applyCurrent();
       persist();
     });
   });
 
-  SWATCH_IDS.forEach((id) => {
-    els[id].addEventListener('input', () => { runCustom(); persist(); });
+  els.presets.forEach((b) => {
+    b.addEventListener('click', () => {
+      state.current.tokens = { ...T.tokensFromPreset(b.dataset.preset).tokens };
+      state.current.source = 'custom';
+      applyCurrent();
+      persist();
+    });
   });
 
   els.aiConsent.addEventListener('change', () => {
@@ -472,7 +528,15 @@
       els.bgStatus.className = 'note is-warn';
       return;
     }
-    state.themes[name] = { ...currentTheme(), name };
+    state.themes[name] = {
+      name,
+      source: state.current.source,
+      tokens: { ...state.current.tokens },
+      background: state.current.background,
+      panelOpacity: state.current.panelOpacity,
+      blur: state.current.blur,
+      scrim: state.current.scrim,
+    };
     state.active = name;
     els.themeName.value = '';
     renderThemeList();
@@ -481,19 +545,22 @@
 
   els.themeReset.addEventListener('click', async () => {
     const def = T.tokensFromPreset('dark');
-    state.mode = 'standard';
-    state.themes = { default: { ...def, name: '默认深色', source: 'custom' } };
+    state.current = {
+      source: 'standard', tokens: { ...def.tokens }, background: '',
+      panelOpacity: 0.88, blur: 24, scrim: 0.30,
+    };
     state.active = 'default';
-    state.pendingBackground = '';
-    state.aiApplied = false;
+    state.themes = { default: { ...def, name: '默认深色', source: 'custom' } };
+    state.advanced = false;
     stdImage = null;
+    thumbDataUrl = '';
     bgDataUrl = '';
-    els.opacity.value = 0.88;
-    els.blur.value = 24;
-    els.scrim.value = 0.30;
+    els.stdOpacity.value = 0.88;
+    els.stdBlur.value = 24;
+    els.stdScrim.value = 0.30;
+    syncAdvanced();
     syncTuningLabels();
-    fillSwatches(def.tokens);
-    await setMode('standard');
+    await applyCurrent();
     renderThemeList();
     await persist();
   });
@@ -501,7 +568,7 @@
   // ---------- 启动 ----------
 
   window.NetPeekThemeUI = {
-    // 留白区的「选择背景图」按钮直接借这条路径，不重复实现一遍取图
+    // 留白区提示的「挑一张」直接借这条路径（跳到外观屏后由 main.js 调用）
     pickBackground() { els.bgFile.click(); },
 
     async init() {
@@ -513,20 +580,25 @@
       els.aiApiKey.value = state.ai.provider.apiKey || '';
       els.aiModel.value = state.ai.provider.model || '';
       els.aiConsent.checked = !!state.ai.consented;
-      els.opacity.value = T.clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
-      els.blur.value = Math.round(T.clamp(state.standard.blur ?? 24, 0, 40));
-      els.scrim.value = T.clamp(state.standard.scrim ?? 0.30, 0.2, 0.6);
+      els.stdOpacity.value = T.clamp(state.current.panelOpacity ?? 0.88, 0.82, 1);
+      els.stdBlur.value = Math.round(T.clamp(state.current.blur ?? 24, 0, 40));
+      els.stdScrim.value = T.clamp(state.current.scrim ?? 0.30, 0.2, 0.6);
+      els.followSystem.checked = !!state.followSystem;
       syncTuningLabels();
+      syncAdvanced();
 
-      const active = boot.fresh ? null : (state.themes[state.active] || Object.values(state.themes)[0]);
-      if (active) {
-        await useTheme(active.name && state.themes[active.name] ? active.name : state.active);
+      if (boot.fresh) {
+        // 首启默认启用一张内置壁纸：浮岛构图首屏即完整，留白区不再是死黑
+        state.current.background = 'builtin:wall-1';
+        await loadStdImage();
+        await regenerateFromImage();
+        await persist();
       } else {
-        await setMode('standard');
-        renderThemeList();
+        await loadStdImage();
+        await applyCurrent();
       }
+      renderThemeList();
       syncAiGate();
     },
   };
 })();
-
