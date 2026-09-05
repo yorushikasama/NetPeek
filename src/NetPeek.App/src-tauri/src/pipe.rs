@@ -51,6 +51,8 @@ fn read_session(app: &AppHandle) -> std::io::Result<()> {
 
     let result = (|| {
         let mut len_buf = [0u8; 4];
+        // 跨帧复用读取缓冲区，避免每帧 vec![0u8; len] 新分配。
+        let mut buf: Vec<u8> = Vec::new();
         loop {
             file.read_exact(&mut len_buf)?;
             let len = i32::from_le_bytes(len_buf);
@@ -58,15 +60,17 @@ fn read_session(app: &AppHandle) -> std::io::Result<()> {
                 return Err(Error::new(ErrorKind::InvalidData, "帧长度非法"));
             }
 
-            let mut buf = vec![0u8; len as usize];
-            file.read_exact(&mut buf)?;
+            if buf.len() < len as usize {
+                buf.resize(len as usize, 0);
+            }
+            file.read_exact(&mut buf[..len as usize])?;
 
             // 帧为 JSON，原样解析后交给前端；解析失败只丢弃本帧，不中断读取。
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) {
-                let _ = app.emit("snapshot", value.clone());
-                // 同一帧同时喂给历史聚合（内存分钟桶，整分钟落 SQLite）。
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf[..len as usize]) {
+                // 先喂历史聚合（借用），再把所有权交给 emit，避免每帧深拷贝整棵 JSON 树。
                 let state = app.state::<std::sync::Arc<history::HistoryState>>();
                 history::record(&state, &value);
+                let _ = app.emit("snapshot", value);
             }
         }
     })();

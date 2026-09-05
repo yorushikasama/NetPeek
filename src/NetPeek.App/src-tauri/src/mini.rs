@@ -56,8 +56,10 @@ pub fn set_mini_shape(app: AppHandle, shape: String) -> Result<(), String> {
         let min_y = mb.y as f64 + margin;
         let max_x = mb.x as f64 + ms.width as f64 - tw * scale - margin;
         let max_y = mb.y as f64 + ms.height as f64 - th * scale - margin;
-        nx = nx.clamp(min_x, max_x);
-        ny = ny.clamp(min_y, max_y);
+        // 目标窗口 + 边距可能大于显示器（极小屏/投影），此时 max < min，clamp 会 panic。
+        // 退化为贴边（取 min），而不是崩溃。
+        nx = if max_x > min_x { nx.clamp(min_x, max_x) } else { min_x };
+        ny = if max_y > min_y { ny.clamp(min_y, max_y) } else { min_y };
     }
 
     let _ = w.set_position(LogicalPosition::new(nx / scale, ny / scale));

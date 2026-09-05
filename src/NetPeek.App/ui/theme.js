@@ -207,29 +207,31 @@ function tokensFromImage(imgData) {
       muted,
       down,
       up,
-      ok: ensureContrast('#6fb87a', panel),
-      warn: ensureContrast('#d9b44a', panel),
-      error: ensureContrast('#e14b3a', panel),
+      ok: ensureContrast('#6fc884', panel),
+      warn: ensureContrast('#ebbd57', panel),
+      error: ensureContrast('#f97770', panel),
     },
-    panelOpacity: 0.92,
-    blur: 12,
+    panelOpacity: 0.88,
+    blur: 24,
+    scrim: 0.30,
   };
 }
 
-// 内置预设主题（定制化模式用）
+// 内置预设主题（定制化模式用）。深色一档的值即 §3.1 的令牌表。
 function tokensFromPreset(name) {
   const presets = {
     dark: {
       bg: '#111418',
-      panel: '#1b1f26',
-      border: '#2a2f38',
-      text: '#f2e6dc',
-      muted: '#a89184',
+      panel: '#1e1a16',
+      border: '#423c37',
+      text: '#f6efe8',
+      muted: '#b4a99e',
       down: '#f0913f',
       up: '#7fa8c9',
-      ok: '#6fb87a',
-      warn: '#d9b44a',
-      error: '#e14b3a',
+      ok: '#6fc884',
+      warn: '#ebbd57',
+      // #e14b3a 在岛屿上只有 4.34、压着底图亮部 3.01，恰好覆盖它全部的出现位置（§3.1）
+      error: '#f97770',
     },
     light: {
       bg: '#f5f2ee',
@@ -261,8 +263,9 @@ function tokensFromPreset(name) {
     source: 'custom',
     background: '',
     tokens: { ...t },
-    panelOpacity: 1,
-    blur: 0,
+    panelOpacity: 0.88,
+    blur: 24,
+    scrim: 0.30,
   };
 }
 
@@ -300,30 +303,55 @@ function configStorage() {
 // ---------- 应用令牌 ----------
 
 function applyTheme(theme, opts = {}) {
-  const { tokens, background, panelOpacity, blur } = theme;
+  const { tokens, background, panelOpacity, blur, scrim } = theme;
   const root = document.documentElement;
   const t = tokens;
+  // 对比度的参照面是岛屿底色，不是窗口底 —— 文字实际压在岛屿上（§3.1）。
+  const dark = luminance(hexToRgb(t.panel)) < 0.5;
+  const toward = dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+
   root.style.setProperty('--bg', t.bg);
-  root.style.setProperty('--panel', t.panel);
-  root.style.setProperty('--border', t.border);
+  root.style.setProperty('--surface', t.panel);
+  // 悬浮 / 选中 / 当前档胶囊用的不透明高亮底，从岛屿底色提（或压）一档得来。
+  root.style.setProperty('--surface-hi', rgbToHex(mix(hexToRgb(t.panel), toward, 0.08)));
   root.style.setProperty('--text', t.text);
-  root.style.setProperty('--muted', t.muted);
+  root.style.setProperty('--text-muted', t.muted);
   root.style.setProperty('--down', t.down);
   root.style.setProperty('--up', t.up);
   root.style.setProperty('--ok', t.ok);
   root.style.setProperty('--warn', t.warn);
   root.style.setProperty('--error', t.error);
-  root.style.setProperty('--panel-opacity', String(panelOpacity ?? 0.92));
-  root.style.setProperty('--blur', `${blur ?? 12}px`);
+
+  // 分隔线与描边用低透明度中性色：它和岛屿合成底色一起浮动，
+  // 深色描边在底图亮部实测只剩 1.12 对比度（§3.1）。
+  const tint = dark ? '255,255,255' : '0,0,0';
+  root.style.setProperty('--line', `rgba(${tint},0.10)`);
+  root.style.setProperty('--stroke', `rgba(${tint},0.18)`);
+
+  // 暖色亮边 + 同色外发光是这一版的核心材质，取语义下载色（§3.4）。
+  const d = hexToRgb(t.down);
+  root.style.setProperty('--edge', `rgba(${d.r},${d.g},${d.b},0.26)`);
+  root.style.setProperty('--glow-warm', `rgba(${d.r},${d.g},${d.b},0.10)`);
+  root.style.setProperty('--glow-pulse', `rgba(${d.r},${d.g},${d.b},0.18)`);
+
+  // 三个范围由令牌算出来，不留不可读的余地：0.82 是上传蓝在底图最亮处仍过 4.5:1 的下限（§3.2）。
+  root.style.setProperty('--island-op', String(clamp(panelOpacity ?? 0.88, 0.82, 1)));
+  root.style.setProperty('--blur', `${Math.round(clamp(blur ?? 24, 0, 40))}px`);
+  root.style.setProperty('--scrim', String(clamp(scrim ?? 0.30, 0.2, 0.6)));
   root.style.setProperty('--theme-bg-image', background ? `url("${background}")` : 'none');
-  // 深色底配深色 UI；浅色底配浅色 UI，原生控件同步
-  root.style.colorScheme = luminance(hexToRgb(t.bg)) < 0.5 ? 'dark' : 'light';
+  root.style.colorScheme = dark ? 'dark' : 'light';
 
   document.body.classList.toggle('has-bg', !!background);
 
   if (!opts.silent) {
     window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: { theme } }));
   }
+}
+
+function clamp(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(hi, Math.max(lo, n));
 }
 
 // ---------- 主题列表 ----------
@@ -400,13 +428,16 @@ async function initTheme() {
     mode: 'standard', // standard | ai | custom
     themes: {},
     active: 'default',
-    standard: { panelOpacity: 0.92, blur: 12 },
+    standard: { panelOpacity: 0.88, blur: 24, scrim: 0.30 },
     custom: tokensFromPreset('dark'),
     ai: { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false, lastImageHash: '' },
   };
   // 兼容缺字段的旧配置
   if (!state.themes) state.themes = {};
-  if (!state.standard) state.standard = { panelOpacity: 0.92, blur: 12 };
+  if (!state.standard) state.standard = { panelOpacity: 0.88, blur: 24, scrim: 0.30 };
+  if (state.standard.scrim == null) state.standard.scrim = 0.30;
+  // 旧配置的不透明度下限是 0.30，实测在纯白底图上把次要文字压到 1.77:1 —— 抬到 0.82（§2.7）
+  state.standard.panelOpacity = clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
   if (!state.ai) state.ai = { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false };
   if (!state.ai.provider) state.ai.provider = { endpoint: '', apiKey: '', model: 'gpt-4o-mini' };
   if (!state.custom) state.custom = tokensFromPreset('dark');
@@ -426,6 +457,7 @@ window.NetPeekTheme = {
   luminance,
   contrast,
   ensureContrast,
+  clamp,
   medianCut,
   tokensFromImage,
   tokensFromPreset,

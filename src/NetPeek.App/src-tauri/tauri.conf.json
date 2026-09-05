@@ -14,8 +14,10 @@
         "width": 1180,
         "height": 720,
         "resizable": true,
-        "minWidth": 900,
-        "minHeight": 560
+        "minWidth": 940,
+        "minHeight": 620,
+        "decorations": false,
+        "transparent": true
       },
       {
         "label": "mini",

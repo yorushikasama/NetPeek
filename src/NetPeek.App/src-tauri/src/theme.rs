@@ -38,7 +38,7 @@ pub fn save_theme_config(app: AppHandle, json: String) -> Result<(), String> {
 }
 
 /// 把用户选择的背景图（base64 data URL）落盘，返回保存后的绝对路径。
-/// 文件名用内容 SHA-1 前 16 位，同一张图多次选择只保留一份。
+/// 文件名用内容 SHA-256 前 8 字节，同一张图多次选择只保留一份（且跨版本稳定）。
 #[tauri::command]
 pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String, String> {
     let body = data_url
@@ -50,11 +50,12 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
     let b64 = body.split(',').nth(1).ok_or("data URL 缺少 base64 内容")?;
     let bytes = base64_decode(b64)?;
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let name = format!("{:016x}.{}", hasher.finish(), ext);
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    // 取 SHA-256 前 8 字节（16 位十六进制）做文件名，跨 Rust 版本稳定，保证同图去重。
+    let name = format!("{:016x}.{}", u64::from_be_bytes(digest[..8].try_into().unwrap()), ext);
 
     let bg_dir = data_dir(&app)?.join(BG_DIR);
     fs::create_dir_all(&bg_dir).map_err(|e| format!("创建背景目录失败: {e}"))?;

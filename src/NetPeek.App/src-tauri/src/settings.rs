@@ -108,6 +108,12 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
         .map_err(|e| format!("保存设置失败: {e}"))
 }
 
+/// 应用数据目录的绝对路径。设置屏「关于」列展示它，用户要找日志和 history.db 时有个去处。
+#[tauri::command]
+pub fn data_dir_path(app: AppHandle) -> Result<String, String> {
+    Ok(data_dir(&app)?.to_string_lossy().to_string())
+}
+
 /// 读取注册表确认开机自启真实状态（settings.json 可能过时）。
 #[tauri::command]
 pub fn get_autostart() -> Result<bool, String> {

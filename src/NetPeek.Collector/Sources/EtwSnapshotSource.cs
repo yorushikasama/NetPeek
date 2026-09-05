@@ -38,6 +38,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private volatile bool _paused;
     private volatile bool _disposed;
 
+    // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
+    private int _cachedEventsLost;
+    private long _lastEventsLostReadMs;
+
     public bool IsPaused => _paused;
 
     public void Pause()
@@ -262,6 +266,13 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
     private int ReadEventsLost()
     {
+        // 仅快照线程调用（GetSnapshot 由管道服务端单客户端串行调用），无并发写。
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (now - _lastEventsLostReadMs < 5000)
+        {
+            return _cachedEventsLost;
+        }
+
         var session = _session;
         if (session == null)
         {
@@ -271,7 +282,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         try
         {
             var lost = session.EventsLost;
-            return lost > 0 ? lost : 0;
+            var value = lost > 0 ? lost : 0;
+            _cachedEventsLost = value;
+            _lastEventsLostReadMs = now;
+            return value;
         }
         catch
         {

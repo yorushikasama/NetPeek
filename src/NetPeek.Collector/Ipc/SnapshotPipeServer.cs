@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -39,19 +40,27 @@ public sealed class SnapshotPipeServer
         {
             using var writer = new BinaryWriter(server, Encoding.UTF8, leaveOpen: true);
 
+            // 复用同一块缓冲，避免每帧 SerializeToUtf8Bytes 新分配 byte[]（GC 压力）。
+            var jsonBuffer = new ArrayBufferWriter<byte>(64 * 1024);
+
             while (!ct.IsCancellationRequested && server.IsConnected)
             {
                 var snapshot = produceSnapshot();
-                var json = JsonSerializer.SerializeToUtf8Bytes(snapshot);
 
-                if (json.Length > IpcConstants.MaxFrameBytes)
+                jsonBuffer.Clear();
+                using (var jsonWriter = new Utf8JsonWriter(jsonBuffer))
                 {
-                    _logger.LogError("快照 {Bytes} 字节超过帧上限，跳过本帧", json.Length);
+                    JsonSerializer.Serialize(jsonWriter, snapshot);
+                }
+
+                if (jsonBuffer.WrittenCount > IpcConstants.MaxFrameBytes)
+                {
+                    _logger.LogError("快照 {Bytes} 字节超过帧上限，跳过本帧", jsonBuffer.WrittenCount);
                 }
                 else
                 {
-                    writer.Write(json.Length);          // 4 字节小端长度
-                    writer.Write(json);
+                    writer.Write(jsonBuffer.WrittenCount);   // 4 字节小端长度
+                    writer.Write(jsonBuffer.WrittenSpan);
                     writer.Flush();
                 }
 

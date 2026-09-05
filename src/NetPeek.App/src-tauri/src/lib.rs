@@ -29,7 +29,9 @@ pub fn run() {
             settings::save_settings,
             settings::get_autostart,
             settings::set_autostart,
+            settings::data_dir_path,
             history::query_history,
+            history::history_daily,
             history::history_stats,
             history::clear_history,
             history::set_retention,
@@ -44,14 +46,17 @@ pub fn run() {
             // 先 manage 状态再初始化，保证任何窗口前端尽早 invoke 也不会命中未注册状态。
             let history_state = history::HistoryState::new();
             app.manage(history_state.clone());
-            history::init(app.handle(), &history_state)
-                .map_err(|e| e.to_string())
-                .expect("初始化历史数据库失败");
+            // 历史库初始化失败不阻断启动：用占位内存库继续运行，历史仅不落盘。
+            if let Err(e) = history::init(app.handle(), &history_state) {
+                history::log_error(&history_state, &format!("初始化历史数据库失败：{e}"));
+            }
             history::spawn(history_state);
 
-            let settings_state = settings::init(app.handle())
-                .map_err(|e| e.to_string())
-                .expect("初始化设置失败");
+            // 设置加载失败回退默认值，不让启动崩溃。
+            let settings_state = settings::init(app.handle()).unwrap_or_else(|e| {
+                eprintln!("初始化设置失败，使用默认设置：{e}");
+                settings::SettingsState::default()
+            });
             app.manage(settings_state);
 
             pipe::spawn(app.handle().clone());

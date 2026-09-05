@@ -1,670 +1,997 @@
+/* NetPeek 浮岛式界面样式。设计依据：docs/UI生成提示词.md 第 1–3 节。
+   底图是画面主角：四块圆角岛屿浮在压暗后的底图上，中间留一片不放 UI 的留白区。
+   材质是「暖色亮边 + 同色外发光」，不是「灰描边 + 黑投影」—— 半透明岛屿上的深色描边
+   在底图亮部实测只剩 1.12 对比度（§3.1），所以分隔线一律用低透明度白色，跟着底色浮动。 */
+
 :root {
-  color-scheme: light dark; /* 滚动条/原生控件跟随主题（三模式主题系统会按需覆盖） */
+  /* 颜色（§3.1）。theme.js 按当前主题覆盖这一组。 */
   --bg: #111418;
-  --panel: #1b1f26;
-  --border: #2a2f38;
-  --text: #f2e6dc;
-  --muted: #a89184;
+  --surface: #1e1a16;
+  --surface-hi: #2f2924;
+  --text: #f6efe8;
+  --text-muted: #b4a99e;
   --down: #f0913f;
   --up: #7fa8c9;
-  --ok: #6fb87a;
-  --warn: #d9b44a;
-  --error: #e14b3a;
-  /* 玻璃面板（三模式主题系统注入）：面板底色透明度与背景模糊强度 */
-  --panel-opacity: 0.92;
-  --blur: 12px;
+  --ok: #6fc884;
+  --warn: #ebbd57;
+  --error: #f97770;
+  --line: rgba(255, 255, 255, 0.10);
+  --stroke: rgba(255, 255, 255, 0.18);
+  --edge: rgba(240, 145, 63, 0.26);
+  --glow-warm: rgba(240, 145, 63, 0.10);
+  --glow-pulse: rgba(240, 145, 63, 0.18);
   --theme-bg-image: none;
+
+  /* 岛屿材质（§3.2）。不透明度下限 0.82 是对比度实测结果，不是手感。 */
+  --island-op: 0.88;
+  --blur: 24px;
+  --scrim: 0.30;
+
+  /* 圆角五档（§3.4） */
+  --r-frame: 20px;
+  --r-island: 16px;
+  --r-block: 10px;
+  --r-ctl: 8px;
+  --r-pill: 999px;
+
+  /* 字族（§3.3）。所有数字走等宽族，避免每秒刷新时列宽抖动。 */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+  --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
+
+  /* 动效三档（§3.6） */
+  --t-fast: 150ms;
+  --t-mid: 200ms;
+  --t-slow: 260ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* z 轴语义层，不用 999 之类的裸数字 */
+  --z-scrim: 1;
+  --z-island: 2;
+  --z-grip: 3;
+  --z-resize: 40;
 }
 
 * { box-sizing: border-box; }
 
-html, body {
-  height: 100%;
+html, body { height: 100%; }
+
+/* 界面里绝大多数容器都自带 display（flex/grid），会盖掉 [hidden] 的 UA display:none。
+   屏切换、空态、检查栏两态全靠 hidden 属性，这一条得放在所有组件规则之前。 */
+[hidden] { display: none !important; }
+
+/* 滚动条自绘。系统经典滚动条会在暗色岛屿里画出亮灰滑块和上下箭头按钮，很扎眼；
+   标准的 scrollbar-width/scrollbar-color 只能改颜色、去不掉按钮，而且一旦设了
+   scrollbar-width，Chromium 就会忽略下面这些 ::-webkit- 规则 —— 所以两者不能混用。 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--stroke);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 4px;
 }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); background-clip: padding-box; }
+::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; }
 
 body {
   margin: 0;
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
-  font-family: "Segoe UI", system-ui, sans-serif;
-  background: var(--bg);
+  /* 无边框窗口：窗口本身透明，圆角与投影由 .frame 自绘（§3.4）。 */
+  background: transparent;
   color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
 }
 
-/* 三模式主题：有背景图时启用玻璃面板（半透明 + 背景模糊 + 暗色叠层保证可读性） */
-body.has-bg {
+/* ---------- 窗口外框 ---------- */
+
+.frame {
+  position: relative;
+  height: 100%;
+  border-radius: var(--r-frame);
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+/* 最大化时窗口贴满屏幕，圆角要收掉否则四角露出桌面 */
+.frame.is-maximized { border-radius: 0; }
+
+.backdrop {
+  position: absolute;
+  inset: 0;
   background-image: var(--theme-bg-image);
   background-size: cover;
   background-position: center;
-  background-attachment: fixed;
-}
-body.has-bg::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  background: rgba(8, 10, 14, 0.35);
-  pointer-events: none;
-  z-index: 0;
 }
 
-.topbar,
-.chart-panel,
-.cards,
-.statusbar,
-.detail {
+/* 全局压暗：纯黑，压在底图上、岛屿下。带色偏会让 §3.2 的实测对比度对不上。 */
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-scrim);
+  background: rgba(0, 0, 0, var(--scrim));
+}
+body:not(.has-bg) .scrim { display: none; }
+
+/* ---------- 浮岛骨架（§2.1）---------- */
+
+.shell {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-island);
+  height: 100%;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 380px;
+  grid-template-rows: 58px minmax(356px, 1fr) 250px;
+  gap: 14px;
+  padding: 14px;
 }
-body.has-bg .topbar,
-body.has-bg .chart-panel,
-body.has-bg .cards,
-body.has-bg .statusbar,
-body.has-bg .detail,
-body.has-bg .card {
-  background: color-mix(in srgb, var(--panel) calc(var(--panel-opacity) * 100%), transparent);
+
+.island--top { grid-area: 1 / 1 / 2 / 4; }
+/* 导航岛例外：它的 tooltip 要飘到岛外（§2.3 图标导航必须有悬浮标签） */
+.island--nav { grid-area: 2 / 1 / 3 / 2; align-self: start; height: 268px; overflow: visible; }
+.stage       { grid-area: 2 / 2 / 3 / 3; }
+.island--inspector { grid-area: 2 / 3 / 3 / 4; min-height: 356px; }
+.island--data { grid-area: 3 / 1 / 4 / 4; }
+
+/* 密集模式（§2.5）：数据岛向上吃掉留白区与检查栏，表格可见 15 行。
+   导航岛留在原位 —— 唯一的导航入口不该被一个临时视图吞掉。 */
+.shell.is-dense { grid-template-rows: 58px 0px minmax(0, 1fr); }
+.shell.is-dense .island--nav { grid-row: 2 / 4; }
+.shell.is-dense .island--data { grid-column: 2 / 4; }
+.shell.is-dense .stage,
+.shell.is-dense .island--inspector { display: none; }
+
+/* ---------- 岛屿材质（§3.2）---------- */
+
+.island {
+  position: relative;
+  min-width: 0;
+  /* 内容一律裁在圆角内：岛屿是有边界的实体，不能有东西从边上漏出去 */
+  overflow: hidden;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-island);
+  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   backdrop-filter: blur(var(--blur));
-  -webkit-backdrop-filter: blur(var(--blur));
+  box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28);
 }
+
+/* 无底图时岛屿转不透明并关掉模糊：背后没有画面可采样，模糊只是白耗 GPU（§2.8）。 */
+body:not(.has-bg) .island {
+  background: var(--surface);
+  backdrop-filter: none;
+}
+
+/* 唯一一处装饰性动效：从静默跨到有流量的那一刻涨一次发光再落回。
+   只在跨过边界时触发，不跟每帧数据（§3.6）。 */
+@keyframes island-glow {
+  0%, 100% { box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28); }
+  45%      { box-shadow: 0 0 30px var(--glow-pulse), 0 6px 20px rgba(0, 0, 0, 0.28); }
+}
+.island.is-waking { animation: island-glow 300ms var(--ease); }
+
+/* ---------- 通用文字与数字 ---------- */
+
+.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.down { color: var(--down); }
+.up { color: var(--up); }
+.muted { color: var(--text-muted); }
+.unit { font-size: 75%; opacity: 0.75; margin-left: 2px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 焦点环统一。键盘要能走完整个界面，不许 outline:none 而不给替代（§3.5）。 */
+:focus-visible {
+  outline: 2px solid var(--down);
+  outline-offset: 2px;
+}
+
+/* ---------- 顶栏岛（§2.2）---------- */
 
 .topbar {
-  flex-shrink: 0;
-  display: flex;
+  display: grid;
+  /* 第三列给 minmax(0, auto)：1180 宽下左组（品牌 + 状态 + 两个 30px 速率 + 今日合计）
+     和右组（视图胶囊 + 240 搜索 + 三个窗口钮）加起来超了 100 多像素，
+     列不给收缩余地就会把左组的尾巴（今日合计的单位）裁在岛外。 */
+  grid-template-columns: auto 1fr minmax(0, auto);
   align-items: center;
-  gap: 24px;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  height: 100%;
+  padding: 0 18px;
 }
 
-.brand { font-weight: 600; font-size: 16px; }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  /* 左组是「世界的状态」，一个字都不能少，宁可让右边的搜索先变窄 */
+  flex: none;
+  white-space: nowrap;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 品牌标记 + 字标 */
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand-mark { width: 20px; height: 20px; color: var(--down); flex: none; }
+.brand-name { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+
+/* 状态胶囊。状态点用绿色 —— 琥珀已被「下载」占用，不许借用（§3.7）。 */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  background: var(--surface-hi);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex: none;
+}
+.status-pill.is-ok .status-dot { background: var(--ok); }
+.status-pill.is-warn .status-dot { background: var(--warn); }
+.status-pill.is-warn { color: var(--warn); }
+.status-pill.is-error .status-dot { background: var(--error); }
+.status-pill.is-error { color: var(--error); }
+
+/* ETW 丢事件不另开位置，胶囊右侧贴一个圆点（§2.2） */
+.lost-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+  margin-left: -10px;
+}
+
+/* 顶栏总速率 */
+.total { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.total-arrow { font-size: 18px; line-height: 1; }
+.total-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 30px; font-weight: 600; line-height: 1; }
+.total-unit { font-size: 14px; opacity: 0.75; }
+
+.today {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.today-label { font-size: 13px; color: var(--text-muted); }
+.today-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; }
+
+/* ---------- 控件：胶囊档位组 / 搜索 / 图标钮（§3.5）---------- */
+
+.segmented {
+  display: inline-flex;
+  flex: none;
+  height: 28px;
+  padding: 2px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--stroke);
+}
+.segmented button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 12px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.segmented button:hover { color: var(--text); }
+.segmented button.is-active {
+  background: var(--surface-hi);
+  color: var(--down);
+}
+
+/* 单选版分段控件（外观屏三模式）。保留 radio 语义给键盘和读屏，
+   视觉上和顶栏的分段控件一致 —— 三张卡片要 150px，检查栏塞不下。 */
+.seg-radio {
+  display: flex;
+  height: 28px;
+  padding: 2px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--stroke);
+  flex: none;
+}
+.seg-radio label { flex: 1; display: flex; }
+.seg-radio input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.seg-radio span {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.seg-radio label:hover span { color: var(--text); }
+.seg-radio input:checked + span { background: var(--surface-hi); color: var(--down); }
+.seg-radio input:focus-visible + span { outline: 2px solid var(--down); outline-offset: 2px; }
 
 .search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 240 是设计宽度（§2.2），但窗口可缩放，顶栏挤不下时先让搜索让位 —— 
+     压到 132 还能看见占位符的头几个字，再窄就没意义了。 */
+  flex: 0 1 240px;
+  min-width: 132px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--stroke);
+  transition: border-color var(--t-fast) var(--ease);
+}
+.search:hover { border-color: rgba(255, 255, 255, 0.26); }
+.search:focus-within { border-color: var(--down); outline: none; }
+.search svg { width: 14px; height: 14px; color: var(--text-muted); flex: none; }
+
+.search input {
   flex: 1;
-  max-width: 320px;
-  margin-left: auto;
-  margin-right: 16px;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
+  min-width: 0;
+  border: 0;
+  background: transparent;
   color: var(--text);
+  font: inherit;
   font-size: 13px;
   outline: none;
-  color-scheme: light dark; /* 让表单控件/滚动条跟随主题 */
+  -webkit-user-select: text;
+  user-select: text;
 }
-.search:focus { border-color: var(--down); }
+.search input::placeholder { color: var(--text-muted); }
 
-.totals { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
-.total-down b { color: var(--down); }
-.total-up b { color: var(--up); }
-
-.status { margin-left: auto; color: var(--muted); font-size: 13px; }
-.status.ok { color: var(--ok); }
-.status.warn { color: var(--warn); }
-.status.error { color: var(--error); }
-.status.paused { color: var(--warn); }
-
-.view-toggle {
-  display: flex;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.vt {
-  padding: 5px 14px;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  cursor: pointer;
-}
-.vt + .vt { border-left: 1px solid var(--border); }
-.vt:hover { color: var(--text); }
-.vt.active { background: var(--border); color: var(--text); }
-
-/* 实时速率折线图 */
-.chart-panel {
-  flex-shrink: 0;
-  padding: 12px 20px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.chart-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-
-.chart-title { font-size: 13px; color: var(--muted); }
-
-.chips { display: flex; gap: 6px; }
-
-.chip {
-  padding: 3px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  cursor: pointer;
-}
-.chip:hover { color: var(--text); border-color: var(--muted); }
-.chip.active { color: var(--text); border-color: var(--down); }
-
-#rateChart {
-  display: block;
-  width: 100%;
-  height: 120px;
-}
-
-/* Top 4 应用卡片 */
-.cards {
-  flex-shrink: 0;
-  display: flex;
-  gap: 12px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.card {
-  flex: 1 1 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-}
-
-.card-icon {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  border-radius: 5px;
-}
-.card-icon.placeholder {
-  background: var(--border);
-  border-radius: 5px;
-}
-
-.card-body { min-width: 0; flex: 1; }
-
-.card-name {
-  font-size: 13px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.card-rates {
-  display: flex;
-  gap: 10px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  margin: 2px 0 6px;
-}
-
-.card-bar {
-  height: 3px;
-  border-radius: 2px;
-  background: var(--border);
-  overflow: hidden;
-}
-.card-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--down);
-  transition: width 0.4s ease;
-}
-
-/* uPlot 图例与主题对齐 */
-.uplot .u-legend {
-  font-size: 12px;
-  color: var(--muted);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px 8px;
-}
-.uplot .u-legend .u-label { color: var(--muted); }
-.uplot .u-legend .u-value { color: var(--text); font-variant-numeric: tabular-nums; }
-
-/* 主体区域：左列（图表+卡片+进程表）与右侧详情面板水平排列 */
-.content {
-  flex: 1 1 auto;
-  display: flex;
-  min-height: 0;
-}
-
-.main-col {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-/* 滚动容器：进程列表在此区域内虚拟滚动，表头吸顶。 */
-.viewport {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  position: relative;
-  z-index: 1;
-}
-
-/* 右侧详情面板：选中行后显示。 */
-.detail {
-  flex-shrink: 0;
-  width: 320px;
-  border-left: 1px solid var(--border);
-  background: var(--panel);
-  overflow-y: auto;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.detail[hidden] { display: none; }
-
-.detail-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.detail-icon {
+.icon-btn {
   width: 32px;
   height: 32px;
-  flex-shrink: 0;
-  border-radius: 6px;
-}
-.detail-icon.placeholder {
-  background: var(--border);
-  border-radius: 6px;
-}
-
-.detail-title { min-width: 0; flex: 1; }
-
-.detail-name {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.detail-sub {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.detail-close {
-  border: none;
+  display: inline-grid;
+  place-items: center;
+  appearance: none;
+  border: 0;
+  border-radius: var(--r-ctl);
   background: transparent;
-  color: var(--muted);
-  font-size: 18px;
-  line-height: 1;
+  color: var(--text-muted);
   cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.detail-close:hover { color: var(--text); background: var(--border); }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:hover { background: var(--surface-hi); color: var(--text); }
+.icon-btn:active { background: color-mix(in srgb, var(--surface-hi) 92%, #000); }
+.icon-btn:disabled { opacity: 0.4; pointer-events: none; }
+.icon-btn.is-danger:hover { background: var(--error); color: #1a0f0e; }
 
-.detail-fields {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 12px;
-  margin: 0;
-  font-size: 12px;
-}
-.detail-fields dt { color: var(--muted); }
-.detail-fields dd {
-  margin: 0;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.detail-fields dd#detailPath { white-space: normal; word-break: break-all; text-align: left; }
+.win-controls { display: flex; flex: none; gap: 2px; margin-left: 4px; }
 
-.detail-chart-head {
+/* 幽灵/实体按钮 */
+.btn {
+  appearance: none;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.btn:hover { border-color: color-mix(in srgb, var(--down) 60%, transparent); }
+.btn:active { background: var(--surface-hi); }
+.btn:disabled { opacity: 0.4; pointer-events: none; }
+.btn.is-primary { background: var(--surface-hi); border-color: var(--edge); color: var(--down); }
+
+/* ---------- 导航岛（§2.3）---------- */
+
+.nav {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  color: var(--muted);
+  flex-direction: column;
+  padding: 14px 2px;
 }
-
-.detail-chart { width: 100%; height: 110px; }
-
-.detail-attrib summary {
-  font-size: 12px;
-  color: var(--muted);
+.nav-item {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  display: grid;
+  place-items: center;
+  appearance: none;
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  user-select: none;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.detail-attrib summary:hover { color: var(--text); }
-.detail-attrib ul {
-  margin: 8px 0 0;
-  padding-left: 18px;
+.nav-item svg { width: 20px; height: 20px; }
+.nav-item:hover { color: var(--text); }
+.nav-item.is-active { background: var(--surface-hi); color: var(--down); }
+/* 指示条只属于导航当前项，不用于表格行（§3.7 #12） */
+.nav-item.is-active::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  margin-top: -10px;
+  width: 3px;
+  height: 20px;
+  border-radius: var(--r-pill);
+  background: var(--down);
+}
+
+/* 简易 tooltip：导航岛只有 64 宽，塞不进文字标签 */
+.nav-item::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 8px;
+  border-radius: var(--r-ctl);
+  background: var(--surface-hi);
+  border: 1px solid var(--line);
+  color: var(--text);
   font-size: 12px;
-  color: var(--muted);
-  line-height: 1.6;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.nav-item:hover::after { opacity: 1; }
+
+/* ---------- 留白区（§2.1）---------- */
+/* 底图的地盘，不放任何 UI。唯一例外：没有底图时这里没有画面可保护（§2.8）。 */
+
+.stage { position: relative; }
+.stage-empty {
+  display: none;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+body:not(.has-bg) .stage-empty { display: flex; }
+
+/* ---------- 检查栏岛（§2.4）---------- */
+
+.inspector {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+  overflow: hidden;
+}
+.insp-sec { padding: 8px 0; }
+.insp-sec + .insp-sec { border-top: 1px solid var(--line); }
+.insp-sec:first-child { padding-top: 0; }
+
+.insp-head { display: flex; gap: 12px; align-items: flex-start; }
+.insp-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-block);
+  flex: none;
+  object-fit: contain;
+  background: var(--surface-hi);
+}
+.insp-icon.is-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 17px;
+  font-weight: 600;
+}
+.insp-titles { min-width: 0; flex: 1; }
+.insp-name { font-size: 17px; font-weight: 600; margin-bottom: 3px; }
+/* 路径最多两行。单行截断会把 exe 名切掉 —— 而 exe 名恰好是这一行里最有用的一段。 */
+.insp-path {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.insp-meta { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+/* 累计段必须是两行：下载和上传各自多少，这才是累计存在的理由（§2.4）。 */
+.insp-totals { display: flex; flex-direction: column; gap: 6px; }
+.insp-total-row { display: flex; align-items: baseline; gap: 8px; }
+.insp-total-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15px; }
+.insp-total-label { font-size: 11px; color: var(--text-muted); }
+
+/* 图表段：标题行 + 图。380px 宽的检查栏里两段图 + 头部 + 合计要挤在 356px 内，
+   所以下限压到 76，不给它 98 的硬底 —— 超出会把整段推出岛外。 */
+.insp-chart-sec {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 76px;
+  min-height: 76px;
+}
+.sec-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.sec-title { font-size: 14px; }
+.sec-aside { display: flex; gap: 12px; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; }
+
+.chart {
+  position: relative;
+  flex: 1;
+  min-height: 52px;
+}
+.chart canvas { display: block; width: 100%; height: 100%; }
+
+/* 总览态的字段组（未选中任何行时替换「实时用量」段，§2.4） */
+.insp-fields { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; align-items: baseline; }
+.insp-fields dt { font-size: 12px; color: var(--text-muted); }
+.insp-fields dd { margin: 0; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; }
+/* 归因覆盖率这类可点字段：琥珀是下载的专属语义（§1.2），这里只能用正文色。
+   下划线也得让开字身 —— 12px 下 underline dotted 会和「已归因」糊成一条实线。 */
+.insp-fields dd.is-link {
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: underline dotted var(--stroke);
+  text-underline-offset: 3px;
 }
 
-/* 选中行高亮 */
-.proc-table tr.selected td { background: var(--border); }
-.proc-table tbody tr { cursor: pointer; }
 
+/* 归因说明挂在被解释的数字旁边，不藏进折叠项（§2.4） */
+.attrib-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-ctl);
+  background: var(--surface-hi);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.attrib-note ul { margin: 0; padding-left: 16px; }
+
+/* ---------- 数据岛（§2.5）---------- */
+
+.island--data { display: flex; flex-direction: column; }
+
+/* 顶边是密集模式的抓手：拖或双击展开/收起 */
+.dense-grip {
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 8px;
+  cursor: ns-resize;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  z-index: var(--z-grip);
+}
+.dense-grip::after {
+  content: "";
+  width: 36px;
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--stroke);
+  transition: background var(--t-fast) var(--ease);
+}
+.dense-grip:hover::after { background: color-mix(in srgb, var(--down) 60%, transparent); }
+
+.data-live {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* 行必须显式约束成 1fr：隐式 auto 行会被 10 行表格顶成 392px，
+     把图和表一起挤出 250px 高的数据岛。 */
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: 448px 1px minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px;
+}
+.vrule { background: var(--line); }
+
+.bandwidth { display: flex; flex-direction: column; min-width: 0; }
+.legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i {
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+/* ---------- 进程表（§2.5）---------- */
+/* 不画横向分隔线：靠 36px 行高、行背景和悬浮态区分行（§3.7 #3）。 */
+
+.table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 .proc-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
-  font-variant-numeric: tabular-nums;
 }
-
-.proc-table th, .proc-table td {
-  height: 43px;
-  padding: 0 20px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.proc-table th {
+.proc-table thead th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--bg);
-  color: var(--muted);
-  font-weight: 500;
+  height: 32px;
+  padding: 0 10px;
+  text-align: left;
   font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  /* 半透明岛屿上表头必须自己不透明，否则滚动的行会从字缝里透出来 */
+  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
+  backdrop-filter: blur(var(--blur));
 }
-.proc-table th[data-sort] { cursor: pointer; user-select: none; }
-.proc-table th[data-sort]:hover { color: var(--text); }
-.proc-table th .sort-mark { color: var(--down); font-size: 11px; }
+body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-filter: none; }
+.proc-table thead th.is-num { text-align: right; }
+.proc-table thead th:hover { color: var(--text); }
+.proc-table thead th.is-sorted { color: var(--down); }
+.sort-mark { font-size: 9px; margin-left: 3px; }
 
-/* 虚拟滚动占位行：只撑高度，无内容。 */
-.proc-table .spacer { padding: 0; }
-.proc-table .spacer td { padding: 0; border-bottom: none; height: auto; }
+.proc-table tbody tr {
+  height: 36px;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  transition: background-color var(--t-fast) var(--ease);
+  cursor: pointer;
+}
+.proc-table tbody tr:hover { background-color: var(--surface-hi); }
+.proc-table tbody tr.is-selected { background-color: var(--surface-hi); }
+.proc-table tbody tr.is-selected .cell-name { font-weight: 600; }
 
-.num { text-align: right; }
-.down { color: var(--down); }
-.up { color: var(--up); }
-.retrans { color: var(--muted); }
+.proc-table tbody td {
+  padding: 0 10px;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.proc-table tbody td.is-num {
+  text-align: right;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+.cell-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.proc-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  flex: none;
+  object-fit: contain;
+}
+.proc-icon.is-placeholder {
+  display: grid;
+  place-items: center;
+  background: var(--surface-hi);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.cell-name > span { overflow: hidden; text-overflow: ellipsis; }
+.count-suffix { color: var(--text-muted); font-family: var(--font-num); font-size: 12px; }
+.td-pid { font-size: 13px; color: var(--text-muted); }
+.td-rate { font-size: 15px; font-weight: 500; }
 
-.name {
-  color: var(--text);
+/* 暂停时数字停在最后一帧并降到 60%（§2.8） */
+.is-paused .total-value,
+.is-paused .td-rate,
+.is-paused .insp-total-value { opacity: 0.6; }
+
+/* 空态 / 骨架（§2.8）。加载不用转圈。 */
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 16px;
+  text-align: center;
+}
+.state-title { font-size: 15px; font-weight: 600; }
+.state-desc { font-size: 13px; color: var(--text-muted); max-width: 44ch; line-height: 1.6; }
+.state-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+.skeleton-rows { padding: 0 10px; }
+.skeleton-row {
+  height: 36px;
   display: flex;
   align-items: center;
-  gap: 8px;
+}
+.skeleton-row::after {
+  content: "";
+  height: 14px;
+  width: 100%;
+  border-radius: var(--r-block);
+  background: var(--surface-hi);
 }
 
-.proc-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  border-radius: 4px;
-}
-.proc-icon.placeholder {
-  background: var(--border);
-  border-radius: 4px;
+.hint-row {
+  padding: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
-.empty-row td {
-  height: 72px;
-  text-align: center;
-  color: var(--muted);
-  padding: 24px 20px;
-}
+/* ---------- 屏切换（§2.6：只换岛内内容，不换岛的位置）---------- */
 
-/* 底部状态栏 */
-.statusbar {
-  flex-shrink: 0;
+.pane { height: 100%; }
+.pane[hidden] { display: none; }
+.island--data > .pane { flex: 1; min-height: 0; }
+
+/* ---------- 历史屏（§2.6）---------- */
+
+.hist-data {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 10px;
+}
+.hist-toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 6px 20px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+  height: 34px;
 }
+.hist-toolbar .spacer { flex: 1; }
+.hist-note { font-size: 11px; color: var(--text-muted); }
 
-.statusbar .sep {
-  width: 1px;
-  height: 12px;
-  background: var(--border);
-}
-
-.statusbar .ok { color: var(--ok); }
-.statusbar .warn { color: var(--warn); }
-.statusbar .error { color: var(--error); }
-
-/* ---------- 三模式主题面板 ---------- */
-
-.theme-btn {
-  margin-left: auto;
-  margin-right: 16px;
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-.theme-btn:hover { border-color: var(--down); }
-
-.theme-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+.rank-list {
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
-  z-index: 100;
-}
-.theme-overlay[hidden] { display: none; }
-
-.theme-panel {
-  width: 380px;
-  max-height: 100%;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  background: var(--panel);
-  border-left: 1px solid var(--border);
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  backdrop-filter: blur(var(--blur));
-  -webkit-backdrop-filter: blur(var(--blur));
 }
-
-.theme-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.theme-title { font-size: 15px; font-weight: 600; }
-
-.theme-modes {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.tmode {
+.rank-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  cursor: pointer;
-  background: var(--bg);
-}
-.tmode:hover { border-color: var(--muted); }
-.tmode input { accent-color: var(--down); }
-.tmode span { display: flex; flex-direction: column; }
-.tmode b { font-size: 13px; }
-.tmode small { color: var(--muted); font-size: 12px; }
-
-.tsec {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.tsec-title {
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 600;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
-}
-
-.bg-actions, .save-row, .preset-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.tbtn {
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-.tbtn:hover { border-color: var(--down); }
-.tbtn.ghost { background: transparent; color: var(--muted); }
-.tbtn.ghost:hover { color: var(--text); border-color: var(--muted); }
-
-.tnote { font-size: 12px; color: var(--muted); }
-.tnote.err { color: var(--error); }
-.tnote.ok { color: var(--ok); }
-.tnote.warn { color: var(--warn); }
-
-.tselect {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
+  /* flex:none 是必需的：列向 flex 里的行默认可压缩，8 行 32px 塞进 130px 的槽会被
+     一起压成 18px，图标连带被挤扁，列表也就永远不滚动。 */
+  flex: none;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  background-repeat: no-repeat;
   font-size: 13px;
-  outline: none;
-  cursor: pointer;
-}
-.tselect:focus { border-color: var(--down); }
-
-.tslider {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  color: var(--muted);
-}
-.tslider input[type="range"] {
-  flex: 1;
-  margin-left: 12px;
-  accent-color: var(--down);
 }
 
-.tfield {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.tfield input {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 13px;
-  outline: none;
-}
-.tfield input:focus { border-color: var(--down); }
-
-.tconsent {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.tconsent input { accent-color: var(--down); margin-top: 2px; }
-
-.color-grid {
+.rank-icon { width: 18px; height: 18px; border-radius: 4px; flex: none; object-fit: contain; }
+/* 没取到真实图标时退回首字母牌，和进程表同一套观感。
+   空的灰方块会在行首读成一条竖色条 —— 那是 §3.7 明令禁止的东西。 */
+.rank-icon.is-placeholder {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  place-items: center;
+  background: var(--surface-hi);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
 }
-.color-grid label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 12px;
-  color: var(--muted);
-}
-.color-grid input[type="color"] {
-  width: 40px;
-  height: 24px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: none;
-  padding: 0;
-  cursor: pointer;
-}
+.rank-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--down); }
 
-.theme-list {
+/* 区间合计：三个 20px 数字并排一行（§2.6）。竖排三行要多花 50px，
+   排行榜就只剩 3 行的位置了 —— 检查栏 324px 的净高放不下「三行合计 + 8×32 排行」。
+   单位压到 12px：一列只有 116px，20px 的「1545.07 GB」会被省略号吃掉单位。 */
+.range-totals { display: flex; gap: 10px; }
+.range-total-row { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.range-total-row .label { font-size: 12px; color: var(--text-muted); }
+.range-total-row .value {
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 20px; font-weight: 600; white-space: nowrap;
+}
+.range-total-row .value .u { margin-left: 3px; font-size: 12px; font-weight: 500; }
+
+
+/* ---------- 外观屏 / 设置屏（§2.7：是屏，不是覆盖层）---------- */
+
+.cols3 {
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px;
+}
+.col {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
-.titem {
+.col-title { font-size: 14px; }
+
+.form { display: flex; flex-direction: column; gap: 10px; padding: 16px; height: 100%; overflow-y: auto; }
+.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-muted); }
+.field > input[type="text"],
+.field > input[type="password"],
+.field > select {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.field > input:hover, .field > select:hover { border-color: rgba(255, 255, 255, 0.26); }
+.field > input:focus, .field > select:focus { border-color: var(--down); outline: none; }
+.field > select option { background: var(--surface); color: var(--text); }
+
+.check { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; }
+.check input { margin: 2px 0 0; accent-color: var(--down); }
+
+/* 滑块（§3.5）。范围由令牌算出来，不留不可读的余地（§2.7）。 */
+.slider { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
+.slider-head { display: flex; justify-content: space-between; gap: 8px; }
+.slider-head .value { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); }
+.slider input[type="range"] {
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+.slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--stroke);
+}
+.slider input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--down);
+  transition: transform var(--t-fast) var(--ease);
+}
+.slider input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.1); }
+
+/* 背景图缩略图 */
+.bg-thumb {
+  height: 104px;
+  flex: none;
+  border-radius: var(--r-block);
+  border: 1px solid var(--line);
+  background: var(--surface-hi) var(--theme-bg-image) center / cover no-repeat;
+}
+.bg-actions { display: flex; gap: 8px; }
+/* 路径这类长串没有断词点，不给 anywhere 会把整列顶出横向滚动条 */
+.note { font-size: 12px; color: var(--text-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.note.is-ok { color: var(--ok); }
+.note.is-warn { color: var(--warn); }
+.note.is-error { color: var(--error); }
+
+/* 语义色块。下载与上传语义锁定，不许改（§1.2）。 */
+.swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; }
+.swatch { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.swatch input[type="color"] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-ctl);
+  background: transparent;
+  cursor: pointer;
+}
+.swatch.is-locked { opacity: 0.85; }
+.swatch.is-locked input { pointer-events: none; }
+
+/* 模式三选一 */
+/* 主题列表 */
+.theme-list { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; }
+.theme-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 6px 8px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--line);
   font-size: 13px;
 }
-.titem.active { border-color: var(--down); }
-.titem .tname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.titem .tag {
+.theme-item.is-active { border-color: var(--edge); background: var(--surface-hi); }
+.theme-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-item .tag {
   font-size: 11px;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  color: var(--text-muted);
   padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-hi);
 }
-.titem .tact {
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.titem .tact:hover { color: var(--text); background: var(--border); }
+.theme-item.is-active .tag { background: color-mix(in srgb, var(--surface-hi) 80%, #000); }
+.row-actions { display: flex; gap: 8px; }
 
-.theme-foot { border-top: 1px solid var(--border); padding-top: 10px; }
+/* 破坏性动作原地二次确认，不弹模态框（§2.7 / §3.7 #8） */
+.confirm-inline { display: flex; gap: 8px; align-items: center; }
+.confirm-inline .btn.is-danger { border-color: var(--error); color: var(--error); }
+
+/* ---------- 无边框窗口的自绘拖动与缩放 ---------- */
+
+.drag-region button,
+.drag-region input,
+.drag-region .segmented,
+.drag-region .search { -webkit-app-region: no-drag; app-region: no-drag; }
+
+.resize-edge {
+  position: absolute;
+  z-index: var(--z-resize);
+}
+.resize-edge[data-dir="North"]  { top: 0; left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+.resize-edge[data-dir="South"]  { bottom: 0; left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+.resize-edge[data-dir="West"]   { left: 0; top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+.resize-edge[data-dir="East"]   { right: 0; top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+.resize-edge[data-dir="NorthWest"] { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.resize-edge[data-dir="NorthEast"] { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.resize-edge[data-dir="SouthWest"] { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.resize-edge[data-dir="SouthEast"] { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.frame.is-maximized .resize-edge { display: none; }
+
+/* ---------- 减弱动效 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .island.is-waking { animation: none; }
+}
+
+/* ---------- 窄窗口降级：结构性折叠，不做流体字号（product register）---------- */
+
+@media (max-width: 1080px) {
+  .shell { grid-template-columns: 64px minmax(0, 1fr) 340px; }
+  .data-live { grid-template-columns: 340px 1px minmax(0, 1fr); }
+}
+@media (max-width: 980px) {
+  .shell { grid-template-columns: 64px 0 minmax(0, 1fr); }
+  .stage { display: none; }
+  .data-live { grid-template-columns: 300px 1px minmax(0, 1fr); }
+  .topbar-left { gap: 12px; }
+  .search { width: 180px; }
+}

@@ -4,267 +4,474 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPeek</title>
-  <link rel="stylesheet" href="vendor/uPlot.min.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">NetPeek</div>
-    <div class="totals">
-      <span class="total-down">↓ <b id="totalDown">0 B/s</b></span>
-      <span class="total-up">↑ <b id="totalUp">0 B/s</b></span>
-    </div>
-    <div class="view-toggle" id="viewToggle">
-      <button class="vt active" data-view="process">按进程</button>
-      <button class="vt" data-view="app">按应用</button>
-    </div>
-    <input id="search" class="search" type="text" placeholder="搜索进程名 / PID" autocomplete="off" />
-    <button id="themeBtn" class="theme-btn" title="外观与主题">外观</button>
-    <button id="settingsBtn" class="theme-btn" title="设置">设置</button>
-    <div class="status" id="status">未连接采集服务</div>
-  </header>
+<!-- 浮岛构图（docs/UI生成提示词.md §2.1）：底图铺满整窗并压暗，四块圆角岛屿浮在上面，
+     中间留一片不放任何 UI 的留白区给底图。窗口无系统边框，圆角与拖动自绘。 -->
+<div class="frame" id="frame">
+  <div class="backdrop"></div>
+  <div class="scrim"></div>
 
-  <div class="content">
-    <div class="main-col">
-      <section class="chart-panel">
-        <div class="chart-head">
-          <span class="chart-title">实时速率</span>
-          <div class="chips">
-            <button class="chip active" data-window="10">10s</button>
-            <button class="chip" data-window="60">1m</button>
-            <button class="chip" data-window="300">5m</button>
+  <div class="shell" id="shell">
+
+    <!-- ========== 顶栏岛（§2.2）：世界的状态 + 看数据的控件 ========== -->
+    <header class="island island--top" id="topbar" data-tauri-drag-region>
+      <div class="topbar" data-tauri-drag-region>
+        <div class="topbar-left" data-tauri-drag-region>
+          <div class="brand" data-tauri-drag-region>
+            <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" />
+            </svg>
+            <span class="brand-name">NetPeek</span>
+          </div>
+
+          <div class="status-pill" id="statusPill">
+            <span class="status-dot"></span>
+            <span id="statusText">未连接采集服务</span>
+          </div>
+          <span class="lost-dot" id="lostDot" hidden title="事件丢失"></span>
+
+          <div class="total">
+            <span class="total-arrow down">↓</span>
+            <span class="total-value down" id="totalDownValue">0</span>
+            <span class="total-unit down" id="totalDownUnit">B/s</span>
+          </div>
+          <div class="total">
+            <span class="total-arrow up">↑</span>
+            <span class="total-value up" id="totalUpValue">0</span>
+            <span class="total-unit up" id="totalUpUnit">B/s</span>
+          </div>
+
+          <div class="today">
+            <span class="today-label">今日合计</span>
+            <span class="today-value" id="todayTotal">—</span>
           </div>
         </div>
-        <div id="rateChart" class="rate-chart"></div>
-      </section>
 
-      <section class="cards" id="cards" aria-label="流量最高的应用"></section>
+        <div data-tauri-drag-region></div>
 
-      <main class="viewport" id="viewport">
-        <table class="proc-table">
-          <thead>
-            <tr>
-              <th data-sort="name">应用 <span class="sort-mark"></span></th>
-              <th class="num" data-sort="pid"><span class="pid-label">PID</span> <span class="sort-mark"></span></th>
-              <th class="num" data-sort="download">下载 <span class="sort-mark"></span></th>
-              <th class="num" data-sort="upload">上传 <span class="sort-mark"></span></th>
-              <th class="num" data-sort="downloadTotal">下载总量 <span class="sort-mark"></span></th>
-              <th class="num" data-sort="uploadTotal">上传总量 <span class="sort-mark"></span></th>
-              <th class="num" data-sort="retransmit">重传 <span class="sort-mark"></span></th>
-            </tr>
-          </thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </main>
-    </div>
+        <div class="topbar-right">
+          <div class="segmented" id="viewToggle" role="tablist" aria-label="视图">
+            <button type="button" class="is-active" data-view="process" role="tab" aria-selected="true">按进程</button>
+            <button type="button" data-view="app" role="tab" aria-selected="false">按应用</button>
+          </div>
 
-    <aside class="detail" id="detail" hidden>
-      <div class="detail-head">
-        <img id="detailIcon" class="detail-icon" alt="" hidden />
-        <span id="detailIconPlaceholder" class="detail-icon placeholder"></span>
-        <div class="detail-title">
-          <div class="detail-name" id="detailName">—</div>
-          <div class="detail-sub" id="detailSub">—</div>
+          <label class="search" id="searchBox">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="m20.5 20.5-4.2-4.2" />
+            </svg>
+            <input id="search" type="search" placeholder="搜索应用 / PID" autocomplete="off"
+                   aria-label="搜索应用或 PID" />
+          </label>
+
+          <div class="win-controls">
+            <button type="button" class="icon-btn" id="winMin" title="最小化" aria-label="最小化">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round"><path d="M5 12h14" /></svg>
+            </button>
+            <button type="button" class="icon-btn" id="winMax" title="最大化" aria-label="最大化">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <rect x="5.5" y="5.5" width="13" height="13" rx="2" /></svg>
+            </button>
+            <button type="button" class="icon-btn is-danger" id="winClose" title="隐藏到托盘" aria-label="隐藏到托盘">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
         </div>
-        <button id="detailClose" class="detail-close" title="关闭详情">×</button>
       </div>
-      <dl class="detail-fields">
-        <dt>路径</dt><dd id="detailPath">—</dd>
-        <dt>PID</dt><dd id="detailPid">—</dd>
-        <dt>进程会话</dt><dd id="detailDuration">—</dd>
-        <dt>下载总量</dt><dd id="detailDownTotal">—</dd>
-        <dt>上传总量</dt><dd id="detailUpTotal">—</dd>
-        <dt>重传</dt><dd id="detailRetrans">—</dd>
-      </dl>
-      <div class="detail-chart-head"><span>近 1 小时速率</span></div>
-      <div id="detailChart" class="detail-chart"></div>
-      <details class="detail-attrib">
-        <summary>归因说明</summary>
-        <ul>
-          <li>流量按事件载荷中的 PID 归因（内核事件头 PID 常为中断进程，不是流量归属方）。</li>
-          <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
-          <li>重传单独统计，不混入上传量。</li>
-        </ul>
-      </details>
+    </header>
+    <!-- ========== 导航岛（§2.3）：四项纯图标，Lucide 线性图标族 ========== -->
+    <nav class="island island--nav" aria-label="主导航">
+      <div class="nav" id="nav">
+        <button type="button" class="nav-item is-active" data-screen="live" data-tip="实时" aria-label="实时">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" />
+          </svg>
+        </button>
+        <button type="button" class="nav-item" data-screen="history" data-tip="历史" aria-label="历史">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 4v16h16" /><path d="M8 20v-5M13 20v-9M18 20v-4" />
+          </svg>
+        </button>
+        <button type="button" class="nav-item" data-screen="theme" data-tip="外观" aria-label="外观">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2.5" />
+            <circle cx="9" cy="9" r="1.8" />
+            <path d="m21 15.5-3.6-3.6a2 2 0 0 0-2.8 0L6.5 21" />
+          </svg>
+        </button>
+        <button type="button" class="nav-item" data-screen="settings" data-tip="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M12.9 2h-1.8a1.6 1.6 0 0 0-1.6 1.6v.4a1.6 1.6 0 0 1-.8 1.4l-.5.3a1.6 1.6 0 0 1-1.6 0l-.3-.2a1.6 1.6 0 0 0-2.2.6l-.4.7a1.6 1.6 0 0 0 .6 2.2l.3.2a1.6 1.6 0 0 1 .8 1.4v.6a1.6 1.6 0 0 1-.8 1.4l-.3.2a1.6 1.6 0 0 0-.6 2.2l.4.7a1.6 1.6 0 0 0 2.2.6l.3-.2a1.6 1.6 0 0 1 1.6 0l.5.3a1.6 1.6 0 0 1 .8 1.4v.4A1.6 1.6 0 0 0 11.1 22h1.8a1.6 1.6 0 0 0 1.6-1.6v-.4a1.6 1.6 0 0 1 .8-1.4l.5-.3a1.6 1.6 0 0 1 1.6 0l.3.2a1.6 1.6 0 0 0 2.2-.6l.4-.7a1.6 1.6 0 0 0-.6-2.2l-.3-.2a1.6 1.6 0 0 1-.8-1.4v-.6a1.6 1.6 0 0 1 .8-1.4l.3-.2a1.6 1.6 0 0 0 .6-2.2l-.4-.7a1.6 1.6 0 0 0-2.2-.6l-.3.2a1.6 1.6 0 0 1-1.6 0l-.5-.3a1.6 1.6 0 0 1-.8-1.4v-.4A1.6 1.6 0 0 0 12.9 2Z" />
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- ========== 留白区（§2.1）：底图的地盘，不放 UI ========== -->
+    <div class="stage">
+      <div class="stage-empty">
+        <div>还没有设置背景图，界面用纯色面板。</div>
+        <button type="button" class="btn" id="stagePickBg">选择背景图</button>
+      </div>
+    </div>
+    <!-- ========== 检查栏岛（§2.4）========== -->
+    <aside class="island island--inspector" aria-label="检查栏">
+
+      <!-- 屏 1 实时：选中一行→详情态，未选中→总览态 -->
+      <div class="pane" data-screen="live">
+        <div class="inspector">
+          <div class="insp-sec insp-head">
+            <img class="insp-icon" id="inspIcon" alt="" hidden />
+            <span class="insp-icon is-placeholder" id="inspIconPh">NP</span>
+            <div class="insp-titles">
+              <div class="insp-name truncate" id="inspName">总览</div>
+              <div class="insp-path" id="inspPath">等待采集服务连接…</div>
+              <div class="insp-meta truncate" id="inspMeta">—</div>
+            </div>
+          </div>
+
+          <div class="insp-sec insp-totals">
+            <div class="insp-total-row">
+              <span class="insp-total-value down" id="inspDownTotal">—</span>
+              <span class="insp-total-label">累计下载</span>
+            </div>
+            <div class="insp-total-row">
+              <span class="insp-total-value up" id="inspUpTotal">—</span>
+              <span class="insp-total-label" id="inspUpLabel">累计上传</span>
+            </div>
+          </div>
+
+          <!-- 详情态：这个应用这一分钟怎么走的 -->
+          <div class="insp-sec insp-chart-sec" id="inspLiveSec" hidden>
+            <div class="sec-head">
+              <span class="sec-title">实时用量</span>
+              <span class="sec-aside">
+                <span class="down" id="inspLiveDown">▼ —</span>
+                <span class="up" id="inspLiveUp">▲ —</span>
+              </span>
+            </div>
+            <div class="chart"><canvas id="inspLiveChart"></canvas></div>
+          </div>
+
+          <!-- 总览态：字段组。归因说明挂在归因覆盖率上，不另设入口。 -->
+          <div class="insp-sec" id="inspFieldsSec">
+            <dl class="insp-fields">
+              <dt>归因覆盖率</dt><dd class="is-link" id="fldCoverage" role="button" tabindex="0"
+                  title="点开查看归因规则">—</dd>
+              <dt>采集服务</dt><dd id="fldService">—</dd>
+              <dt>ETW 丢事件</dt><dd id="fldLost">—</dd>
+              <dt>历史库占用</dt><dd id="fldDbSize">—</dd>
+            </dl>
+            <div class="attrib-note" id="attribNote" hidden>
+              <ul>
+                <li>流量按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
+                <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
+                <li>重传单独统计，不混入上传量。</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- 这个应用一个月用了多少。296px 宽挤不开双色分组柱，上传去历史屏看。 -->
+          <div class="insp-sec insp-chart-sec">
+            <div class="sec-head">
+              <span class="sec-title" id="insp30Title">30 天下载</span>
+              <span class="sec-aside" id="insp30Total">合计 —</span>
+            </div>
+            <div class="chart"><canvas id="insp30Chart"></canvas></div>
+          </div>
+        </div>
+      </div>
+      <!-- 屏 3 历史（§2.6）：区间合计 + 应用排行（取前 8，检查栏放得下几行就显示几行，其余滚动） -->
+      <div class="pane" data-screen="history" hidden>
+        <div class="inspector">
+          <div class="insp-sec insp-head">
+            <div class="insp-titles">
+              <div class="insp-name" id="histRangeTitle">近 30 天</div>
+              <div class="insp-path" id="histRangeSub">点柱状图上的某一天可只看那天</div>
+            </div>
+          </div>
+          <div class="insp-sec range-totals">
+            <div class="range-total-row"><span class="label">下载</span><span class="value down" id="histSumDown">—</span></div>
+            <div class="range-total-row"><span class="label">上传</span><span class="value up" id="histSumUp">—</span></div>
+            <div class="range-total-row"><span class="label">总量</span><span class="value" id="histSumAll">—</span></div>
+          </div>
+          <div class="insp-sec" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div class="sec-head"><span class="sec-title" id="histRankTitle">应用排行</span></div>
+            <div class="rank-list" id="histRank"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 屏 0 外观（§2.7）：模式三选一 + 背景图 -->
+      <div class="pane" data-screen="theme" hidden>
+        <div class="form">
+          <div class="col-title">主题模式</div>
+          <div class="seg-radio" role="radiogroup" aria-label="主题模式">
+            <label><input type="radio" name="tmode" value="standard" checked /><span>标准取色</span></label>
+            <label><input type="radio" name="tmode" value="ai" /><span>AI 自适应</span></label>
+            <label><input type="radio" name="tmode" value="custom" /><span>定制</span></label>
+          </div>
+          <div class="note" id="modeNote">从背景图提主色，完全离线、即时生效。</div>
+
+          <div class="col-title" style="margin-top:6px">背景图</div>
+          <div class="bg-thumb" id="bgThumb"></div>
+          <div class="bg-actions">
+            <button type="button" class="btn" id="bgPick">选择图片…</button>
+            <button type="button" class="btn" id="bgClear">无背景</button>
+            <input type="file" id="bgFile" accept="image/*" hidden />
+          </div>
+          <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
+        </div>
+      </div>
+      <!-- 屏 4 设置（§2.7）：可操作项都在数据岛，检查栏放不可操作的说明 -->
+      <div class="pane" data-screen="settings" hidden>
+        <div class="form">
+          <div class="col-title">关于</div>
+          <div class="note">NetPeek v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</div>
+          <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
+
+          <div class="col-title" style="margin-top:6px">归因边界</div>
+          <div class="attrib-note">
+            <ul>
+              <li>按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
+              <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
+              <li>重传单独统计，不混入上传量。</li>
+              <li>代理 / VPN / WSL 的流量归到代理进程本身，不还原到发起方。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </aside>
-  </div>
+    <!-- ========== 数据岛（§2.5）========== -->
+    <section class="island island--data" aria-label="数据">
+      <button type="button" class="dense-grip" id="denseGrip" aria-expanded="false"
+              aria-label="展开 / 收起密集模式" title="拖动或双击：展开 / 收起密集模式"></button>
 
-  <footer class="statusbar" id="statusbar">
-    <span id="sb-service"></span>
-    <span class="sep"></span>
-    <span id="sb-session"></span>
-    <span class="sep"></span>
-    <span id="sb-coverage"></span>
-  </footer>
-
-  <!-- 三模式主题面板 -->
-  <div class="theme-overlay" id="themeOverlay" hidden>
-    <div class="theme-panel" role="dialog" aria-label="外观与主题">
-      <div class="theme-head">
-        <div class="theme-title">外观与主题</div>
-        <button id="themeClose" class="detail-close" title="关闭">×</button>
-      </div>
-
-      <div class="theme-modes">
-        <label class="tmode">
-          <input type="radio" name="tmode" value="standard" checked />
-          <span><b>标准离线取色</b><small>背景图自动配色，完全离线</small></span>
-        </label>
-        <label class="tmode">
-          <input type="radio" name="tmode" value="ai" />
-          <span><b>AI 自适应</b><small>多模态模型生成，可保存</small></span>
-        </label>
-        <label class="tmode">
-          <input type="radio" name="tmode" value="custom" />
-          <span><b>定制化主题</b><small>预设 / 手动调色</small></span>
-        </label>
-      </div>
-
-      <!-- 背景（模式 1/2 共用） -->
-      <div class="tsec" id="bgSection">
-        <div class="tsec-title">背景图</div>
-        <div class="bg-actions">
-          <button id="bgPick" class="tbtn">选择图片…</button>
-          <button id="bgClear" class="tbtn ghost">无背景</button>
-          <input type="file" id="bgFile" accept="image/*" hidden />
+      <!-- 屏 1 实时：左带宽图答「总带宽这一分钟怎么走的」，右进程表答「谁在占带宽」 -->
+      <div class="pane data-live" data-screen="live">
+        <div class="bandwidth">
+          <div class="sec-head">
+            <span class="sec-title">实时带宽</span>
+            <span class="legend">
+              <span class="down"><i></i>▼ 下载</span>
+              <span class="up"><i></i>▲ 上传</span>
+            </span>
+          </div>
+          <div class="chart"><canvas id="bandwidthChart"></canvas></div>
         </div>
-        <div id="bgStatus" class="tnote">未设置背景（使用面板底色）</div>
-      </div>
 
-      <!-- 模式 1：标准离线取色 -->
-      <div class="tsec" id="stdSection">
-        <div class="tsec-title">微调</div>
-        <label class="tslider">面板不透明度
-          <input type="range" id="stdOpacity" min="0.3" max="1" step="0.01" value="0.92" />
-        </label>
-        <label class="tslider">背景模糊
-          <input type="range" id="stdBlur" min="0" max="40" step="1" value="12" />
-        </label>
-      </div>
+        <div class="vrule"></div>
 
-      <!-- 模式 2：AI 自适应 -->
-      <div class="tsec" id="aiSection" hidden>
-        <div class="tsec-title">AI 提供方</div>
-        <label class="tfield">接口地址
-          <input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" />
-        </label>
-        <label class="tfield">API Key
-          <input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" />
-        </label>
-        <label class="tfield">模型
-          <input type="text" id="aiModel" placeholder="gpt-4o-mini" />
-        </label>
-        <label class="tconsent">
-          <input type="checkbox" id="aiConsent" />
-          <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
-        </label>
-        <button id="aiGenerate" class="tbtn">生成并应用</button>
-        <div id="aiStatus" class="tnote"></div>
-      </div>
-
-      <!-- 模式 3：定制化主题 -->
-      <div class="tsec" id="customSection" hidden>
-        <div class="tsec-title">预设</div>
-        <div class="preset-row">
-          <button class="tbtn preset" data-preset="dark">经典深色</button>
-          <button class="tbtn preset" data-preset="light">经典浅色</button>
-          <button class="tbtn preset" data-preset="contrast">高对比</button>
-        </div>
-        <div class="tsec-title">手动调色</div>
-        <div class="color-grid">
-          <label>背景<input type="color" id="cBg" value="#111418" /></label>
-          <label>面板<input type="color" id="cPanel" value="#1b1f26" /></label>
-          <label>边框<input type="color" id="cBorder" value="#2a2f38" /></label>
-          <label>文字<input type="color" id="cText" value="#f2e6dc" /></label>
-          <label>次要文字<input type="color" id="cMuted" value="#a89184" /></label>
-          <label>下载<input type="color" id="cDown" value="#f0913f" /></label>
-          <label>上传<input type="color" id="cUp" value="#7fa8c9" /></label>
-          <label>正常<input type="color" id="cOk" value="#6fb87a" /></label>
-          <label>警告<input type="color" id="cWarn" value="#d9b44a" /></label>
-          <label>错误<input type="color" id="cError" value="#e14b3a" /></label>
+        <div class="proc" style="display:flex; flex-direction:column; min-width:0;">
+          <div class="table-wrap" id="tableWrap">
+            <table class="proc-table">
+              <colgroup>
+                <col style="width:287px" /><col style="width:88px" />
+                <col style="width:132px" /><col style="width:132px" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th data-sort="name" scope="col">应用 <span class="sort-mark"></span></th>
+                  <th class="is-num" data-sort="pid" scope="col"><span id="pidLabel">PID</span> <span class="sort-mark"></span></th>
+                  <th class="is-num is-sorted" data-sort="download" scope="col">↓ 下载 <span class="sort-mark">▼</span></th>
+                  <th class="is-num" data-sort="upload" scope="col">↑ 上传 <span class="sort-mark"></span></th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </div>
+          <div class="skeleton-rows" id="procSkeleton" hidden aria-hidden="true">
+            <div class="skeleton-row"></div><div class="skeleton-row"></div>
+            <div class="skeleton-row"></div><div class="skeleton-row"></div>
+            <div class="skeleton-row"></div><div class="skeleton-row"></div>
+          </div>
+          <div class="state-box" id="procState" hidden>
+            <div class="state-title" id="procStateTitle">采集服务未连接</div>
+            <div class="state-desc" id="procStateDesc">
+              NetPeek 的 ETW 采集需要 LocalSystem 权限。请确认 NetPeekCollector 服务正在运行。
+            </div>
+            <div class="state-actions" id="procStateActions">
+              <button type="button" class="btn" id="retryConnect">重试连接</button>
+            </div>
+          </div>
         </div>
       </div>
-
-      <!-- 保存 / 主题列表 -->
-      <div class="tsec">
-        <div class="tsec-title">保存与主题列表</div>
-        <div class="save-row">
-          <input type="text" id="themeName" class="tfield" placeholder="主题名称" />
-          <button id="themeSave" class="tbtn">保存主题</button>
+      <!-- 屏 3 历史（§2.6）：柱状图直接可比、可点，这一屏不放折线图 -->
+      <div class="pane hist-data" data-screen="history" hidden>
+        <div class="hist-toolbar">
+          <div class="segmented" id="histRange">
+            <button type="button" data-days="7">近 7 天</button>
+            <button type="button" class="is-active" data-days="30">近 30 天</button>
+            <button type="button" data-days="90">近 90 天</button>
+          </div>
+          <span class="hist-note" id="histAggNote" hidden>按周聚合</span>
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="histExport">导出 CSV</button>
         </div>
-        <div id="themeList" class="theme-list"></div>
+        <div class="chart"><canvas id="histChart"></canvas></div>
       </div>
 
-      <div class="theme-foot">
-        <button id="themeReset" class="tbtn ghost">还原默认</button>
-      </div>
-    </div>
-  </div>
+      <!-- 屏 0 外观（§2.7）：留白区和其余三岛都还在画面里，改令牌当场生效，不造假预览卡 -->
+      <div class="pane cols3" data-screen="theme" hidden>
+        <div class="col">
+          <div class="col-title">微调</div>
+          <div class="slider">
+            <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
+            <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
+                   aria-label="岛屿不透明度" />
+          </div>
+          <div class="slider">
+            <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
+            <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
+                   aria-label="全局压暗" />
+          </div>
+          <div class="slider">
+            <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
+            <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
+          </div>
+          <div class="note">不透明度下限 0.82 是实测值，再低会跌破 4.5:1。</div>
+          <div id="aiSection" hidden style="display:flex; flex-direction:column; gap:10px;">
+            <div class="col-title" style="margin-top:6px">AI 提供方</div>
+            <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
+            <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
+            <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
+            <label class="check">
+              <input type="checkbox" id="aiConsent" />
+              <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
+            </label>
+            <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
+            <div class="note" id="aiStatus"></div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="col-title">语义色</div>
+          <div class="swatches">
+            <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
+            <label class="swatch"><input type="color" id="cPanel" /><span>岛屿</span></label>
+            <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
+            <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
+            <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
+              <input type="color" id="cDown" /><span>下载 🔒</span></label>
+            <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
+              <input type="color" id="cUp" /><span>上传 🔒</span></label>
+            <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
+            <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
+            <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
+            <label class="swatch"><input type="color" id="cBorder" /><span>描边</span></label>
+          </div>
+          <div class="bg-actions" style="margin-top:6px">
+            <button type="button" class="btn" data-preset="dark">经典深色</button>
+            <button type="button" class="btn" data-preset="light">经典浅色</button>
+            <button type="button" class="btn" data-preset="contrast">高对比</button>
+          </div>
+          <div class="note">下载与上传语义锁定：可调明度，不能换语义。</div>
+        </div>
 
-  <!-- 设置面板（阶段 4） -->
-  <div class="theme-overlay" id="settingsOverlay" hidden>
-    <div class="theme-panel" role="dialog" aria-label="设置">
-      <div class="theme-head">
-        <div class="theme-title">设置</div>
-        <button id="settingsClose" class="detail-close" title="关闭">×</button>
-      </div>
-
-      <div class="tsec">
-        <div class="tsec-title">常规</div>
-        <label class="tfield">速率显示单位
-          <select id="setRateUnit" class="tselect">
-            <option value="auto">自动（B / KB / MB / GB）</option>
-            <option value="kb">固定 KB</option>
-            <option value="mb">固定 MB</option>
-            <option value="gb">固定 GB</option>
-          </select>
-        </label>
-        <label class="tconsent">
-          <input type="checkbox" id="setAutostart" />
-          <span>登录时自动启动（写入注册表 HKCU\...\Run）</span>
-        </label>
-      </div>
-
-      <div class="tsec">
-        <div class="tsec-title">历史数据</div>
-        <label class="tfield">保留周期
-          <select id="setRetention" class="tselect">
-            <option value="7">7 天</option>
-            <option value="30">30 天</option>
-            <option value="90">90 天</option>
-            <option value="365">365 天</option>
-            <option value="0">永久保留</option>
-          </select>
-        </label>
-        <div id="histStats" class="tnote">暂无历史数据</div>
-        <div class="bg-actions">
-          <button id="histRefresh" class="tbtn">刷新概览</button>
-          <button id="histClear" class="tbtn ghost">清空历史</button>
+        <div class="col">
+          <div class="col-title">主题列表</div>
+          <div class="bg-actions">
+            <input type="text" id="themeName" placeholder="主题名称"
+                   style="flex:1; min-width:0; height:30px; padding:0 10px; border-radius:8px;
+                          border:1px solid var(--stroke); background:transparent; color:var(--text);
+                          font:inherit; font-size:13px;" />
+            <button type="button" class="btn is-primary" id="themeSave">保存</button>
+          </div>
+          <div class="theme-list" id="themeList"></div>
+          <button type="button" class="btn" id="themeReset" style="margin-top:auto">还原默认</button>
         </div>
       </div>
+      <!-- 屏 4 设置（§2.7）：破坏性动作原地二次确认，不弹模态框。
+           三列都是可操作项；「关于」与归因边界在检查栏，那两块没有可点的东西。 -->
+      <div class="pane cols3" data-screen="settings" hidden>
+        <div class="col">
+          <div class="col-title">常规</div>
+          <label class="field">速率显示单位
+            <select id="setRateUnit">
+              <option value="auto">自动（B / KB / MB / GB）</option>
+              <option value="kb">固定 KB</option>
+              <option value="mb">固定 MB</option>
+              <option value="gb">固定 GB</option>
+            </select>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="setAutostart" />
+            <span>登录时自动启动（写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run）</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="setRecordUnattributed" />
+            <span>记录系统未归因流量（采集端尚未分表，字段已预留）</span>
+          </label>
+          <div class="note">
+            单位设成固定值后，速率与总量都按该单位显示；自动挡按数值大小逐级切换。
+          </div>
+        </div>
 
-      <div class="tsec">
-        <div class="tsec-title">服务状态</div>
-        <div id="svcStatus" class="tnote">未连接采集服务</div>
-        <div id="svcEventsLost" class="tnote"></div>
+        <div class="col">
+          <div class="col-title">历史数据</div>
+          <label class="field">保留周期
+            <select id="setRetention">
+              <option value="7">7 天</option>
+              <option value="30">30 天</option>
+              <option value="90">90 天</option>
+              <option value="365">365 天</option>
+              <option value="0">永久保留</option>
+            </select>
+          </label>
+          <div class="note" id="histStats">暂无历史数据</div>
+          <div class="bg-actions">
+            <button type="button" class="btn" id="histRefresh">刷新概览</button>
+            <button type="button" class="btn" id="histClear">清空历史</button>
+          </div>
+          <div class="confirm-inline" id="histClearConfirm" hidden>
+            <button type="button" class="btn is-danger" id="histClearYes">确认清空</button>
+            <button type="button" class="btn" id="histClearNo">取消</button>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="col-title">采集服务</div>
+          <div class="note" id="svcStatus">未连接采集服务</div>
+          <div class="note" id="svcEventsLost"></div>
+          <div class="bg-actions">
+            <button type="button" class="btn" id="svcPause">暂停采集</button>
+          </div>
+          <div class="note">
+            暂停只停止累计与落库，采集服务本身不退出，恢复后从当前时刻接着算。
+          </div>
+          <div class="note">
+            采集服务以 LocalSystem 运行，ETW 内核会话需要管理员权限。重启服务会中断当前会话计数。
+          </div>
+        </div>
       </div>
+    </section>
+  </div><!-- /.shell -->
 
-      <div class="tsec">
-        <div class="tsec-title">外观</div>
-        <button id="openThemeBtn" class="tbtn">打开外观与主题面板…</button>
-      </div>
+  <!-- 无边框窗口的缩放热区（decorations:false 后系统边框没了，得自己给） -->
+  <div class="resize-edge" data-dir="North"></div>
+  <div class="resize-edge" data-dir="South"></div>
+  <div class="resize-edge" data-dir="West"></div>
+  <div class="resize-edge" data-dir="East"></div>
+  <div class="resize-edge" data-dir="NorthWest"></div>
+  <div class="resize-edge" data-dir="NorthEast"></div>
+  <div class="resize-edge" data-dir="SouthWest"></div>
+  <div class="resize-edge" data-dir="SouthEast"></div>
+</div><!-- /.frame -->
 
-      <div class="tsec">
-        <div class="tsec-title">关于</div>
-        <div class="tnote">NetPeek v0.1.0（阶段 4 开发版）</div>
-      </div>
-    </div>
-  </div>
-
-  <script src="vendor/uPlot.iife.min.js"></script>
-  <script src="theme.js"></script>
-  <script src="theme-ui.js"></script>
-  <script src="settings-ui.js"></script>
-  <script src="main.js"></script>
+<script src="charts.js"></script>
+<script src="theme.js"></script>
+<script src="theme-ui.js"></script>
+<script src="settings-ui.js"></script>
+<script src="history-ui.js"></script>
+<script src="main.js"></script>
 </body>
 </html>

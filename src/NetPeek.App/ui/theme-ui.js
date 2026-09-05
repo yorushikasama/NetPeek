@@ -1,32 +1,40 @@
-// 三模式主题面板的 UI 交互层（依赖 theme.js 引擎）。
+// 外观屏交互层（§2.7）：这一屏是「屏」，不是覆盖层 —— 上一版把被调的界面压暗 45%
+// 再在上面调颜色，等于在失真的画面上取色。现在留白区和其余三岛都还在画面里，
+// 改不透明度或语义色时它们当场变，不需要造一张假的预览卡片。
+//
 // 状态结构（camelCase，与 Rust 持久化的 JSON 一致）：
 // {
 //   mode: 'standard' | 'ai' | 'custom',
-//   themes: { name: theme },
-//   active: 'name',
-//   standard: { panelOpacity, blur },
+//   themes: { name: theme }, active: 'name',
+//   standard: { panelOpacity, blur, scrim },
 //   ai: { provider: { endpoint, apiKey, model }, consented },
-//   custom: tokens(未保存的定制中状态),
-//   pendingBackground: '' | 已落盘的背景路径
+//   custom: 未保存的定制中令牌, pendingBackground: 已落盘的背景路径
 // }
 
 (function () {
   const T = window.NetPeekTheme;
   const $ = (id) => document.getElementById(id);
 
+  const SWATCH_IDS = ['cBg', 'cPanel', 'cText', 'cMuted', 'cDown', 'cUp', 'cOk', 'cWarn', 'cError', 'cBorder'];
+  const SWATCH_TO_TOKEN = {
+    cBg: 'bg', cPanel: 'panel', cText: 'text', cMuted: 'muted', cDown: 'down',
+    cUp: 'up', cOk: 'ok', cWarn: 'warn', cError: 'error', cBorder: 'border',
+  };
+
   const els = {
-    overlay: $('themeOverlay'),
-    btn: $('themeBtn'),
-    close: $('themeClose'),
     modes: Array.from(document.querySelectorAll('input[name="tmode"]')),
-    bgSection: $('bgSection'),
+    modeNote: document.getElementById('modeNote'),
+    bgThumb: $('bgThumb'),
     bgPick: $('bgPick'),
     bgClear: $('bgClear'),
     bgFile: $('bgFile'),
     bgStatus: $('bgStatus'),
-    stdSection: $('stdSection'),
-    stdOpacity: $('stdOpacity'),
-    stdBlur: $('stdBlur'),
+    opacity: $('stdOpacity'),
+    scrim: $('stdScrim'),
+    blur: $('stdBlur'),
+    opValue: $('opValue'),
+    scrimValue: $('scrimValue'),
+    blurValue: $('blurValue'),
     aiSection: $('aiSection'),
     aiEndpoint: $('aiEndpoint'),
     aiApiKey: $('aiApiKey'),
@@ -34,26 +42,35 @@
     aiConsent: $('aiConsent'),
     aiGenerate: $('aiGenerate'),
     aiStatus: $('aiStatus'),
-    customSection: $('customSection'),
-    presets: Array.from(document.querySelectorAll('.preset[data-preset]')),
-    cBg: $('cBg'), cPanel: $('cPanel'), cBorder: $('cBorder'),
-    cText: $('cText'), cMuted: $('cMuted'),
-    cDown: $('cDown'), cUp: $('cUp'),
-    cOk: $('cOk'), cWarn: $('cWarn'), cError: $('cError'),
+    presets: Array.from(document.querySelectorAll('[data-preset]')),
     themeName: $('themeName'),
     themeSave: $('themeSave'),
     themeList: $('themeList'),
     themeReset: $('themeReset'),
   };
+  SWATCH_IDS.forEach((id) => { els[id] = $(id); });
 
   let state = null;
   let storage = null;
-  // 当前背景的 data URL（已解析，直接用于 CSS / AI 请求）
-  let bgDataUrl = '';
-  // 标准模式当前图片（ImageData），无背景时为 null
-  let stdImage = null;
+  let bgDataUrl = '';   // 当前背景的 data URL（已解析，直接给 CSS / AI 请求用）
+  let stdImage = null;  // 标准模式当前图片的 ImageData，无背景时 null
 
   // ---------- 应用主题（含背景解析） ----------
+
+  function tuning() {
+    return {
+      panelOpacity: parseFloat(els.opacity.value),
+      blur: parseInt(els.blur.value, 10),
+      scrim: parseFloat(els.scrim.value),
+    };
+  }
+
+  function syncTuningLabels() {
+    els.opValue.textContent = parseFloat(els.opacity.value).toFixed(2);
+    els.scrimValue.textContent = parseFloat(els.scrim.value).toFixed(2);
+    // 不透明度和压暗是比例，模糊半径是长度，得带单位才知道量级
+    els.blurValue.textContent = `${els.blur.value} px`;
+  }
 
   async function applyWithBg(theme) {
     let bg = theme.background || '';
@@ -63,16 +80,16 @@
     bgDataUrl = bg;
     T.applyTheme({ ...theme, background: bg });
     els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
+    els.bgStatus.className = 'note truncate';
   }
 
-  // ---------- 标准模式：取色 ----------
+  // ---------- 标准模式：从背景图取色 ----------
 
   async function loadImageData(dataUrl) {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        // 缩到 ≤512px 保证取色速度
-        const max = 512;
+        const max = 512; // 缩到 ≤512px 保证取色速度
         const scale = Math.min(1, max / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
         const h = Math.max(1, Math.round(img.height * scale));
@@ -88,195 +105,203 @@
     });
   }
 
-  // 标准模式：从当前背景（或默认深色）生成并应用
   async function runStandard() {
-    const tokensTheme = stdImage
-      ? T.tokensFromImage(stdImage)
-      : T.tokensFromPreset('dark');
-    tokensTheme.panelOpacity = parseFloat(els.stdOpacity.value);
-    tokensTheme.blur = parseInt(els.stdBlur.value, 10);
-    tokensTheme.background = bgDataUrl;
-    tokensTheme.tokens = T.validateTokens(tokensTheme.tokens);
-    await applyWithBg(tokensTheme);
+    const theme = stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark');
+    theme.source = 'standard';
+    Object.assign(theme, tuning());
+    theme.background = bgDataUrl;
+    theme.tokens = T.validateTokens(theme.tokens);
+    fillSwatches(theme.tokens);
+    await applyWithBg(theme);
   }
 
   // ---------- 定制化模式 ----------
 
-  function customFromInputs() {
-    return {
-      source: 'custom',
-      background: bgDataUrl,
-      tokens: {
-        bg: els.cBg.value, panel: els.cPanel.value, border: els.cBorder.value,
-        text: els.cText.value, muted: els.cMuted.value,
-        down: els.cDown.value, up: els.cUp.value,
-        ok: els.cOk.value, warn: els.cWarn.value, error: els.cError.value,
-      },
-      panelOpacity: 1,
-      blur: 0,
-    };
+  function swatchTokens() {
+    const tokens = {};
+    for (const id of SWATCH_IDS) tokens[SWATCH_TO_TOKEN[id]] = els[id].value;
+    return tokens;
   }
 
-  function fillColorInputs(tokens) {
-    els.cBg.value = tokens.bg;
-    els.cPanel.value = tokens.panel;
-    els.cBorder.value = tokens.border;
-    els.cText.value = tokens.text;
-    els.cMuted.value = tokens.muted;
-    els.cDown.value = tokens.down;
-    els.cUp.value = tokens.up;
-    els.cOk.value = tokens.ok;
-    els.cWarn.value = tokens.warn;
-    els.cError.value = tokens.error;
+  function fillSwatches(tokens) {
+    for (const id of SWATCH_IDS) {
+      const v = tokens[SWATCH_TO_TOKEN[id]];
+      if (/^#[0-9a-f]{6}$/i.test(v || '')) els[id].value = v;
+    }
   }
 
   async function runCustom() {
-    const theme = customFromInputs();
-    theme.tokens = T.validateTokens(theme.tokens);
-    fillColorInputs(theme.tokens);
+    const theme = { source: 'custom', background: bgDataUrl, ...tuning() };
+    theme.tokens = T.validateTokens(swatchTokens());
+    fillSwatches(theme.tokens);
     await applyWithBg(theme);
   }
 
   // ---------- AI 模式 ----------
 
+  function syncAiGate() {
+    // 未勾选授权时「生成并应用」是 disabled 态，不是点了报错（§2.7）
+    els.aiGenerate.disabled = !els.aiConsent.checked || !bgDataUrl;
+  }
+
   async function runAi() {
-    els.aiStatus.textContent = '';
-    els.aiStatus.className = 'tnote';
-    if (!els.aiConsent.checked) {
-      els.aiStatus.textContent = '请先勾选「缩略图上传」授权';
-      els.aiStatus.className = 'tnote err';
-      return;
-    }
-    if (!bgDataUrl) {
-      els.aiStatus.textContent = '请先选择一张背景图';
-      els.aiStatus.className = 'tnote err';
-      return;
-    }
-    const provider = {
-      endpoint: els.aiEndpoint.value.trim(),
-      apiKey: els.aiApiKey.value.trim(),
-      model: els.aiModel.value.trim(),
-    };
     els.aiStatus.textContent = 'AI 生成中…';
+    els.aiStatus.className = 'note';
     try {
-      const res = await T.aiGenerate(provider, bgDataUrl);
+      const res = await T.aiGenerate({
+        endpoint: els.aiEndpoint.value.trim(),
+        apiKey: els.aiApiKey.value.trim(),
+        model: els.aiModel.value.trim(),
+      }, bgDataUrl);
       const theme = {
         source: 'ai',
         background: bgDataUrl,
         tokens: T.validateTokens(res.tokens),
-        panelOpacity: res.panelOpacity,
-        blur: res.blur,
+        panelOpacity: T.clamp(res.panelOpacity, 0.82, 1),
+        blur: T.clamp(res.blur, 0, 40),
+        scrim: tuning().scrim,
       };
+      els.opacity.value = theme.panelOpacity;
+      els.blur.value = Math.round(theme.blur);
+      syncTuningLabels();
+      fillSwatches(theme.tokens);
       await applyWithBg(theme);
-      els.aiStatus.textContent = '已应用（可命名保存到主题列表）';
-      els.aiStatus.className = 'tnote ok';
+      state.aiApplied = true;
+      els.aiStatus.textContent = '已应用，可在右侧命名保存到主题列表';
+      els.aiStatus.className = 'note is-ok';
     } catch (err) {
-      // 失败自动回退标准模式
       els.aiStatus.textContent = `AI 失败（${err.message}），已回退标准离线取色`;
-      els.aiStatus.className = 'tnote err';
+      els.aiStatus.className = 'note is-error';
       await runStandard();
     }
   }
 
   // ---------- 模式切换 ----------
 
-  function setMode(mode) {
+  // 语义色只在定制化模式可编辑；其余模式它们展示的是取色/AI 推出来的结果。
+  function setSwatchesEditable(on) {
+    for (const id of SWATCH_IDS) {
+      const locked = id === 'cDown' || id === 'cUp';
+      els[id].disabled = !on || locked;
+      els[id].closest('.swatch').style.opacity = on ? '' : '0.4';
+    }
+    els.presets.forEach((b) => { b.disabled = !on; });
+  }
+
+  // 分段控件只放得下三个词，模式之间的差别写在下面这行说明里
+  const MODE_NOTES = {
+    standard: '从背景图提主色，自动生成强调色与文字明暗。完全离线、即时生效。',
+    ai: '把背景缩略图交给多模态模型生成整套配色，可命名保存复用；失败自动回退标准取色。',
+    custom: '内置预设起步，语义色逐项手调。下载与上传两色语义锁定，不可改。',
+  };
+
+  async function setMode(mode, opts = {}) {
     state.mode = mode;
     els.modes.forEach((r) => { r.checked = r.value === mode; });
-    const showAi = mode === 'ai';
-    els.aiSection.hidden = !showAi;
-    els.customSection.hidden = mode !== 'custom';
-    els.stdSection.hidden = mode === 'custom';
-    // 背景区三种模式都可用（定制化模式也可附带背景？按设计模式 3 不依赖背景 → 隐藏）
-    els.bgSection.hidden = mode === 'custom';
-    if (mode === 'standard') runStandard();
-    if (mode === 'custom') runCustom();
-    if (mode === 'ai') {
-      // AI 未生成前先用标准取色占位预览
-      if (!state.aiApplied) runStandard();
-    }
+    if (els.modeNote) els.modeNote.textContent = MODE_NOTES[mode] || '';
+    els.aiSection.hidden = mode !== 'ai';
+    els.aiSection.style.display = mode === 'ai' ? 'flex' : 'none';
+    setSwatchesEditable(mode === 'custom');
+    if (opts.silent) return;
+    if (mode === 'custom') await runCustom();
+    else await runStandard(); // AI 模式在生成前先用标准取色占位预览
     persist();
   }
 
   // ---------- 主题列表 ----------
 
+  const TAGS = { ai: 'AI', standard: '取色', custom: '定制' };
+
   function renderThemeList() {
     const frag = document.createDocumentFragment();
-    const names = Object.keys(state.themes || {});
-    for (const name of names) {
+    for (const name of Object.keys(state.themes || {})) {
       const th = state.themes[name];
       const item = document.createElement('div');
-      item.className = 'titem' + (state.active === name ? ' active' : '');
-      const tag = th.source === 'ai' ? 'AI' : (th.source === 'standard' ? '取色' : '定制');
+      item.className = 'theme-item' + (state.active === name ? ' is-active' : '');
       item.innerHTML = `
-        <span class="tname">${name}</span>
-        <span class="tag">${tag}</span>
-        <button class="tact" data-act="use" title="应用">✓</button>
-        <button class="tact" data-act="rename" title="重命名">✎</button>
-        <button class="tact" data-act="delete" title="删除">🗑</button>`;
-      item.querySelector('[data-act="use"]').addEventListener('click', async () => {
-        state.active = name;
-        await applyWithBg(th);
-        // 同步滑杆与取色器状态
-        els.stdOpacity.value = th.panelOpacity ?? 0.92;
-        els.stdBlur.value = th.blur ?? 12;
-        if (th.tokens) fillColorInputs(th.tokens);
-        setModeUIFromTheme(th);
-        renderThemeList();
-        persist();
-      });
-      item.querySelector('[data-act="rename"]').addEventListener('click', () => {
-        const nn = prompt('新名称：', name);
-        if (nn && nn.trim() && nn.trim() !== name) {
-          state.themes[nn.trim()] = { ...state.themes[name], name: nn.trim() };
-          if (state.active === name) state.active = nn.trim();
-          delete state.themes[name];
-          renderThemeList();
-          persist();
-        }
-      });
-      item.querySelector('[data-act="delete"]').addEventListener('click', () => {
-        if (!confirm(`删除主题「${name}」？`)) return;
-        delete state.themes[name];
-        if (state.active === name) state.active = 'default';
-        renderThemeList();
-        persist();
-      });
+        <span class="name">${escapeHtml(name)}</span>
+        <span class="tag">${TAGS[th.source] || '定制'}</span>
+        <span class="row-actions">
+          <button type="button" class="icon-btn" data-act="use" title="应用">✓</button>
+          <button type="button" class="icon-btn" data-act="rename" title="重命名">✎</button>
+          <button type="button" class="icon-btn" data-act="delete" title="删除">🗑</button>
+        </span>`;
+      item.querySelector('[data-act="use"]').addEventListener('click', () => useTheme(name));
+      item.querySelector('[data-act="rename"]').addEventListener('click', () => renameTheme(name));
+      item.querySelector('[data-act="delete"]').addEventListener('click', () => deleteTheme(name));
       frag.appendChild(item);
     }
     els.themeList.replaceChildren(frag);
   }
 
-  function setModeUIFromTheme(th) {
-    if (th.source === 'standard') {
-      setMode('standard');
-    } else if (th.source === 'ai') {
-      setMode('ai');
-      state.aiApplied = true;
-      els.aiStatus.textContent = '已应用 AI 主题（可重新生成）';
-      els.aiStatus.className = 'tnote ok';
-    } else {
-      setMode('custom');
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function useTheme(name) {
+    const th = state.themes[name];
+    if (!th) return;
+    state.active = name;
+    state.pendingBackground = th.background || '';
+    els.opacity.value = T.clamp(th.panelOpacity ?? 0.88, 0.82, 1);
+    els.blur.value = Math.round(T.clamp(th.blur ?? 24, 0, 40));
+    els.scrim.value = T.clamp(th.scrim ?? 0.30, 0.2, 0.6);
+    syncTuningLabels();
+    if (th.tokens) fillSwatches(th.tokens);
+    await applyWithBg(th);
+    if (th.background) stdImage = await loadImageData(bgDataUrl);
+    await setMode(th.source === 'ai' ? 'ai' : th.source === 'standard' ? 'standard' : 'custom', { silent: true });
+    renderThemeList();
+    persist();
+  }
+
+  function renameTheme(name) {
+    const next = prompt('新名称：', name);
+    const trimmed = (next || '').trim();
+    if (!trimmed || trimmed === name) return;
+    state.themes[trimmed] = { ...state.themes[name], name: trimmed };
+    if (state.active === name) state.active = trimmed;
+    delete state.themes[name];
+    renderThemeList();
+    persist();
+  }
+
+  function deleteTheme(name) {
+    if (name === 'default') {
+      els.bgStatus.textContent = '默认主题不能删除';
+      els.bgStatus.className = 'note is-warn';
+      return;
     }
+    delete state.themes[name];
+    if (state.active === name) state.active = 'default';
+    renderThemeList();
+    persist();
+  }
+
+  // 当前生效主题（用于保存到列表）
+  function currentTheme() {
+    const base = { ...tuning(), background: state.pendingBackground || bgDataUrl || '' };
+    if (state.mode === 'standard') {
+      const th = stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark');
+      return { ...th, ...base, source: 'standard', tokens: T.validateTokens(th.tokens) };
+    }
+    if (state.mode === 'ai') {
+      return { ...base, source: 'ai', tokens: T.validateTokens(swatchTokens()) };
+    }
+    return { ...base, source: 'custom', tokens: T.validateTokens(swatchTokens()) };
   }
 
   async function persist() {
     if (!storage) return;
+    state.standard = tuning();
     try { await storage.save(state); } catch { /* 持久化失败不阻塞预览 */ }
   }
 
   // ---------- 事件绑定 ----------
 
-  els.btn.addEventListener('click', () => { els.overlay.hidden = false; });
-  els.close.addEventListener('click', () => { els.overlay.hidden = true; });
-  els.overlay.addEventListener('click', (e) => {
-    if (e.target === els.overlay) els.overlay.hidden = true;
-  });
-
   els.modes.forEach((r) => {
-    r.addEventListener('change', () => {
-      if (r.checked) setMode(r.value);
-    });
+    r.addEventListener('change', () => { if (r.checked) setMode(r.value); });
   });
 
   els.bgPick.addEventListener('click', () => els.bgFile.click());
@@ -290,17 +315,18 @@
     });
     try {
       // 落盘到应用数据目录，避免配置 JSON 无限膨胀
-      const path = await storage.saveBackground(dataUrl);
-      state.pendingBackground = path;
+      state.pendingBackground = await storage.saveBackground(dataUrl);
       bgDataUrl = dataUrl;
       stdImage = await loadImageData(dataUrl);
       els.bgStatus.textContent = `已选择 ${file.name}`;
-      if (state.mode === 'standard') await runStandard();
-      if (state.mode === 'ai') await runStandard(); // 占位预览
+      els.bgStatus.className = 'note truncate';
+      syncAiGate();
+      if (state.mode === 'custom') await runCustom();
+      else await runStandard();
       persist();
     } catch (err) {
       els.bgStatus.textContent = `背景加载失败：${err.message}`;
-      els.bgStatus.className = 'tnote err';
+      els.bgStatus.className = 'note is-error';
     }
   });
 
@@ -308,26 +334,37 @@
     state.pendingBackground = '';
     bgDataUrl = '';
     stdImage = null;
-    els.bgStatus.textContent = '未设置背景（使用面板底色）';
-    els.bgStatus.className = 'tnote';
-    await runStandard();
+    syncAiGate();
+    if (state.mode === 'custom') await runCustom();
+    else await runStandard();
     persist();
   });
 
-  els.stdOpacity.addEventListener('input', () => { state.standard.panelOpacity = parseFloat(els.stdOpacity.value); runStandard(); persist(); });
-  els.stdBlur.addEventListener('input', () => { state.standard.blur = parseInt(els.stdBlur.value, 10); runStandard(); persist(); });
+  for (const input of [els.opacity, els.scrim, els.blur]) {
+    input.addEventListener('input', () => {
+      syncTuningLabels();
+      if (state.mode === 'custom') runCustom();
+      else runStandard();
+      persist();
+    });
+  }
 
   els.presets.forEach((b) => {
     b.addEventListener('click', () => {
-      const preset = T.tokensFromPreset(b.dataset.preset);
-      fillColorInputs(preset.tokens);
+      fillSwatches(T.tokensFromPreset(b.dataset.preset).tokens);
       runCustom();
       persist();
     });
   });
 
-  ['cBg', 'cPanel', 'cBorder', 'cText', 'cMuted', 'cDown', 'cUp', 'cOk', 'cWarn', 'cError'].forEach((id) => {
+  SWATCH_IDS.forEach((id) => {
     els[id].addEventListener('input', () => { runCustom(); persist(); });
+  });
+
+  els.aiConsent.addEventListener('change', () => {
+    state.ai.consented = els.aiConsent.checked;
+    syncAiGate();
+    persist();
   });
 
   els.aiGenerate.addEventListener('click', () => {
@@ -336,60 +373,22 @@
       apiKey: els.aiApiKey.value.trim(),
       model: els.aiModel.value.trim(),
     };
-    state.ai.consented = els.aiConsent.checked;
-    runAi();
-    persist();
+    runAi().then(persist);
   });
 
-  els.themeSave.addEventListener('click', async () => {
+  els.themeSave.addEventListener('click', () => {
     const name = els.themeName.value.trim();
-    if (!name) { alert('请输入主题名称'); return; }
-    const current = state.mode === 'ai' && state.aiApplied
-      ? await currentAiTheme()
-      : await currentTheme();
-    if (!current) { alert('当前没有可保存的主题，请先生成/调整'); return; }
-    state.themes[name] = { ...current, name };
+    if (!name) {
+      els.bgStatus.textContent = '请先给主题起个名字';
+      els.bgStatus.className = 'note is-warn';
+      return;
+    }
+    state.themes[name] = { ...currentTheme(), name };
     state.active = name;
     els.themeName.value = '';
     renderThemeList();
     persist();
   });
-
-  // 当前生效主题（用于保存）
-  async function currentTheme() {
-    if (state.mode === 'standard') {
-      const th = stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark');
-      th.tokens = T.validateTokens(th.tokens);
-      th.panelOpacity = parseFloat(els.stdOpacity.value);
-      th.blur = parseInt(els.stdBlur.value, 10);
-      th.background = state.pendingBackground || bgDataUrl;
-      return th;
-    }
-    if (state.mode === 'custom') {
-      const th = customFromInputs();
-      th.tokens = T.validateTokens(th.tokens);
-      th.background = state.pendingBackground || '';
-      return th;
-    }
-    return null; // ai 由 currentAiTheme 处理
-  }
-
-  async function currentAiTheme() {
-    const th = T.cloneTheme(state.themes[state.active]);
-    if (th && th.source === 'ai') return th;
-    // 最近一次 AI 结果没有存为列表项时，从当前生效令牌构造
-    const tokens = {};
-    ['bg', 'panel', 'border', 'text', 'muted', 'down', 'up', 'ok', 'warn', 'error'].forEach((k) => {
-      tokens[k] = getComputedStyle(document.documentElement).getPropertyValue(`--${k}`).trim() || undefined;
-    });
-    return {
-      source: 'ai',
-      tokens: T.validateTokens(tokens),
-      panelOpacity: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--panel-opacity')) || 0.92,
-      blur: parseInt(getComputedStyle(document.documentElement).getPropertyValue('--blur'), 10) || 12,
-      background: state.pendingBackground || '',
-    };
-  }
 
   els.themeReset.addEventListener('click', async () => {
     const def = T.tokensFromPreset('dark');
@@ -397,12 +396,15 @@
     state.themes = { default: { ...def, name: '默认深色', source: 'custom' } };
     state.active = 'default';
     state.pendingBackground = '';
+    state.aiApplied = false;
     stdImage = null;
     bgDataUrl = '';
-    els.stdOpacity.value = 0.92;
-    els.stdBlur.value = 12;
-    fillColorInputs(def.tokens);
-    setMode('standard');
+    els.opacity.value = 0.88;
+    els.blur.value = 24;
+    els.scrim.value = 0.30;
+    syncTuningLabels();
+    fillSwatches(def.tokens);
+    await setMode('standard');
     renderThemeList();
     await persist();
   });
@@ -410,47 +412,32 @@
   // ---------- 启动 ----------
 
   window.NetPeekThemeUI = {
+    // 留白区的「选择背景图」按钮直接借这条路径，不重复实现一遍取图
+    pickBackground() { els.bgFile.click(); },
+
     async init() {
       const boot = await T.initTheme();
       state = boot.state;
       storage = boot.storage;
 
-      // 回填 UI 控件
       els.aiEndpoint.value = state.ai.provider.endpoint || '';
       els.aiApiKey.value = state.ai.provider.apiKey || '';
       els.aiModel.value = state.ai.provider.model || '';
       els.aiConsent.checked = !!state.ai.consented;
-      if (state.standard) {
-        els.stdOpacity.value = state.standard.panelOpacity ?? 0.92;
-        els.stdBlur.value = state.standard.blur ?? 12;
-      }
+      els.opacity.value = T.clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
+      els.blur.value = Math.round(T.clamp(state.standard.blur ?? 24, 0, 40));
+      els.scrim.value = T.clamp(state.standard.scrim ?? 0.30, 0.2, 0.6);
+      syncTuningLabels();
 
-      // 首次运行（无保存配置）：默认标准离线取色模式，无背景时用内置深色兜底。
-      if (boot.fresh) {
-        els.modes.forEach((r) => { r.checked = r.value === 'standard'; });
-        els.customSection.hidden = true;
-        els.bgSection.hidden = false;
-        stdImage = null;
-        bgDataUrl = '';
-        await runStandard();
-        renderThemeList();
-        return;
-      }
-
-      // 应用当前激活主题（含背景图解析）
-      const active = state.themes[state.active] || Object.values(state.themes)[0];
+      const active = boot.fresh ? null : (state.themes[state.active] || Object.values(state.themes)[0]);
       if (active) {
-        state.pendingBackground = active.background || '';
-        if (active.tokens) fillColorInputs(active.tokens);
-        await applyWithBg(active);
-        setModeUIFromTheme(active);
-        if (active.background) {
-          stdImage = await loadImageData(bgDataUrl);
-        }
+        await useTheme(active.name && state.themes[active.name] ? active.name : state.active);
       } else {
-        setMode('standard');
+        await setMode('standard');
+        renderThemeList();
       }
-      renderThemeList();
+      syncAiGate();
     },
   };
 })();
+
