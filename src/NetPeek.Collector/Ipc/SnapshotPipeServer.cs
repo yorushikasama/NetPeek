@@ -25,12 +25,16 @@ public sealed class SnapshotPipeServer
     /// </summary>
     public async Task ServeAsync(Func<TrafficSnapshot> produceSnapshot, int intervalMs, CancellationToken ct)
     {
-        await using var server = new NamedPipeServerStream(
+        // 必须用带 PipeSecurity 的重载：默认 DACL 会放通本机任意用户读取全部进程流量。
+        await using var server = NamedPipeServerStreamAcl.Create(
             IpcConstants.PipeName,
             PipeDirection.Out,
             1,
             PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
+            PipeOptions.Asynchronous,
+            inBufferSize: 0,
+            outBufferSize: 0,
+            PipeSecurityPolicy.CreateForOutboundSnapshot());
 
         _logger.LogInformation("等待 UI 连接命名管道 {Pipe}", IpcConstants.PipeName);
         await server.WaitForConnectionAsync(ct);
@@ -43,9 +47,27 @@ public sealed class SnapshotPipeServer
             // 复用同一块缓冲，避免每帧 SerializeToUtf8Bytes 新分配 byte[]（GC 压力）。
             var jsonBuffer = new ArrayBufferWriter<byte>(64 * 1024);
 
+            // 图标 base64 是静态数据（同一 IconId 永不变），每帧重发会让帧体积涨一个数量级。
+            // 这里按连接记录已发送过的 IconId，后续帧只留 IconId，UI 侧按 id 缓存复用。
+            // 作用域是单个连接：UI 重连后重新发一遍，无需额外协议协商。
+            var sentIcons = new HashSet<string>(StringComparer.Ordinal);
+
             while (!ct.IsCancellationRequested && server.IsConnected)
             {
                 var snapshot = produceSnapshot();
+
+                foreach (var process in snapshot.Processes)
+                {
+                    if (process.IconBase64.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (!sentIcons.Add(process.IconId))
+                    {
+                        process.IconBase64 = "";
+                    }
+                }
 
                 jsonBuffer.Clear();
                 using (var jsonWriter = new Utf8JsonWriter(jsonBuffer))

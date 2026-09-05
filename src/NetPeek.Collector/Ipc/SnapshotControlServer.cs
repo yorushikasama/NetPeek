@@ -33,12 +33,16 @@ public sealed class SnapshotControlServer : BackgroundService
         {
             try
             {
-                await using var server = new NamedPipeServerStream(
+                // 控制通道能停掉监控，默认 DACL 下任意本地进程都可下发命令，必须显式限权。
+                await using var server = NamedPipeServerStreamAcl.Create(
                     IpcConstants.ControlPipeName,
                     PipeDirection.In,
                     1,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                    PipeOptions.Asynchronous,
+                    inBufferSize: 0,
+                    outBufferSize: 0,
+                    PipeSecurityPolicy.CreateForInboundControl());
 
                 await server.WaitForConnectionAsync(stoppingToken);
                 await HandleClientAsync(server, stoppingToken);
@@ -90,14 +94,8 @@ public sealed class SnapshotControlServer : BackgroundService
                 _source.Resume();
                 break;
             case "toggle":
-                if (_source.IsPaused)
-                {
-                    _source.Resume();
-                }
-                else
-                {
-                    _source.Pause();
-                }
+                // 原子翻转：读-改-写分三步时，两个并发 toggle 会互相抵消。
+                _source.TogglePause();
                 break;
             default:
                 _logger.LogWarning("收到未知控制命令：{Command}", command);

@@ -9,11 +9,35 @@ namespace NetPeek.Collector.Sources;
 public sealed class StubSnapshotSource : ISnapshotSource
 {
     private readonly Random _random = new();
-    private bool _paused;
+    private readonly object _pauseGate = new();
+    private volatile bool _paused;
 
     public bool IsPaused => _paused;
-    public void Pause() => _paused = true;
-    public void Resume() => _paused = false;
+
+    public void Pause()
+    {
+        lock (_pauseGate)
+        {
+            _paused = true;
+        }
+    }
+
+    public void Resume()
+    {
+        lock (_pauseGate)
+        {
+            _paused = false;
+        }
+    }
+
+    public bool TogglePause()
+    {
+        lock (_pauseGate)
+        {
+            _paused = !_paused;
+            return _paused;
+        }
+    }
 
     // 每个假进程独立累计，避免全局总量混入单个进程的 DownloadTotal/UploadTotal。
     private readonly ulong[] _downTotal = new ulong[3];

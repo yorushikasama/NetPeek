@@ -142,6 +142,13 @@
     return n;
   }
 
+  function fillSwatches(tokens) {
+    for (const id of SWATCH_IDS) {
+      const v = tokens[SWATCH_TO_TOKEN[id]];
+      if (/^#[0-9a-f]{6}$/i.test(v || '')) els[id].value = v;
+    }
+  }
+
   function activeThemeName() {
     const th = state.themes[state.active];
     if (!th) return '';

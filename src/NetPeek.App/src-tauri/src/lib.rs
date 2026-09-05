@@ -14,8 +14,20 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
+
+/// 广播窗口可见性变化给前端。
+///
+/// 不能只依赖 document.hidden：WebView2 在宿主窗口隐藏时是否触发 visibilitychange
+/// 取决于运行时行为，押注它会漏掉「隐藏到托盘停止重绘」这条硬性验收项（§4.1/§11）。
+/// 所有 show/hide 路径都显式调用这里，前端以该事件为准确信号。
+pub(crate) fn notify_visibility(app: &tauri::AppHandle, label: &str, visible: bool) {
+    let _ = app.emit(
+        "win-visibility",
+        serde_json::json!({ "label": label, "visible": visible }),
+    );
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -114,6 +126,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // 关闭主窗改为隐藏到托盘，程序继续运行。
                 window.hide().unwrap();
+                notify_visibility(window.app_handle(), window.label(), false);
                 api.prevent_close();
             }
         })
@@ -126,5 +139,6 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        notify_visibility(app, "main", true);
     }
 }

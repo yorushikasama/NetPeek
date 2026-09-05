@@ -651,6 +651,15 @@ function renderAll(snap) {
   pulseIfWaking(snap);
 }
 
+// 隐藏到托盘时跳过 DOM/canvas 重绘（§4.1/§11 硬性要求）。
+// 可见性有两个来源：document.hidden（页面级）与 win-visibility 事件 —— WebView2
+// 对宿主窗口隐藏不保证触发 visibilitychange，所以 Rust 侧在 show/hide 时显式广播兜底。
+let winHidden = false;
+function uiVisible() { return !document.hidden && !winHidden; }
+function repaintIfVisible() {
+  if (uiVisible() && screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
+}
+
 function onSnapshot(snap) {
   lastSnapshot = snap;
   pushSamples(snap);
@@ -660,9 +669,12 @@ function onSnapshot(snap) {
     ? (pausedIndex >= 0 ? pausedIndex : samples.length - 1)
     : -1;
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateService(snap);
+  if (!uiVisible()) return;              // 隐藏到托盘：数据照常进采样缓冲，只停重绘
   if (screen !== 'live') return;         // 别的屏不用重画实时件
   renderAll(snap);
 }
+
+document.addEventListener('visibilitychange', repaintIfVisible);
 
 // 断线：数字停在最后一帧，图只留坐标轴，表格换成可重试的异常态（§2.8）
 function onDisconnected() {
@@ -902,6 +914,12 @@ async function boot() {
     await listen('pipe-status', (e) => {
       if (e.payload === 'connected') setProcState('connecting');
       else onDisconnected();
+    });
+    // Rust 侧 show/hide 时广播的窗口可见性（uiVisible 的权威来源，见其注释）
+    await listen('win-visibility', (e) => {
+      if (e.payload.label !== 'main') return;
+      winHidden = !e.payload.visible;
+      repaintIfVisible();
     });
   } else {
     // 浏览器里直接开 index.html 时没有管道，停在异常态而不是空白

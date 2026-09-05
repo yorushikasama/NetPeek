@@ -20,8 +20,10 @@ pub fn toggle_mini(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("mini") {
         if w.is_visible().unwrap_or(false) {
             w.hide().map_err(|e| e.to_string())?;
+            crate::notify_visibility(&app, "mini", false);
         } else {
             w.show().map_err(|e| e.to_string())?;
+            crate::notify_visibility(&app, "mini", true);
         }
     }
     Ok(())
@@ -83,6 +85,7 @@ pub fn show_main_window(app: AppHandle) -> Result<(), String> {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        crate::notify_visibility(&app, "main", true);
     }
     Ok(())
 }

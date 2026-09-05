@@ -36,6 +36,7 @@
 
   let shape = 'orb'; // 'orb' | 'panel'
   let paused = false;
+  let lastSnap = null; // 隐藏到托盘期间停更，恢复可见时用它补画一帧
 
   const tauri = window.__TAURI__;
   const listen = tauri ? tauri.event.listen : () => Promise.resolve(() => {});
@@ -226,6 +227,9 @@
   }
 
   function render(snap) {
+    lastSnap = snap;
+    // 隐藏到托盘时跳过重绘（samples 仍照常更新），恢复可见时由 repaintMini 补画。
+    if (document.hidden || winHidden) return;
     paused = snap.Status === 'paused';
     // 暂停时采集服务停了累计，速率会掉到 0；照着画会让球上瞬间变成 0 ——
     // 那读起来像「断网了」而不是「我按了暂停」。所以画面停在最后一帧。
@@ -324,6 +328,18 @@
   initTokens();
 
   listen('snapshot', (e) => render(e.payload));
+  // 隐藏到托盘时跳过重绘（§4.1）：document.hidden 在 WebView2 隐藏宿主窗口时不保证触发，
+  // 所以 Rust 侧 show/hide 时广播 win-visibility 作为权威信号（初始隐藏，与配置一致）。
+  let winHidden = true;
+  function repaintMini() {
+    if (!document.hidden && !winHidden && lastSnap) render(lastSnap);
+  }
+  document.addEventListener('visibilitychange', repaintMini);
+  listen('win-visibility', (e) => {
+    if (e.payload.label !== 'mini') return;
+    winHidden = !e.payload.visible;
+    repaintMini();
+  });
   // 主界面换主题时广播过来，小窗跟着改（§2.9「小窗跟随主题令牌」）
   listen('theme-changed', (e) => applyTokens(e.payload));
   listen('pipe-status', (e) => {

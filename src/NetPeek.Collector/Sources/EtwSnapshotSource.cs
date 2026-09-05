@@ -38,22 +38,46 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private volatile bool _paused;
     private volatile bool _disposed;
 
+    // 暂停状态的读-改-写需原子完成，否则并发的 toggle 命令会互相抵消。
+    private readonly object _pauseGate = new();
+
     // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
     private int _cachedEventsLost;
     private long _lastEventsLostReadMs;
 
     public bool IsPaused => _paused;
 
-    public void Pause()
+    public void Pause() => SetPaused(true);
+
+    public void Resume() => SetPaused(false);
+
+    public bool TogglePause()
     {
-        _paused = true;
-        _logger.LogInformation("监控已暂停");
+        lock (_pauseGate)
+        {
+            return SetPausedLocked(!_paused);
+        }
     }
 
-    public void Resume()
+    private void SetPaused(bool paused)
     {
-        _paused = false;
-        _logger.LogInformation("监控已恢复");
+        lock (_pauseGate)
+        {
+            SetPausedLocked(paused);
+        }
+    }
+
+    /// <summary>调用方需持有 <see cref="_pauseGate"/>。返回设置后的暂停状态。</summary>
+    private bool SetPausedLocked(bool paused)
+    {
+        if (_paused == paused)
+        {
+            return _paused;
+        }
+
+        _paused = paused;
+        _logger.LogInformation(paused ? "监控已暂停" : "监控已恢复");
+        return _paused;
     }
 
     public EtwSnapshotSource(ILogger<EtwSnapshotSource> logger, ProcessMetadataCache metadata, ProcessIconCache icons)
@@ -234,12 +258,16 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 }
             }
 
+            // 图标内容静态：这里始终填上，由管道层按连接去重后只传首次那一帧。
+            var icon = _icons.Get(counter.Path);
+
             processes.Add(new ProcessTraffic
             {
                 Pid = pid,
                 Name = counter.Name,
                 Path = counter.Path,
-                IconBase64 = _icons.GetDataUrl(counter.Path),
+                IconId = icon.Id,
+                IconBase64 = icon.DataUrl,
                 StartTimeUnixMs = counter.StartTimeUtcFileTime > 0
                     ? (counter.StartTimeUtcFileTime - 116444736000000000) / 10000
                     : 0,

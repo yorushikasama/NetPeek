@@ -31,7 +31,7 @@ function New-Wallpaper([string]$name, [string]$baseTop, [string]$baseBottom,
         $path = New-Object System.Drawing.Drawing2D.GraphicsPath
         $path.AddEllipse([int]($glow[1] - $glow[3]), [int]($glow[2] - $glow[3]), [int](2 * $glow[3]), [int](2 * $glow[3]))
         $pgb = New-Object System.Drawing.Drawing2D.PathGradientBrush($path)
-        $pgb.CenterColor = [System.Drawing.Color]::FromArgb(46, $color.R, $color.G, $color.B)
+        $pgb.CenterColor = [System.Drawing.Color]::FromArgb(110, $color.R, $color.G, $color.B)
         $pgb.SurroundColors = @([System.Drawing.Color]::FromArgb(0, $color.R, $color.G, $color.B))
         $g.FillPath($pgb, $path)
         $pgb.Dispose(); $path.Dispose()
@@ -42,7 +42,7 @@ function New-Wallpaper([string]$name, [string]$baseTop, [string]$baseBottom,
     $vignette.AddRectangle((New-Object System.Drawing.Rectangle(0, 0, $w, $h)))
     $vgb = New-Object System.Drawing.Drawing2D.PathGradientBrush($vignette)
     $vgb.CenterColor = [System.Drawing.Color]::FromArgb(0, 0, 0, 0)
-    $vgb.SurroundColors = @([System.Drawing.Color]::FromArgb(140, 0, 0, 0))
+    $vgb.SurroundColors = @([System.Drawing.Color]::FromArgb(100, 0, 0, 0))
     $g.FillPath($vgb, $vignette)
     $vgb.Dispose(); $vignette.Dispose()
 
@@ -67,9 +67,9 @@ function New-Wallpaper([string]$name, [string]$baseTop, [string]$baseBottom,
 }
 
 # 1 熔金暮色：暖黑底 + 琥珀主光晕（左下）+ 钢蓝回声（右上）——与默认主题同族
-New-Wallpaper 'wall-1' '#1c1510' '#0b0907' '#f0913f' '#7fa8c9' 480 820 1560 220
+New-Wallpaper 'wall-1' '#2a2018' '#141009' '#f0913f' '#7fa8c9' 480 820 1560 220
 # 2 钢蓝深海：冷调，上传蓝为主光
-New-Wallpaper 'wall-2' '#10151b' '#080a0d' '#7fa8c9' '#f0913f' 1500 780 380 240
+New-Wallpaper 'wall-2' '#182029' '#0e1217' '#7fa8c9' '#f0913f' 1500 780 380 240
 # 3 石墨：中性灰阶，光晕极弱，最百搭
-New-Wallpaper 'wall-3' '#191a1c' '#0d0e10' '#8a8f96' '#5a5e64' 960 540 300 900
+New-Wallpaper 'wall-3' '#232529' '#131417' '#8a8f96' '#5a5e64' 960 540 300 900
 Write-Host '内置壁纸生成完毕。'

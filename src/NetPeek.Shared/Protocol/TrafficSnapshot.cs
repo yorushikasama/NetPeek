@@ -12,7 +12,18 @@ public sealed class ProcessTraffic
     /// <summary>进程可执行文件完整路径（可能为空：权限不足或进程已退出）。</summary>
     public string Path { get; set; } = "";
 
-    /// <summary>应用图标（base64 PNG 的 data URL，可能为空：无权限或无图标）。</summary>
+    /// <summary>
+    /// 图标标识（按可执行文件路径生成的稳定短 id，空串表示无图标）。
+    /// 图标内容是静态的，每帧重传 base64 会让帧体积涨一个数量级，因此改为按 id 缓存：
+    /// 同一条管道连接内，某个 id 的 <see cref="IconBase64"/> 只在首帧出现时携带，
+    /// 之后各帧只带 id，UI 按 id 从本地缓存取图。UI 重连时服务端重置发送记录，会重新补发。
+    /// </summary>
+    public string IconId { get; set; } = "";
+
+    /// <summary>
+    /// 应用图标（base64 PNG 的 data URL）。仅在本连接首次出现该 <see cref="IconId"/> 时非空；
+    /// 后续帧为空串，UI 应按 <see cref="IconId"/> 命中自己的缓存，不要当作「图标丢失」。
+    /// </summary>
     public string IconBase64 { get; set; } = "";
 
     /// <summary>进程启动时刻（Unix 毫秒，取自进程创建时间），UI 据此显示进程会话时长；0 表示未知。</summary>
