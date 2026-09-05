@@ -31,6 +31,7 @@
   let selected = -1;      // 选中的柱索引，-1 = 看整个区间
   let hit = null;         // charts.bars 返回的命中测试
   let loaded = false;
+  let loadedAt = 0;       // 行缓存的落盘时刻；库每整分钟落一次，超龄的缓存对调用方不可见
 
   // 图标从最近一帧快照借：历史库只存名字，不存图标。
   function iconFor(name) {
@@ -131,6 +132,7 @@
       xLabels: [buckets[0].label, buckets[buckets.length - 1].label],
       tickLabels: tickLabels(),
       selectedIndex: selected,
+      emptyText: loaded ? '这个区间还没有落库的流量' : '',
     });
   }
 
@@ -243,6 +245,7 @@
       rows = []; // 浏览器预览或库不可用：画空坐标轴，不报错弹窗
     }
     loaded = true;
+    loadedAt = Date.now();
     buckets = buildBuckets();
     selected = -1;
     drawChart();
@@ -292,13 +295,15 @@
       if (buckets.length) drawChart();
       snapRankHeight();
     },
-    // 检查栏「30 天下载」复用同一份日聚合，按应用名过滤
+    // 检查栏「30 天下载」复用同一份日聚合，按应用名过滤。
+    // 缓存超过 60s 视为过期：库每整分钟落一次盘，过期缓存会让「今天」这根柱停在旧值。
     async dailyFor(name, n) {
-      if (!loaded || rows.length === 0) {
+      if (!loaded || rows.length === 0 || Date.now() - loadedAt >= 60000) {
         try {
           const raw = await window.__TAURI__.core.invoke('history_daily', { days: Math.max(n, days) });
           rows = JSON.parse(raw || '[]');
           loaded = true;
+          loadedAt = Date.now();
         } catch { rows = []; }
       }
       const keys = dayKeys(n);

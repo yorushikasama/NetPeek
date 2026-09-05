@@ -194,6 +194,16 @@
     }
     const yMax = niceMax(dataMax || 1);
     const r = drawFrame(ctx, w, h, yMax, opt);
+    // 零数据空态：库里还没有任何落库流量时，画一个「1 / 0」刻度的空坐标框
+    // 读起来像渲染出错。emptyText 由调用方决定措辞（检查栏与历史屏不同）。
+    if (opt.emptyText && !dataMax) {
+      ctx.font = '12px "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif';
+      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(opt.emptyText, (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+      return null;
+    }
     if (!groups.length) return null;
 
     const seriesCount = Math.max(1, groups[0].values.length);

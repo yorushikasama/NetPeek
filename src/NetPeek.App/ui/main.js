@@ -606,22 +606,29 @@ function drawProcChart(p) {
 
 // 30 天下载柱图。检查栏只有 296px 宽，挤不开双色分组柱，上传去历史屏看（§2.4）。
 // 数据复用历史屏那一次日聚合查询，不再单独查库。
+// 库每整分钟落一次盘，仅靠「换选中行才重查」的话，UI 启动那一刻库还是空的
+// 就会永远停在「合计 0 B」—— 所以超过 60s 的渲染强制重查一次。
+const REFRESH_30_MS = 60000;
 let last30Name = undefined;
+let last30At = 0;
 
 async function render30Day(name, force) {
-  if (!force && name === last30Name) return;
+  const stale = Date.now() - last30At >= REFRESH_30_MS;
+  if (!force && name === last30Name && !stale) return;
   last30Name = name;
+  last30At = Date.now();
   els.insp30Title.textContent = name ? '30 天下载' : '30 天下载（全部应用）';
   if (!window.NetPeekHistoryUI) return;
   try {
     const points = await window.NetPeekHistoryUI.dailyFor(name, 30);
     if (last30Name !== name) return;      // 期间又换了选中行，这份结果作废
     const total = points.reduce((s, p) => s + p.value, 0);
-    els.insp30Total.textContent = `合计 ${fmtBytes(total)}`;
+    els.insp30Total.textContent = total > 0 ? `合计 ${fmtBytes(total)}` : '暂无数据';
     C.bars(els.insp30Chart, {
       groups: points.map((p) => ({ label: p.label, values: [p.value] })),
       formatY: C.axisBytes,
       xLabels: points.length ? [points[0].label, points[points.length - 1].label] : [],
+      emptyText: '暂无历史数据',
     });
   } catch {
     els.insp30Total.textContent = '合计 —';
