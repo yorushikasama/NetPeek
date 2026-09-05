@@ -52,8 +52,10 @@
 
   let state = null;
   let storage = null;
-  let bgDataUrl = '';   // 当前背景的 data URL（已解析，直接给 CSS / AI 请求用）
-  let stdImage = null;  // 标准模式当前图片的 ImageData，无背景时 null
+  let bgDataUrl = '';   // 当前背景的 data URL（已解析，直接给 CSS 使用）
+  let stdImage = null;  // 标准模式当前图片的 ImageData（≤512px），取色与 AI 缩略图共用
+  let thumbDataUrl = ''; // AI 请求用的 JPEG 缩略图，随 stdImage 失效
+  let stdBaseCache = { key: null, theme: null }; // 取色结果缓存：键为背景 data URL，滑杆不参与取色
 
   // ---------- 应用主题（含背景解析） ----------
 
@@ -119,13 +121,33 @@
   }
 
   async function runStandard() {
-    const theme = stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark');
+    // 取色只依赖背景图本身，滑杆（不透明度/压暗/模糊）不参与——
+    // 缓存住 medianCut 的结果，拖滑杆时不再重跑取色。
+    const key = bgDataUrl || '';
+    if (stdBaseCache.key !== key) {
+      stdBaseCache = { key, theme: stdImage ? T.tokensFromImage(stdImage) : T.tokensFromPreset('dark') };
+    }
+    const theme = { ...stdBaseCache.theme, tokens: { ...stdBaseCache.theme.tokens } };
     theme.source = 'standard';
     Object.assign(theme, tuning());
     theme.background = bgDataUrl;
     theme.tokens = T.validateTokens(theme.tokens);
     fillSwatches(theme.tokens);
     await applyWithBg(theme);
+  }
+
+  // AI 请求用的缩略图（≤512px JPEG，几 KB 级）：由 stdImage 生成并缓存。
+  // 功能清单承诺「缩略图将上传至所选服务」——原图（可能好几 MB）绝不出本地。
+  function aiThumbDataUrl() {
+    if (!stdImage) return '';
+    if (!thumbDataUrl) {
+      const canvas = document.createElement('canvas');
+      canvas.width = stdImage.width;
+      canvas.height = stdImage.height;
+      canvas.getContext('2d').putImageData(stdImage, 0, 0);
+      thumbDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    }
+    return thumbDataUrl;
   }
 
   // ---------- 定制化模式 ----------
@@ -160,26 +182,28 @@
   async function runAi() {
     els.aiStatus.textContent = 'AI 生成中…';
     els.aiStatus.className = 'note';
+    // 同图复用：像素哈希命中缓存就直接应用，不发请求（§屏0 验收项）。
+    const hash = T.hashImageData(stdImage);
+    const cached = state.ai.cache[hash];
+    if (cached) {
+      await applyAiResult(cached);
+      state.ai.lastImageHash = hash;
+      els.aiStatus.textContent = '同一张图已生成过，直接复用上次结果';
+      els.aiStatus.className = 'note is-ok';
+      return;
+    }
     try {
       const res = await T.aiGenerate({
         endpoint: els.aiEndpoint.value.trim(),
         apiKey: els.aiApiKey.value.trim(),
         model: els.aiModel.value.trim(),
-      }, bgDataUrl);
-      const theme = {
-        source: 'ai',
-        background: bgDataUrl,
-        tokens: T.validateTokens(res.tokens),
-        panelOpacity: T.clamp(res.panelOpacity, 0.82, 1),
-        blur: T.clamp(res.blur, 0, 40),
-        scrim: tuning().scrim,
-      };
-      els.opacity.value = theme.panelOpacity;
-      els.blur.value = Math.round(theme.blur);
-      syncTuningLabels();
-      fillSwatches(theme.tokens);
-      await applyWithBg(theme);
-      state.aiApplied = true;
+      }, aiThumbDataUrl());
+      const applied = await applyAiResult(res);
+      // 缓存「校验并应用后」的结果；上限 5 份，超出淘汰最早的。
+      state.ai.lastImageHash = hash;
+      state.ai.cache[hash] = { tokens: applied.tokens, panelOpacity: applied.panelOpacity, blur: applied.blur };
+      const keys = Object.keys(state.ai.cache);
+      while (keys.length > 5) delete state.ai.cache[keys.shift()];
       els.aiStatus.textContent = '已应用，可在右侧命名保存到主题列表';
       els.aiStatus.className = 'note is-ok';
     } catch (err) {
@@ -187,6 +211,25 @@
       els.aiStatus.className = 'note is-error';
       await runStandard();
     }
+  }
+
+  // 把 AI 结果（或缓存）落到当前界面：校验 → 应用 → 回填滑杆与色板。返回应用后的主题。
+  async function applyAiResult(res) {
+    const theme = {
+      source: 'ai',
+      background: bgDataUrl,
+      tokens: T.validateTokens(res.tokens),
+      panelOpacity: T.clamp(res.panelOpacity, 0.82, 1),
+      blur: T.clamp(res.blur, 0, 40),
+      scrim: tuning().scrim,
+    };
+    els.opacity.value = theme.panelOpacity;
+    els.blur.value = Math.round(theme.blur);
+    syncTuningLabels();
+    fillSwatches(theme.tokens);
+    await applyWithBg(theme);
+    state.aiApplied = true;
+    return theme;
   }
 
   // ---------- 模式切换 ----------
@@ -240,7 +283,7 @@
           <button type="button" class="icon-btn" data-act="delete" title="删除">🗑</button>
         </span>`;
       item.querySelector('[data-act="use"]').addEventListener('click', () => useTheme(name));
-      item.querySelector('[data-act="rename"]').addEventListener('click', () => renameTheme(name));
+      item.querySelector('[data-act="rename"]').addEventListener('click', () => renameTheme(name, item.querySelector('.name')));
       item.querySelector('[data-act="delete"]').addEventListener('click', () => deleteTheme(name));
       frag.appendChild(item);
     }
@@ -264,20 +307,41 @@
     if (th.tokens) fillSwatches(th.tokens);
     await applyWithBg(th);
     if (th.background) stdImage = await loadImageData(bgDataUrl);
+    thumbDataUrl = '';
     await setMode(th.source === 'ai' ? 'ai' : th.source === 'standard' ? 'standard' : 'custom', { silent: true });
     renderThemeList();
     persist();
   }
 
-  function renameTheme(name) {
-    const next = prompt('新名称：', name);
-    const trimmed = (next || '').trim();
-    if (!trimmed || trimmed === name) return;
-    state.themes[trimmed] = { ...state.themes[name], name: trimmed };
-    if (state.active === name) state.active = trimmed;
-    delete state.themes[name];
-    renderThemeList();
-    persist();
+  // 内联重命名：点 ✎ 后名字原位变输入框，Enter/失焦提交，Esc 取消。
+  // 不用 window.prompt —— Tauri 的 webview 对原生脚本对话框支持不可靠。
+  function renameTheme(name, nameEl) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = name;
+    input.className = 'rename-input';
+    input.setAttribute('aria-label', '重命名主题');
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      const next = input.value.trim();
+      if (save && next && next !== name) {
+        state.themes[next] = { ...state.themes[name], name: next };
+        if (state.active === name) state.active = next;
+        delete state.themes[name];
+        persist();
+      }
+      renderThemeList();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') commit(true);
+      else if (e.key === 'Escape') commit(false);
+    });
+    input.addEventListener('blur', () => commit(true));
   }
 
   function deleteTheme(name) {
@@ -287,7 +351,11 @@
       return;
     }
     delete state.themes[name];
-    if (state.active === name) state.active = 'default';
+    if (state.active === name) {
+      // 删的是当前主题：立刻回落到 default 并应用，不能让界面停在被删配色上
+      state.active = 'default';
+      useTheme('default');
+    }
     renderThemeList();
     persist();
   }
@@ -308,7 +376,11 @@
   async function persist() {
     if (!storage) return;
     state.standard = tuning();
-    try { await storage.save(state); } catch { /* 持久化失败不阻塞预览 */ }
+    // 节流 300ms：滑杆每个 input tick 都写盘太狠，停手后半秒落一次。
+    clearTimeout(persist._t);
+    return new Promise((resolve) => {
+      persist._t = setTimeout(() => { storage.save(state).then(resolve, resolve); }, 300);
+    });
   }
 
   // ---------- 事件绑定 ----------
@@ -331,6 +403,7 @@
       state.pendingBackground = await storage.saveBackground(dataUrl);
       bgDataUrl = dataUrl;
       stdImage = await loadImageData(dataUrl);
+      thumbDataUrl = ''; // 换图后旧缩略图作废，AI 请求时按新图重新生成
       els.bgStatus.textContent = `已选择 ${file.name}`;
       els.bgStatus.className = 'note truncate';
       syncAiGate();
@@ -347,6 +420,7 @@
     state.pendingBackground = '';
     bgDataUrl = '';
     stdImage = null;
+    thumbDataUrl = '';
     syncAiGate();
     if (state.mode === 'custom') await runCustom();
     else await runStandard();
@@ -356,7 +430,9 @@
   for (const input of [els.opacity, els.scrim, els.blur]) {
     input.addEventListener('input', () => {
       syncTuningLabels();
-      if (state.mode === 'custom') runCustom();
+      // 滑杆只调材质。AI 已应用时同样走 runCustom（= 当前色板 + 新材质），
+      // 否则会把 AI 配色整个冲回标准取色。
+      if (state.mode === 'custom' || (state.mode === 'ai' && state.aiApplied)) runCustom();
       else runStandard();
       persist();
     });

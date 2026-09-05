@@ -366,28 +366,53 @@ function cloneTheme(t) {
 
 // ---------- AI 模式：调用 OpenAI 兼容多模态接口 ----------
 
+// 缩图像素哈希（FNV-1a，每 4 个像素采 1 个）。同一张图必得同哈希，
+// 用作 AI 结果缓存键——同一张壁纸二次生成直接复用，不再发请求（§屏0 验收项）。
+function hashImageData(img) {
+  const d = img.data;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < d.length; i += 16) {
+    h = ((h ^ d[i]) * 0x01000193) >>> 0;
+    h = ((h ^ d[i + 1]) * 0x01000193) >>> 0;
+    h = ((h ^ d[i + 2]) * 0x01000193) >>> 0;
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+
 async function aiGenerate(provider, imgDataUrl) {
   // 校验提供方配置与授权（授权在 UI 层把关）
   if (!provider || !provider.endpoint || !provider.apiKey || !provider.model) {
     throw new Error('未配置 AI 提供方（endpoint / API key / model）');
   }
   const url = provider.endpoint.replace(/\/$/, '');
-  const res = await fetch(`${url}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
-    body: JSON.stringify({
-      model: provider.model,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: '根据这张壁纸生成一套 UI 主题令牌，输出 JSON（不要代码块）：{"bg":"#hex","panel":"#hex","border":"#hex","text":"#hex","muted":"#hex","down":"#hex","up":"#hex","ok":"#hex","warn":"#hex","error":"#hex","panelOpacity":0.9,"blur":12}。颜色需与壁纸风格协调，保证文字可读。' },
-          { type: 'image_url', image_url: { url: imgDataUrl } },
-        ],
-      }],
-    }),
-  });
+  // 20s 超时：endpoint 不通时不能让 UI 干等，超时走调用方的标准取色回退。
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  let res;
+  try {
+    res = await fetch(`${url}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
+      body: JSON.stringify({
+        model: provider.model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '根据这张壁纸生成一套 UI 主题令牌，输出 JSON（不要代码块）：{"bg":"#hex","panel":"#hex","border":"#hex","text":"#hex","muted":"#hex","down":"#hex","up":"#hex","ok":"#hex","warn":"#hex","error":"#hex","panelOpacity":0.9,"blur":12}。颜色需与壁纸风格协调，保证文字可读。' },
+            { type: 'image_url', image_url: { url: imgDataUrl } },
+          ],
+        }],
+      }),
+      signal: ctl.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('AI 请求超时（20s），请检查接口地址');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error(`AI 请求失败 HTTP ${res.status}`);
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || '';
@@ -440,6 +465,7 @@ async function initTheme() {
   state.standard.panelOpacity = clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
   if (!state.ai) state.ai = { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false };
   if (!state.ai.provider) state.ai.provider = { endpoint: '', apiKey: '', model: 'gpt-4o-mini' };
+  if (!state.ai.cache) state.ai.cache = {}; // 哈希 → { tokens, panelOpacity, blur }，同图复用不发请求
   if (!state.custom) state.custom = tokensFromPreset('dark');
   // 保证默认主题存在
   if (!state.themes.default) {
@@ -465,6 +491,7 @@ window.NetPeekTheme = {
   applyTheme,
   makeTheme,
   cloneTheme,
+  hashImageData,
   aiGenerate,
   configStorage,
   initTheme,

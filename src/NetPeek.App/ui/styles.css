@@ -993,6 +993,22 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .theme-item.is-active { border-color: var(--edge); background: var(--surface-hi); }
 .theme-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 主题列表的内联重命名输入框：与行同高，占满名字位 */
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--edge);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.rename-input:focus { outline: none; border-color: var(--down); }
 .theme-item .tag {
   font-size: 11px;
   color: var(--text-muted);
