@@ -119,9 +119,14 @@
 
     <!-- ========== 留白区（§2.1）：底图的地盘，不放 UI ========== -->
     <div class="stage">
+      <!-- 无底图态是「留白区不放 UI」唯一的例外（§2.8）。措辞是邀请而不是故障播报：
+           不设背景图界面也完整可用，这块留白本来就是给底图的地盘。 -->
       <div class="stage-empty">
-        <div>还没有设置背景图，界面用纯色面板。</div>
-        <button type="button" class="btn" id="stagePickBg">选择背景图</button>
+        <div class="stage-empty-title">这片留白是给背景图的</div>
+        <div class="stage-empty-note">
+          选一张图，四块面板会浮在它上面，主色也从图里取。不设也能用，界面走当前的暗色令牌。
+        </div>
+        <button type="button" class="btn is-primary" id="stagePickBg">选择背景图</button>
       </div>
     </div>
     <!-- ========== 检查栏岛（§2.4）========== -->
@@ -275,8 +280,11 @@
         <div class="proc" style="display:flex; flex-direction:column; min-width:0;">
           <div class="table-wrap" id="tableWrap">
             <table class="proc-table">
+              <!-- 应用列不给固定宽度：table-layout:fixed + width:100% 下，剩余宽度全归它。
+                   四列都写死像素时，密集模式的数据岛比默认窄 80px，合计 639px 的列宽撑爆
+                   overflow-x:hidden 的容器，上传列连表头一起被岛屿右边缘裁掉。 -->
               <colgroup>
-                <col style="width:287px" /><col style="width:88px" />
+                <col /><col style="width:88px" />
                 <col style="width:132px" /><col style="width:132px" />
               </colgroup>
               <thead>

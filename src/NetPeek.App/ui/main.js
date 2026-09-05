@@ -107,6 +107,15 @@ function fmtBytes(bytes) {
   return `${Math.round(bytes)} B`;
 }
 
+// 图标取不到时的首字母占位。未归因流量的名字是「(系统/未归因)」，
+// 直接切首字符会在徽标里画一个孤零零的半角括号，读成渲染出错而不是占位。
+const UNATTR = '(系统/未归因)';
+function initialOf(name, len) {
+  const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
+  if (!s) return '·';
+  return s.slice(0, len || 1).toUpperCase();
+}
+
 // 顶栏的数字和单位分两个元素：单位降到 75% 不透明度且不跟着数字放大（§2.2）
 function splitUnit(text) {
   const i = text.lastIndexOf(' ');
@@ -322,7 +331,7 @@ function updateRow(tr, p, peakDown) {
   } else {
     r.img.hidden = true;
     r.ph.hidden = false;
-    r.ph.textContent = name.slice(0, 1).toUpperCase();
+    r.ph.textContent = initialOf(name, 1);
   }
   if (r.name.textContent !== name) r.name.textContent = name;
   r.suffix.textContent = viewMode === 'app' ? `×${p.Pid}` : '';
@@ -462,7 +471,7 @@ function renderDetail(snap, p) {
   } else {
     els.inspIcon.hidden = true;
     els.inspIconPh.hidden = false;
-    els.inspIconPh.textContent = name.slice(0, 2).toUpperCase();
+    els.inspIconPh.textContent = initialOf(name, 2);
   }
   els.inspName.textContent = name;
   // 路径在 \ 后插零宽空格，换行才断在目录分隔符上，不会把 com.netpeek.app 劈成两截
@@ -867,6 +876,8 @@ window.NetPeekLive = {
   lastSnapshot: () => lastSnapshot,
   fmtBytes,
   fmtRate,
+  initialOf,
+  UNATTR,
 };
 
 async function boot() {
@@ -890,7 +901,10 @@ async function boot() {
     onDisconnected();
   }
 
-  await bindWindowFrame();
+  // 和下面两行一样包起来：窗口装饰绑定失败（旧版 Tauri 缺 onResized 之类）只该让
+  // 拖动/缩放失灵，不该把后面的主题、设置、首绘一起带走 —— 那会让整个界面停在
+  // 未初始化状态：语义色块全黑、图表用不到主题色。
+  try { await bindWindowFrame(); } catch { /* 无边框控件降级，界面继续起 */ }
   // 主题要在首绘之前起来：图里的颜色是从 --down / --up 读出来画上去的
   if (window.NetPeekThemeUI) { try { await window.NetPeekThemeUI.init(); } catch { /* 用默认令牌 */ } }
   if (window.NetPeekSettingsUI) { try { await window.NetPeekSettingsUI.init(); } catch { /* 用默认设置 */ } }

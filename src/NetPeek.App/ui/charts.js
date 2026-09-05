@@ -68,7 +68,11 @@
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
 
-    const levels = [yMax, yMax / 2, 0];
+    // 量程塌到 1 时，三档会被 formatY 全格成同一个字符串（「1 / 1 / 0」这种读不出的轴）。
+    // 这时只标上限和 0，中位那一档连线也不画。
+    const midLabel = opt.formatY(yMax / 2);
+    const dupMid = midLabel === opt.formatY(yMax) || midLabel === opt.formatY(0);
+    const levels = dupMid ? [yMax, 0] : [yMax, yMax / 2, 0];
     ctx.save();
     ctx.strokeStyle = line;
     ctx.lineWidth = 1;
@@ -76,7 +80,7 @@
     for (let i = 0; i < levels.length; i++) {
       const y = Math.round(bottom - (levels[i] / yMax) * plotH) + 0.5;
       ctx.fillText(opt.formatY(levels[i]), AXIS_W - 8, y);
-      if (i < 2) {
+      if (levels[i] !== 0) {
         ctx.beginPath();
         ctx.moveTo(left, y);
         ctx.lineTo(right, y);
@@ -117,7 +121,14 @@
     if (opt.axesOnly) return;
 
     const step = r.plotW / (slots - 1);
-    const yFor = (v) => r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
+    // 非零值不许压在绘图区底边上。上传常比下载小一到两个数量级（1.3M/s 对 10M/s 的量程），
+    // 按比例算出来的 y 会和底边差不到 1px，整条上传线就读成了坐标框的一部分。
+    // 抬起 2px 只影响「有流量但很小」这一档的可读性，真正的 0 仍然压在底边。
+    const LIFT = 2;
+    const yFor = (v) => {
+      const y = r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
+      return v > 0 ? Math.min(y, r.bottom - LIFT) : y;
+    };
 
     for (const s of series) {
       const n = s.values.length;

@@ -140,9 +140,27 @@ body:not(.has-bg) .scrim { display: none; }
    导航岛留在原位 —— 唯一的导航入口不该被一个临时视图吞掉。 */
 .shell.is-dense { grid-template-rows: 58px 0px minmax(0, 1fr); }
 .shell.is-dense .island--nav { grid-row: 2 / 4; }
-.shell.is-dense .island--data { grid-column: 2 / 4; }
+/* 数据岛在密集模式下仍从第 1 列起：跟着导航岛缩到第 2 列会让它的左边缘落在
+   x=92，而顶栏岛还在 x=14，四岛共享的左边缘就断了。导航岛自己是 align-self:start
+   的 268px，行跨到底也不会把 64px 的列撑开，所以两者可以叠在同一列范围内。 */
+.shell.is-dense .island--data { grid-column: 1 / 4; padding-left: 64px; }
 .shell.is-dense .stage,
 .shell.is-dense .island--inspector { display: none; }
+
+/* 密集模式下导航不再是独立岛屿，而是这一块岛内的竖直导航条：否则它的玻璃会叠在
+   数据岛的玻璃上（材质是为「岛屿浮在底图上」设计的，不是岛叠岛）。 */
+.shell.is-dense .island--nav {
+  /* 数据岛横跨整行、用 padding-left 让出这一条，两者重叠，导航必须画在上面 */
+  z-index: var(--z-grip);
+  height: auto;
+  align-self: stretch;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
 
 /* ---------- 岛屿材质（§3.2）---------- */
 
@@ -463,18 +481,47 @@ body:not(.has-bg) .island {
 /* 底图的地盘，不放任何 UI。唯一例外：没有底图时这里没有画面可保护（§2.8）。 */
 
 .stage { position: relative; }
+
+/* 无底图态（§2.8，也是「留白区不放 UI」唯一的例外）。
+   这一态过去是纯 --bg 上摆一句灰字加一个次要按钮：四块岛屿浮在一片死黑上，
+   浮岛构图的前提（岛下面有东西）直接没了，中间那片留白也就从「给底图的地盘」
+   变成了「没做完的地方」。所以无底图时窗口自己画一层底：同色系的暗场，
+   不是照片，但足够让岛屿浮在一个表面上而不是浮在虚空里。
+   色相全部取品牌自己的琥珀与钢蓝（§1.2 的两个语义色），不往暖中性米色偏。 */
+body:not(.has-bg) .backdrop {
+  background-image:
+    radial-gradient(120% 90% at 18% 0%, rgba(240, 145, 63, 0.10), transparent 60%),
+    radial-gradient(90% 80% at 100% 100%, rgba(127, 168, 201, 0.07), transparent 62%);
+  background-size: auto;
+}
+
 .stage-empty {
   display: none;
   height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  color: var(--text-muted);
-  font-size: 13px;
+  gap: 14px;
   text-align: center;
+  padding: 0 24px;
 }
 body:not(.has-bg) .stage-empty { display: flex; }
+
+/* 这一句是邀请，不是故障播报：主文字色、17px，和检查栏应用名同一档（§3.3），
+   下面一行才用次要色补「不设也能用」。原来整块都是 13px 次要灰，读起来像报错。 */
+.stage-empty-title {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.stage-empty-note {
+  max-width: 34ch;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
 
 /* ---------- 检查栏岛（§2.4）---------- */
 
@@ -910,14 +957,24 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 /* 语义色块。下载与上传语义锁定，不许改（§1.2）。 */
 .swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; }
 .swatch { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+/* 色块必须显示它自己的值。`background: transparent` 会把 Chromium 画的色样整块抹掉，
+   十个色块一起塌成黑框 —— 一个不显示颜色的取色器。留白交给 ::-webkit-color-swatch，
+   它才是那块颜色，外层 wrapper 只负责内缩。 */
 .swatch input[type="color"] {
   width: 30px;
   height: 24px;
   padding: 0;
   border: 1px solid var(--stroke);
   border-radius: var(--r-ctl);
-  background: transparent;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background: none;
+}
+.swatch input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.swatch input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 5px;
 }
 .swatch.is-locked { opacity: 0.85; }
 .swatch.is-locked input { pointer-events: none; }

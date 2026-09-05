@@ -81,17 +81,27 @@
   }
 
   function fmtTs(tsSecs) {
-    if (!tsSecs) return '—';
+    if (!tsSecs) return '';
     const d = new Date(tsSecs * 1000);
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
+  // 「41822 条 · — ~ — · 7.3 MB」这种串是把缺失值当成值印出去了：
+  // 两端都取不到时间戳就不摆这一段，只报条数和占用。
+  function fmtRange(firstTs, lastTs) {
+    const a = fmtTs(firstTs);
+    const b = fmtTs(lastTs);
+    if (a && b) return `${a} ~ ${b}`;
+    return a || b || '';
+  }
+
   async function refreshStats() {
     try {
       stats = JSON.parse(await invoke('history_stats'));
+      const range = stats.rows ? fmtRange(stats.firstTs, stats.lastTs) : '';
       els.histStats.textContent = stats.rows
-        ? `${stats.rows} 条 · ${fmtTs(stats.firstTs)} ~ ${fmtTs(stats.lastTs)} · ${fmtSize(stats.bytes)}`
+        ? [`${stats.rows} 条`, range, fmtSize(stats.bytes)].filter(Boolean).join(' · ')
         : '暂无历史数据（分钟聚合每整分钟落库一次）';
       els.histStats.className = 'note';
     } catch {

@@ -79,6 +79,14 @@
     }[c]));
   }
 
+  // 图标取不到时的首字母占位。跳过开头的非字母数字：未归因流量那类以半角括号
+  // 开头的名字直接切首字符，会在徽标里画一个孤零零的括号。小窗只加载 theme.js，
+  // 拿不到主界面那份实现，所以这里自己带一份。
+  function initialOf(name) {
+    const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
+    return s ? s.slice(0, 1).toUpperCase() : '·';
+  }
+
   // ---------- 环形规 ----------
 
   // 近 60 帧的速率，用来算峰值。当前帧先纳入再取峰值，所以比例恒 ≤ 1。
@@ -187,7 +195,7 @@
       row.innerHTML = `
         ${a.IconBase64
           ? `<img src="${a.IconBase64}" alt="" />`
-          : `<span class="pico">${esc(a.Name.slice(0, 1).toUpperCase())}</span>`}
+          : `<span class="pico">${esc(initialOf(a.Name))}</span>`}
         <span class="pname" title="${esc(a.Name)}">${esc(a.Name)}</span>
         <span class="prate is-down">↓${d.v} ${d.u}</span>
         <span class="prate is-up">↑${u.v} ${u.u}</span>`;

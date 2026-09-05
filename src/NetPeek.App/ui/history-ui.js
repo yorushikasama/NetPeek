@@ -47,6 +47,16 @@
     return window.NetPeekLive ? window.NetPeekLive.fmtBytes(bytes) : `${bytes} B`;
   }
 
+  // 未归因流量的名字以半角括号开头，切首字符会在徽标里画一个孤零零的括号，
+  // 读成渲染出错而不是占位 —— 首字母一律走 main.js 那份实现，两屏保持一致。
+  function initial(name) {
+    return window.NetPeekLive ? window.NetPeekLive.initialOf(name, 1) : '·';
+  }
+
+  function unattrName() {
+    return window.NetPeekLive ? window.NetPeekLive.UNATTR : '(系统/未归因)';
+  }
+
   // 生成从 days 天前到今天的连续本地日期串，缺数据的那天也要占一根空柱，
   // 否则「哪天没用网」这个信息会被压缩掉。
   function dayKeys(n) {
@@ -192,11 +202,11 @@
       row.style.backgroundImage =
         `linear-gradient(90deg, rgba(240,145,63,0.09), rgba(240,145,63,0) ${share}%)`;
       const icon = iconFor(app.name);
-      const name = app.name || '(系统/未归因)';
+      const name = app.name || unattrName();
       row.innerHTML = `
         ${icon
           ? `<img class="rank-icon" src="${icon}" alt="" />`
-          : `<span class="rank-icon is-placeholder">${escapeHtml(name.slice(0, 1).toUpperCase())}</span>`}
+          : `<span class="rank-icon is-placeholder">${escapeHtml(initial(app.name))}</span>`}
         <span class="rank-name">${escapeHtml(name)}</span>
         <span class="rank-value">${fmt(app.down)}</span>`;
       frag.appendChild(row);
