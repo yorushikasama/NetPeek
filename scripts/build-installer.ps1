@@ -1,4 +1,4 @@
-# NetPeek 安装包构建脚本（阶段 5）
+﻿# NetPeek 安装包构建脚本（阶段 5）
 # 步骤：
 #   1. 发布采集服务：self-contained 单文件 win-x64（LocalSystem 服务不依赖用户装 .NET 运行时）
 #      → src-tauri/installer/collector/NetPeek.Collector.exe（collector.wxs 的 File Source 相对路径）

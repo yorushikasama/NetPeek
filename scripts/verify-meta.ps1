@@ -1,4 +1,4 @@
-# NetPeek 进程元数据冒烟验证脚本
+﻿# NetPeek 进程元数据冒烟验证脚本
 # 验证链路：采集服务（管理员）-> 命名管道 -> 快照中的 Path / IconBase64 / StartTimeUnixMs 字段端到端生效。
 # 用法：pwsh -ExecutionPolicy Bypass -File scripts\verify-meta.ps1
 # 输出同时写入 %TEMP%\netpeek-verify-meta.log（提权新窗口关闭后可从日志读结果）。

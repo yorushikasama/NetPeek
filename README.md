@@ -46,7 +46,7 @@ pwsh -File scripts/build-installer.ps1
 | .NET 8 SDK | 采集服务 |
 | Rust 工具链 + Cargo | Tauri 外壳 |
 | Node + npm | 只为装 `@tauri-apps/cli` |
-| PowerShell 7（`pwsh`） | 跑验证与打包脚本；5.1 会把无 BOM 的 UTF-8 当 GBK 读，中文乱码 |
+| PowerShell 7（`pwsh`） | 跑验证与打包脚本；5.1 也能跑，`scripts/*.ps1` 存的是 UTF-8 带 BOM |
 
 ### 采集服务（需管理员，否则 ETW 会话开不起来）
 

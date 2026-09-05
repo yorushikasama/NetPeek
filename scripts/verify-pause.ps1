@@ -1,4 +1,4 @@
-# NetPeek 暂停/恢复监控 端到端验证脚本
+﻿# NetPeek 暂停/恢复监控 端到端验证脚本
 # 验证链路：UI 侧控制命令 -> 反向控制管道 -> 采集服务 Pause/Resume -> 快照 Status/速率变化。
 # 用法：以管理员身份运行（ETW 需要权限）：
 #   pwsh -ExecutionPolicy Bypass -File scripts\verify-pause.ps1
