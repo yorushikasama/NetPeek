@@ -34,13 +34,16 @@ window.__TAURI__ = {
       if (cmd === 'history_range') {
         var start = Math.floor(args.start || 0), end = Math.floor(args.end || Date.now() / 1000);
         var bucket = Math.floor(args.bucket || 86400);
+        var anchor = Math.floor(args.anchor || 0);
         var names = ['steam', 'ZCode', 'QQ', 'chrome', 'msedge', 'verge-mihomo'];
         var rows = [];
         for (var ts = Math.floor(start / 60) * 60; ts < end; ts += 300) {
           names.forEach(function (n, i) {
             var wave = Math.round((1 + Math.sin(ts / 86400 + i) / 2) * (i + 1) * 1e6);
             var d = new Date(ts * 1000); d.setHours(0, 0, 0, 0);
-            var key = bucket === 3600 ? Math.floor(ts / 3600) * 3600 : Math.floor(d.getTime() / 1000);
+            var key = bucket === 3600 ? Math.floor(ts / 3600) * 3600
+              : (bucket === 604800 ? anchor + Math.floor((ts - anchor) / 604800) * 604800
+                : Math.floor(d.getTime() / 1000));
             rows.push({ ts: key, name: n, down: wave, up: Math.round(wave / 6) });
           });
         }
@@ -172,13 +175,103 @@ async function drive(wsUrl) {
   if (err) console.error('PAGE ERROR:', err.slice(0, 800));
   console.log('bg-state:', await evalJs(`document.body.className + ' | ' + getComputedStyle(document.documentElement).getPropertyValue('--theme-bg-image').slice(0, 80)`));
   await shot('1-live');
+  await new Promise((r) => setTimeout(r, 200));
+  // 实时屏检查栏「30 天下载」小图：bars 画了多少根、合计对不对
+  console.log('30d-probe:', await evalJs(`(() => {
+    const cv = document.getElementById('insp30Chart');
+    const st = cv && cv.__npBars;
+    return JSON.stringify({
+      title: document.getElementById('insp30Title').textContent,
+      total: document.getElementById('insp30Total').textContent,
+      bars: st && st.rects ? st.rects.length : -1,
+      size: cv ? cv.width + 'x' + cv.height : 'none',
+    });
+  })()`));
 
   await evalJs(`document.querySelector('.nav-item[data-screen="history"]').click()`);
   await shot('2-history');
+  await new Promise((r) => setTimeout(r, 300));
+  console.log('hist-probe:', await evalJs(`(() => {
+    const c = document.getElementById('histChart');
+    const inst = window.echarts && echarts.getInstanceByDom(c);
+    return JSON.stringify({
+      inst: !!inst,
+      title: document.getElementById('histRangeTitle').textContent,
+      sumDown: document.getElementById('histSumDown').textContent,
+      sumUp: document.getElementById('histSumUp').textContent,
+      aggNoteHidden: document.getElementById('histAggNote').hidden,
+      rankRows: document.querySelectorAll('#histRank .rank-row').length,
+      chartSize: c ? c.clientWidth + 'x' + c.clientHeight : 'none',
+    });
+  })()`));
+  // 周桶数据一致性：>90 天自定义区间走 WEEK，stub 产出键必须全部落在
+  // 前端 buildBuckets 的锚点序列上（dropped = 0），否则图表会静默缺桶
+  console.log('week-probe:', await evalJs(`(async () => {
+    const start = Math.floor(Date.now() / 1000) - 100 * 86400;
+    const d = new Date(start * 1000);
+    const back = (d.getDay() + 6) % 7;
+    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back, 0, 0, 0, 0);
+    const anchor = Math.floor(monday.getTime() / 1000);
+    const end = Math.floor(Date.now() / 1000) + 60;
+    const raw = await window.__TAURI__.core.invoke('history_range', { start, end, bucket: 604800, anchor });
+    const rows = JSON.parse(raw);
+    const expected = [];
+    for (let ts = anchor; ts < end; ts += 604800) expected.push(ts);
+    const dropped = rows.filter((r) => !expected.includes(r.ts)).length;
+    return JSON.stringify({ anchor, buckets: expected.length, rows: rows.length, dropped });
+  })()`));
+  // 交互回归：切档 / 自定义区间 / 聚合提示 / 桶数。桶数是 echarts 序列长度，
+  // 直接读实例，不依赖截图。
+  console.log('hist-interact:', await evalJs(`(async () => {
+    const chart = document.getElementById('histChart');
+    const inst = () => echarts.getInstanceByDom(chart);
+    const read = () => ({
+      title: document.getElementById('histRangeTitle').textContent,
+      note: document.getElementById('histAggNote').textContent,
+      noteHidden: document.getElementById('histAggNote').hidden,
+      buckets: inst() ? inst().getOption().series[0].data.length : -1,
+      sum: document.getElementById('histSumAll').textContent,
+      rankRows: document.querySelectorAll('#histRank .rank-row').length,
+    });
+    const wait = () => new Promise((r) => setTimeout(r, 250));
+    document.querySelector('#histRange button[data-days="7"]').click();
+    await wait();
+    const d7 = read();
+    document.querySelector('#histRange button[data-days="90"]').click();
+    await wait();
+    const d90 = read();
+    document.getElementById('histCustom').click();
+    await wait();
+    document.getElementById('histApply').click(); // 默认近 24h → 小时桶
+    await wait();
+    const custom = read();
+    return JSON.stringify({ d7, d90, custom });
+  })()`));
   await evalJs(`document.querySelector('.nav-item[data-screen="theme"]').click()`);
   await shot('3-theme');
-  await evalJs(`document.querySelector('details.adv').open = true; 'ok'`);
-  console.log('form-scroll:', await evalJs(`(() => { const f = document.querySelector('.form'); return JSON.stringify({ client: f.clientHeight, scroll: f.scrollHeight }); })()`));
+  // 常态（高级收起）应零滚动；展开即编辑态（双列隐藏），展开态也应零表单滚动。
+  // 合成 click 不触发 details 激活行为，用 CDP 真实鼠标点 summary 走 toggle 事件
+  const advPos = JSON.parse(await evalJs(`(() => {
+    const r = document.querySelector('details.adv summary').getBoundingClientRect();
+    return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+  })()`));
+  const collapsedState = JSON.parse(await evalJs(`(() => {
+    const f = document.querySelector('.form');
+    return JSON.stringify({ client: f.clientHeight, collapsed: f.scrollHeight - f.clientHeight });
+  })()`));
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: advPos.x, y: advPos.y, button: 'left', clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: advPos.x, y: advPos.y, button: 'left', clickCount: 1 });
+  const expandedState = JSON.parse(await evalJs(`(() => {
+    const f = document.querySelector('.form');
+    const cols = document.querySelector('.theme-cols');
+    const advBody = document.querySelector('.adv-body');
+    return JSON.stringify({
+      expanded: f.scrollHeight - f.clientHeight,
+      colsHidden: getComputedStyle(cols).display === 'none',
+      advInner: advBody.scrollHeight - advBody.clientHeight,
+    });
+  })()`));
+  console.log('form-scroll:', JSON.stringify({ ...collapsedState, ...expandedState }));
   await shot('4-theme-advanced');
   await evalJs(`document.querySelector('.form').scrollTop = 99999; 'ok'`);
   await shot('4b-form-bottom');
@@ -189,6 +282,12 @@ async function drive(wsUrl) {
     return 'client=' + i.clientHeight + ' parts=' + parts + ' scroll=' + i.scrollHeight;
   })()`));
   await shot('5-settings');
+  await new Promise((r) => setTimeout(r, 200));
+  // 设置屏「历史数据」卡：history_stats 概览串
+  console.log('stats-probe:', await evalJs(`(() => {
+    const s = document.getElementById('histStats');
+    return JSON.stringify({ text: s.textContent, cls: s.className });
+  })()`));
 
   // 交互测试：内联重命名 + 应用主题
   await evalJs(`document.querySelector('.nav-item[data-screen="theme"]').click(); 'ok'`);
@@ -206,6 +305,16 @@ async function drive(wsUrl) {
   // 前面的交互把折叠块留在展开、表单滚到底的状态；无背景态要拍的是壁纸条与禁用的滑杆
   await evalJs(`document.querySelector('details.adv').open = false; document.querySelector('.form').scrollTop = 0; 'ok'`);
   await shot('6-nobg');
+
+  // 最窄窗口（940×620 = minWidth/minHeight）下外观屏常态滚动量
+  await send('Emulation.setDeviceMetricsOverride', { width: 940, height: 620, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 300));
+  console.log('theme-narrow:', await evalJs(`(() => {
+    const f = document.querySelector('.form');
+    const shell = getComputedStyle(document.querySelector('.shell'));
+    return JSON.stringify({ w: innerWidth, h: innerHeight, rows: shell.gridTemplateRows, client: f.clientHeight, collapsed: f.scrollHeight - f.clientHeight });
+  })()`));
+
   console.log('shots dir:', shotDir);
   process.exit(0);
 }

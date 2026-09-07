@@ -37,12 +37,13 @@
     sumAll: $('histSumAll'),
     rankTitle: $('histRankTitle'),
     rank: $('histRank'),
+    aggNote: $('histAggNote'),
   };
 
   let chart = null;         // echarts 实例（惰性初始化）
   let mode = 'preset';      // 'preset' | 'custom'
   let days = 30;
-  let custom = null;        // { start, end, bucket }
+  let custom = null;        // { start, end, bucket, anchor }
   let buckets = [];         // { key, start, end, label, down, up }
   let rowsKeyed = [];       // [{ key, name, down, up }]（Rust 侧已按桶聚合）
   let selected = -1;        // 选中的桶索引，-1 = 看整个区间
@@ -86,6 +87,15 @@
     return Math.floor(d.getTime() / 1000);
   }
 
+  // 周桶锚点：ts 所在周的「本地周一零点」。Rust 侧以它为锚做整周对齐，
+  // 否则 UTC 周（1970 周四对齐）在 UTC+8 下每周从周四 08:00 开始，标签对不上。
+  function localMonday(ts) {
+    const d = new Date(ts * 1000);
+    const back = (d.getDay() + 6) % 7; // 周一 = 0
+    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back, 0, 0, 0, 0);
+    return Math.floor(monday.getTime() / 1000);
+  }
+
   function pad2(n) {
     return String(n).padStart(2, '0');
   }
@@ -111,6 +121,11 @@
     return withTime ? `${base} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` : base;
   }
 
+  function ymd(ts) {
+    const d = new Date(ts * 1000);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
   // 当前查询区间。预设按本地零点回溯（含今天），自定义用用户输入。
   function currentRange() {
     if (mode === 'custom' && custom) return custom;
@@ -118,6 +133,7 @@
       start: localMidnight(nowSecs()) - (days - 1) * DAY,
       end: nowSecs() + 60,
       bucket: 0,
+      anchor: 0,
     };
   }
 
@@ -130,8 +146,9 @@
         out.push({ key: ts, start: ts, end: ts + HOUR, label: hourLabelOf(ts) });
       }
     } else if (range.bucket === WEEK) {
-      const first = Math.floor(range.start / WEEK) * WEEK;
-      for (let ts = first; ts < range.end; ts += WEEK) {
+      // 周桶从锚点（区间起点所在周的本地周一零点）出发，与 Rust 侧同签
+      const anchor = range.anchor || 0;
+      for (let ts = anchor; ts < range.end; ts += WEEK) {
         out.push({ key: ts, start: ts, end: ts + WEEK, label: `${dayLabelOf(ts)} 起一周` });
       }
     } else {
@@ -146,9 +163,13 @@
 
   async function loadRows() {
     const range = currentRange();
+    // 聚合粒度提示：小时/周桶时亮出来，日桶不打扰
+    els.aggNote.textContent = range.bucket === HOUR ? '按小时聚合'
+      : (range.bucket === WEEK ? '按周聚合' : '');
+    els.aggNote.hidden = !els.aggNote.textContent;
     try {
       const raw = await window.__TAURI__.core.invoke('history_range',
-        { start: range.start, end: range.end, bucket: range.bucket });
+        { start: range.start, end: range.end, bucket: range.bucket, anchor: range.anchor || 0 });
       const apiRows = JSON.parse(raw || '[]');
       buckets = buildBuckets(range);
       rowsKeyed = apiRows.map((r) => ({ key: r.ts, name: r.name, down: r.down, up: r.up }));
@@ -476,7 +497,8 @@
       return;
     }
     setCustomError('');
-    custom = { start, end, bucket: spanDays <= 2 ? HOUR : (spanDays > 90 ? WEEK : 0) };
+    const bucket = spanDays <= 2 ? HOUR : (spanDays > 90 ? WEEK : 0);
+    custom = { start, end, bucket, anchor: bucket === WEEK ? localMonday(start) : 0 };
     mode = 'custom';
     // 自定义生效时预设不再高亮，当前区间以检查栏标题为准
     els.range.querySelectorAll('button').forEach((b) => b.classList.remove('is-active'));
@@ -515,7 +537,9 @@
     const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}\r\n`], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    const scope = b ? b.label.replace(/\s/g, '') : (mode === 'custom' ? 'custom' : `${days}d`);
+    // 文件名带区间：预设用天数，自定义用起止日期，避免两次导出互相覆盖
+    const scope = b ? b.label.replace(/\s/g, '')
+      : (mode === 'custom' && custom ? `${ymd(custom.start)}_${ymd(custom.end)}` : `${days}d`);
     a.download = `netpeek-history-${scope}.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);

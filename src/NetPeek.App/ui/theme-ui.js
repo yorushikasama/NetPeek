@@ -202,10 +202,14 @@
     els.materialNote.hidden = hasBg;
     els.followSystemWrap.hidden = hasBg;
 
-    // 壁纸条选中态与状态行
+    // 壁纸条选中态与状态行。内置壁纸把 data-wall 映射到缩略图 title（熔金暮色…），
+    // 状态行直接借来当名字，用户才知道当前背景是哪一张。
     for (const b of els.wallThumbs) b.classList.toggle('is-active', b.dataset.wall === cur.background);
+    const builtinName = els.wallThumbs.find((b) => b.dataset.wall === cur.background)?.title;
     els.bgStatus.textContent = hasBg
-      ? (cur.background.startsWith(WALLPAPER_PREFIX) ? '内置壁纸' : '自定义图片')
+      ? (cur.background.startsWith(WALLPAPER_PREFIX)
+          ? `当前：${builtinName || '内置壁纸'}（内置）`
+          : '当前：自定义图片')
       : '未设置背景（使用面板底色）';
     els.bgStatus.className = 'note truncate';
 
@@ -462,6 +466,14 @@
     // 用户明确选择「无背景」就是做了决定：关掉留白区的邀请提示，不再反复问
     state.bgHintDismissed = true;
     return setWallpaper('');
+  });
+
+  // 高级区展开 = 编辑态切换：隐藏壁纸/材质双列，编辑器独占整岛。
+  // details 展开内容 ~330px，数据岛净高只有 ~320px，原地展开会把双列顶出可视区。
+  const advPanel = document.querySelector('details.adv');
+  advPanel.addEventListener('toggle', () => {
+    advPanel.parentElement.classList.toggle('is-adv-open', advPanel.open);
+    if (!advPanel.open) advPanel.parentElement.scrollTop = 0;
   });
 
   for (const input of [els.stdOpacity, els.stdScrim, els.stdBlur]) {

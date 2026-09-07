@@ -382,49 +382,55 @@
            没有互斥的「模式」：换壁纸自动取色、AI 生成、预设起步都是往同一份当前令牌里写，
            色板在「高级微调」开关下任何来源都可手调。检查栏放当前主题卡与主题列表。 -->
       <div class="pane" data-screen="theme" hidden>
-        <div class="form">
-          <div class="sec-head">
-            <span class="col-title">壁纸</span>
-            <span class="note truncate" id="bgStatus">未设置背景（使用面板底色）</span>
-          </div>
-          <div class="wall-strip" role="group" aria-label="壁纸">
-            <button type="button" class="wall-thumb" data-wall="builtin:wall-1" title="熔金暮色">
-              <img src="wallpapers/wall-1.jpg" alt="内置壁纸：熔金暮色" />
-            </button>
-            <button type="button" class="wall-thumb" data-wall="builtin:wall-2" title="钢蓝深海">
-              <img src="wallpapers/wall-2.jpg" alt="内置壁纸：钢蓝深海" />
-            </button>
-            <button type="button" class="wall-thumb" data-wall="builtin:wall-3" title="石墨">
-              <img src="wallpapers/wall-3.jpg" alt="内置壁纸：石墨" />
-            </button>
-            <button type="button" class="wall-thumb is-action" id="bgPick" title="选择本地图片" aria-label="选择本地图片">＋</button>
-            <button type="button" class="wall-thumb is-action" id="bgClear" title="不使用背景" aria-label="不使用背景">无</button>
-            <input type="file" id="bgFile" accept="image/*" hidden />
-          </div>
+        <div class="form theme-form">
+          <div class="theme-cols">
+            <section class="theme-col" aria-label="壁纸">
+              <div class="sec-head">
+                <span class="col-title">壁纸</span>
+                <span class="note truncate" id="bgStatus">未设置背景（使用面板底色）</span>
+              </div>
+              <div class="wall-strip" role="group" aria-label="壁纸">
+                <button type="button" class="wall-thumb" data-wall="builtin:wall-1" title="熔金暮色">
+                  <img src="wallpapers/wall-1.jpg" alt="内置壁纸：熔金暮色" />
+                </button>
+                <button type="button" class="wall-thumb" data-wall="builtin:wall-2" title="钢蓝深海">
+                  <img src="wallpapers/wall-2.jpg" alt="内置壁纸：钢蓝深海" />
+                </button>
+                <button type="button" class="wall-thumb" data-wall="builtin:wall-3" title="石墨">
+                  <img src="wallpapers/wall-3.jpg" alt="内置壁纸：石墨" />
+                </button>
+                <button type="button" class="wall-thumb is-action" id="bgPick" title="选择本地图片" aria-label="选择本地图片">＋</button>
+                <button type="button" class="wall-thumb is-action" id="bgClear" title="不使用背景" aria-label="不使用背景">无</button>
+                <input type="file" id="bgFile" accept="image/*" hidden />
+              </div>
+            </section>
 
-          <div class="sec-head" style="margin-top:2px"><span class="col-title">材质</span></div>
-          <div class="material-row">
-            <div class="slider">
-              <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
-              <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
-                     aria-label="岛屿不透明度" />
-            </div>
-            <div class="slider">
-              <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
-              <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
-                     aria-label="全局压暗" />
-            </div>
-            <div class="slider">
-              <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
-              <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
-            </div>
-          </div>
-          <div class="note" id="materialNote" hidden>未使用背景图：不透明度、压暗与模糊暂不产生效果。</div>
+            <section class="theme-col" aria-label="材质">
+              <div class="sec-head"><span class="col-title">材质</span></div>
+              <div class="material-col">
+                <div class="slider">
+                  <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
+                  <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
+                         aria-label="岛屿不透明度" />
+                </div>
+                <div class="slider">
+                  <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
+                  <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
+                         aria-label="全局压暗" />
+                </div>
+                <div class="slider">
+                  <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
+                  <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
+                </div>
+              </div>
+              <div class="note" id="materialNote" hidden>未使用背景图：不透明度、压暗与模糊暂不产生效果。</div>
 
-          <label class="check" id="followSystemWrap">
-            <input type="checkbox" id="followSystem" />
-            <span>无背景时跟随系统深浅色</span>
-          </label>
+              <label class="check" id="followSystemWrap">
+                <input type="checkbox" id="followSystem" />
+                <span>无背景时跟随系统深浅色</span>
+              </label>
+            </section>
+          </div>
 
           <details class="adv">
             <summary>高级微调与 AI 自适应</summary>

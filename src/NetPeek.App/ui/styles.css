@@ -174,6 +174,13 @@ body[data-screen="history"] .shell {
   grid-template-rows: 58px minmax(220px, 280px) minmax(250px, 1fr);
 }
 
+/* 外观屏表单体积大（壁纸 + 材质 + 高级区），同样把检查栏收到下限：
+   主题列表本身就是 flex+内部滚动，压得住；数据岛换到 ~360px，
+   常态（高级收起）表单零滚动。 */
+body[data-screen="theme"] .shell {
+  grid-template-rows: 58px minmax(220px, 300px) minmax(320px, 1fr);
+}
+
 /* ---------- 岛屿材质（§3.2）---------- */
 
 .island {
@@ -1002,7 +1009,7 @@ span.flatpickr-weekday { color: var(--text-muted); }
 
 /* 滑块（§3.5）。范围由令牌算出来，不留不可读的余地（§2.7）。 */
 .slider { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
-.slider-head { display: flex; justify-content: space-between; gap: 8px; }
+.slider-head { display: flex; align-items: baseline; gap: 8px; }
 .slider-head .value { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--text); }
 .slider input[type="range"] {
   appearance: none;
@@ -1039,8 +1046,9 @@ span.flatpickr-weekday { color: var(--text-muted); }
 .insp-fields dd.is-warn { color: var(--warn); }
 .insp-fields dd.is-error { color: var(--error); }
 
-/* 语义色块。下载与上传语义锁定，不许改（§1.2）。 */
-.swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; }
+/* 语义色块。下载与上传语义锁定，不许改（§1.2）。
+   高级区全宽（~1100px），10 色块排 5 列 × 2 行，纵向只占 ~66px */
+.swatches { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px 8px; }
 .swatch { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 /* 色块必须显示它自己的值。`background: transparent` 会把 Chromium 画的色样整块抹掉，
    十个色块一起塌成黑框 —— 一个不显示颜色的取色器。留白交给 ::-webkit-color-swatch，
@@ -1102,15 +1110,39 @@ span.flatpickr-weekday { color: var(--text-muted); }
   background: var(--surface-hi);
 }
 .theme-item.is-active .tag { background: color-mix(in srgb, var(--surface-hi) 80%, #000); }
-.row-actions { display: flex; gap: 8px; }
+/* 行操作（应用 ✓ / 重命名 ✎ / 删除 🗑）默认隐去，悬停或键盘聚焦才出现：
+   常驻三枚图标会把主题名挤得只剩省略号。当前项的应用 ✓ 是选中态信号，恒显。 */
+.row-actions {
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.theme-item:hover .row-actions,
+.theme-item:focus-within .row-actions,
+.theme-item.is-active .row-actions { opacity: 1; }
 
-/* ---------- 外观屏（v2）：壁纸条 / 材质三列 / 高级折叠 ---------- */
+/* ---------- 外观屏（v2）：壁纸 / 材质双列 + 全宽高级折叠 ---------- */
+
+/* 数据岛双列：壁纸列与材质列并排，高级区全宽压在下方。
+   单列堆叠在 250px 岛上滚 629px 的内容（§2.7 原稿），改成两列后常态零滚动。 */
+.theme-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.theme-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
 
 .wall-strip { display: flex; gap: 8px; flex-wrap: wrap; }
 .wall-thumb {
   position: relative;
-  width: 96px;
-  height: 54px;
+  width: 120px;
+  height: 68px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-block);
@@ -1149,11 +1181,13 @@ span.flatpickr-weekday { color: var(--text-muted); }
 }
 .wall-thumb.is-action:hover { color: var(--text); }
 
-/* 材质三根滑杆并排一行：数据岛高度有限，通栏竖排会顶进高级折叠区 */
-.material-row {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+/* 材质三滑杆竖排。滑杆头不跨整列 space-between：上一版值被推到列右缘，
+   视觉上粘到下一行的标签（0.88 全局压暗）；改成 label/value 紧靠。 */
+.material-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
 }
 
 /* 高级折叠区：语义色与 AI 都是低频操作，默认收起 */
@@ -1171,7 +1205,18 @@ details.adv summary {
 }
 details.adv summary:hover { color: var(--text); }
 details.adv[open] summary { color: var(--text); }
-.adv-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 12px; }
+/* 高级展开时数据岛切换为纯编辑态（theme-ui.js 的 toggle 监听）：
+   壁纸/材质两列让位，编辑器独占整岛，内部滚动兜底 */
+.theme-form.is-adv-open .theme-cols { display: none; }
+/* 展开内容限高内部滚动：色板+预设+AI 全展开约 330px，岛内给不到，让编辑器自己滚 */
+.adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 0 12px;
+  max-height: 240px;
+  overflow-y: auto;
+}
 
 /* AI 提供方三项并排（折叠区内宽度足够） */
 .ai-grid {

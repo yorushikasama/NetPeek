@@ -367,42 +367,55 @@ pub fn history_stats(app: AppHandle) -> Result<String, String> {
 
 /// 任意时间区间的聚合查询：按桶（秒）分组。bucket 取值：
 /// 3600 = 小时（整小时偏移的时区下与本地小时对齐）、604800 = 7 天、
-/// 0 = 本地日（strftime start of day，跨夏令时也对）。
+/// 0 = 本地日（按本地零点分组，跨夏令时也对）。
+/// anchor 只对周桶有意义：UTC 周（(ts/604800)*604800，1970 周四对齐）在
+/// 非 UTC 时区下会从周四 08:00 这种边界开始，标签对不上用户预期的周一；
+/// 前端把区间起点的「本地周一零点」算好传进来，SQL 以它为锚做整周对齐。
 /// SQL 抽成独立函数供单测直接打内存库。
 fn query_range_buckets(
     conn: &Connection,
     start: i64,
     end: i64,
     bucket: i64,
+    anchor: i64,
 ) -> rusqlite::Result<Vec<RangeRow>> {
     let sql = if bucket == HOUR {
         "SELECT (ts/3600)*3600 AS bts, name, SUM(down) AS down, SUM(up) AS up
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     } else if bucket == WEEK {
-        "SELECT (ts/604800)*604800 AS bts, name, SUM(down) AS down, SUM(up) AS up
+        "SELECT ((ts - ?3)/604800)*604800 + ?3 AS bts, name, SUM(down) AS down, SUM(up) AS up
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     } else {
-        "SELECT CAST(strftime('%s', ts, 'unixepoch', 'localtime', 'start of day') AS INTEGER) AS bts,
+        // 本地日桶：ts 减去「当天已走过的本地秒数」，得到本地零点（unix 秒）。
+        // 不能写成 strftime('%s', ts, 'unixepoch', 'localtime', 'start of day')——
+        // 那条链会先把 ts 转成 UTC 日期再截到 UTC 零点，结果整体偏出本地时区差
+        // （UTC+8 下偏 8 小时），和前端 localMidnight 的键对不上，日桶数据会
+        // 被前端 buildBuckets 的补零骨架全部丢掉（合计 0、图空、排行却有数）。
+        "SELECT ts - (CAST(strftime('%s', ts, 'unixepoch', 'localtime') AS INTEGER) % 86400) AS bts,
                 name, SUM(down) AS down, SUM(up) AS up
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     };
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![start, end], |r| {
+    // 只有周桶 SQL 引用 ?3（锚点），其他桶多绑参数会触发 SQLITE_RANGE
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<RangeRow> {
         Ok(RangeRow {
             ts: r.get(0)?,
             name: r.get(1)?,
             down: r.get(2)?,
             up: r.get(3)?,
         })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    };
+    let rows = if bucket == WEEK {
+        stmt.query_map(params![start, end, anchor], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map(params![start, end], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(rows)
 }
 
 /// 区间聚合结果行。ts 为桶起点（本地日桶 = 本地零点）。
@@ -416,13 +429,14 @@ pub struct RangeRow {
 
 /// 任意时间区间的聚合查询：统计屏「自定义时间」的数据源。
 /// 与 history_daily（按天、给检查栏 30 天小图复用）不同，这里支持小时粒度。
+/// anchor = 周桶锚点（区间起点所在周的本地周一零点），非周桶传 0 即可。
 #[tauri::command]
-pub fn history_range(app: AppHandle, start: i64, end: i64, bucket: i64) -> Result<String, String> {
+pub fn history_range(app: AppHandle, start: i64, end: i64, bucket: i64, anchor: i64) -> Result<String, String> {
     let path = data_dir(&app)?.join(DB_FILE);
     let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-    let rows = query_range_buckets(&conn, start, end, bucket)
+    let rows = query_range_buckets(&conn, start, end, bucket, anchor)
         .map_err(|e| format!("查询区间聚合失败: {e}"))?;
     serde_json::to_string(&rows).map_err(|e| format!("区间聚合序列化失败: {e}"))
 }
@@ -556,7 +570,7 @@ mod range_tests {
 
         let b0 = (base / HOUR) * HOUR;
         let b1 = ((base + 3660) / HOUR) * HOUR;
-        let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR).unwrap();
+        let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR, 0).unwrap();
         assert_eq!(rows.len(), 2, "两个小时的桶");
         assert_eq!((rows[0].ts, rows[0].down, rows[0].up), (b0, 30, 3));
         assert_eq!((rows[1].ts, rows[1].down, rows[1].up), (b1, 40, 4));
@@ -577,8 +591,102 @@ mod range_tests {
             .unwrap();
         }
         // 左闭右开：只包含 [base, base+3600)
-        let rows = query_range_buckets(&conn, base, base + 3600, HOUR).unwrap();
+        let rows = query_range_buckets(&conn, base, base + 3600, HOUR, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ts, (base / HOUR) * HOUR);
+    }
+
+    #[test]
+    fn query_range_buckets_week_uses_anchor() {
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        // 锚点 = 区间起点所在周的本地周一零点（前端 Date.getDay 算出后传入）。
+        // 同一锚点下，任意 ts 都归到「距锚点整周」的桶，不再按 UTC 周四对齐。
+        let anchor = 1_700_000_000; // 周一零点
+        let ts1 = anchor + 3600; // 第 0 周
+        let ts2 = anchor + WEEK + 1800; // 第 1 周
+        for (ts, down) in [(ts1, 10i64), (ts2, 20i64)] {
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', ?2, 0)",
+                params![ts, down],
+            )
+            .unwrap();
+        }
+        let rows = query_range_buckets(&conn, anchor - 60, anchor + 2 * WEEK, WEEK, anchor).unwrap();
+        assert_eq!(rows.len(), 2, "两个周桶");
+        assert_eq!((rows[0].ts, rows[0].down), (anchor, 10));
+        assert_eq!((rows[1].ts, rows[1].down), (anchor + WEEK, 20));
+        assert_eq!(rows[0].ts % WEEK, anchor % WEEK, "桶对齐到锚点而非 UTC 周");
+    }
+
+    #[test]
+    fn aggregations_totals_agree_across_buckets() {
+        // 同一份分钟数据分别按日/小时/周聚合，总量必须一致——
+        // 任何一档少算或多算，统计页的合计数字就会和另一档打架。
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        let base = 1_700_000_000; // 本地对齐的某天（周一起点附近）
+        let mut total = 0i64;
+        for day in 0..3i64 {
+            for m in 0..5i64 {
+                let ts = base + day * 86400 + m * 1200; // 每 20 分钟一行
+                conn.execute(
+                    "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', 100, 10)",
+                    params![ts],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 2, 0, 'b.exe', 50, 5)",
+                    params![ts],
+                )
+                .unwrap();
+                total += 150;
+            }
+        }
+        let end = base + 3 * 86400;
+        let day_sum: i64 = query_range_buckets(&conn, base, end, 0, 0).unwrap().iter().map(|r| r.down).sum();
+        let hour_sum: i64 = query_range_buckets(&conn, base, end, HOUR, 0).unwrap().iter().map(|r| r.down).sum();
+        let week_sum: i64 = query_range_buckets(&conn, base, end, WEEK, base).unwrap().iter().map(|r| r.down).sum();
+        assert_eq!(day_sum, total, "日桶总量");
+        assert_eq!(hour_sum, total, "小时桶总量");
+        assert_eq!(week_sum, total, "周桶总量");
+    }
+
+    #[test]
+    fn query_range_buckets_day_key_is_local_midnight() {
+        // 日桶键必须是「本地零点」的 unix 秒。老实现用 strftime(...,'localtime','start of day')
+        // 会先转 UTC 再截 UTC 零点，在 UTC+8 下偏 8 小时，和前端 localMidnight 对不上。
+        // 这里断言：无论 ts 落在本地几点，桶键按本地时区格式化出来的小时必须是 00。
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        // 取一个「本地非零点」的时间戳（此处 2026-09-05 20:12 本地），
+        // 以及一个跨天边界的相邻分钟，确保不是靠恰好落在零点蒙混过关。
+        let ts1 = 1_786_610_320;
+        for ts in [ts1, ts1 + 60, ts1 + 86400] {
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', 10, 1)",
+                params![ts],
+            )
+            .unwrap();
+        }
+        let rows = query_range_buckets(&conn, ts1 - 60, ts1 + 86400 + 120, 0, 0).unwrap();
+        assert_eq!(rows.len(), 2, "两个本地日桶");
+
+        for r in &rows {
+            let hh: String = conn
+                .query_row(
+                    "SELECT strftime('%H', ?1, 'unixepoch', 'localtime')",
+                    params![r.ts],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hh, "00", "日桶键必须落在本地零点（本地小时 00）");
+        }
     }
 }
