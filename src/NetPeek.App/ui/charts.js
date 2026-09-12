@@ -55,8 +55,8 @@
 
   // 画坐标框：y 三档标注 + 2 条横向虚线网格 + x 两端标注。返回绘图区矩形。
   function drawFrame(ctx, w, h, yMax, opt) {
-    const muted = cssVar('--text-muted') || '#b4a99e';
-    const line = cssVar('--line') || 'rgba(255,255,255,0.10)';
+    const muted = cssVar('--text-2') || '#9ba1a9';
+    const line = cssVar('--line-soft') || '#272a30';
     const left = AXIS_W;
     const right = w - PAD_R;
     const top = PAD_T;
@@ -202,7 +202,7 @@
     if (!p) return null;
     const { ctx, w, h } = p;
     const groups = opt.groups || [];
-    const colors = opt.colors || [cssVar('--down') || '#f0913f', cssVar('--up') || '#7fa8c9'];
+    const colors = opt.colors || [cssVar('--down') || '#f0963f', cssVar('--up') || '#62a9e8'];
 
     let dataMax = 0;
     for (const g of groups) {
@@ -235,7 +235,8 @@
         ctx.fillRect(x, r.bottom - bh, barW, bh);
       }
       if (opt.selectedIndex === gi) {
-        ctx.fillStyle = cssVar('--down') || '#f0913f';
+        // 顶帽是「选中」这件事的标记，走交互强调（sel-bar），不占数据色的语义
+        ctx.fillStyle = cssVar('--sel-bar') || '#c9cdd4';
         ctx.fillRect(gx, r.top - 2, groupW, 2);
       }
     }
@@ -244,7 +245,7 @@
     // 34px 的固定余量挡不住「9 月 1 日」这种 5 字标签，会和右端标注挤在一起。
     if (opt.tickLabels) {
       ctx.font = FONT_NUM;
-      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+      ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       const y = h - XLAB_H / 2 + 1;
@@ -331,7 +332,7 @@
     };
 
     ctx.save();
-    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
     ctx.beginPath();
@@ -345,7 +346,7 @@
       ctx.arc(x, yFor(v), 3, 0, Math.PI * 2);
       ctx.fillStyle = s.color;
       ctx.fill();
-      ctx.strokeStyle = cssVar('--bg') || '#111418';
+      ctx.strokeStyle = cssVar('--bg') || '#1b1d21';
       ctx.lineWidth = 1;
       ctx.stroke();
     }
@@ -369,21 +370,21 @@
     const by = r.top + 4;
 
     ctx.setLineDash([]);
-    ctx.fillStyle = cssVar('--surface-hi') || '#2f2924';
-    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
     roundRectPath(ctx, bx, by, boxW, boxH, 6);
     ctx.fill();
     ctx.stroke();
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
     ctx.fillText(title, bx + 10, by + 11);
     rows.forEach((row, i) => {
       const ry = by + 26 + i * 14;
       ctx.fillStyle = row.color;
       ctx.fillRect(bx + 10, ry - 3, 6, 6);
-      ctx.fillStyle = cssVar('--text') || '#f6efe8';
+      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
       ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
     });
     ctx.restore();
@@ -449,7 +450,7 @@
     const cx = Math.round(r.left + (idx + 0.5) * pitch) + 0.5;
 
     ctx.save();
-    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
     ctx.beginPath();
@@ -474,21 +475,21 @@
     const by = r.top + 4;
 
     ctx.setLineDash([]);
-    ctx.fillStyle = cssVar('--surface-hi') || '#2f2924';
-    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
     roundRectPath(ctx, bx, by, boxW, boxH, 6);
     ctx.fill();
     ctx.stroke();
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
     ctx.fillText(title, bx + 10, by + 11);
     rows.forEach((row, i) => {
       const ry = by + 26 + i * 14;
       ctx.fillStyle = row.color;
       ctx.fillRect(bx + 10, ry - 3, 6, 6);
-      ctx.fillStyle = cssVar('--text') || '#f6efe8';
+      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
       ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
     });
     ctx.restore();

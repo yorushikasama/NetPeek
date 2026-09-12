@@ -1,32 +1,34 @@
 // NetPeek 前端主逻辑。监听采集服务经 Tauri 转发的 TrafficSnapshot 事件，
-// 渲染顶栏总速率、进程表、检查栏与两张实时图；同时负责屏切换、密集模式和无边框窗口的控制。
+// 渲染顶栏总速率、进程表与右栏三卡；同时负责屏切换、迷你窗入口和无边框窗口的控制。
 // 快照字段为 PascalCase（与 C# System.Text.Json 默认序列化一致）。
 //
-// 布局与样式规格见 docs/UI生成提示词.md §2–3。几条关键约束在这里体现：
-// - 数字直接替换，不做补间：数据每秒一帧，补间等于永远在滚（§3.6）。
-// - 一张图只答一个问题：底部带宽图答「总带宽这一分钟怎么走的」，
-//   检查栏实时图答「这个应用这一分钟怎么走的」，30 天图答「这个应用一个月用了多少」。
-// - 不做装饰性动效：岛屿的层次靠投影和亮边给，不靠发光脉冲。
+// 布局与样式规格见 docs/redesign/netpeek-redesign-v2.html。几条关键约束在这里体现：
+// - 数字直接替换，不做补间：数据每秒一帧，补间等于永远在滚。
+// - 一张图只答一个问题：带宽图答「总带宽这一分钟怎么走的」，
+//   右栏实时图答「这个应用这一分钟怎么走的」，30 天图答「这个应用一个月用了多少」。
+// - 不做装饰性动效：卡片层次靠底色差和 1px 边线给，不靠发光脉冲。
 
 const { listen } = window.__TAURI__.event;
 const C = window.NetPeekCharts;
 const $ = (id) => document.getElementById(id);
 
 const WINDOW_SECS = 60;      // 两张实时图的时间窗
-const DENSE_KEY = 'netpeek-dense';
 
 const els = {
   frame: $('frame'),
-  shell: $('shell'),
   statusPill: $('statusPill'),
   statusText: $('statusText'),
   lostDot: $('lostDot'),
+  topMeta: $('topMeta'),
   totalDownValue: $('totalDownValue'),
   totalDownUnit: $('totalDownUnit'),
   totalUpValue: $('totalUpValue'),
   totalUpUnit: $('totalUpUnit'),
   todayTotal: $('todayTotal'),
+  todayDown: $('todayDown'),
+  todayUp: $('todayUp'),
   viewToggle: $('viewToggle'),
+  procCount: $('procCount'),
   search: $('search'),
   pidLabel: $('pidLabel'),
   rows: $('rows'),
@@ -35,7 +37,6 @@ const els = {
   procStateTitle: $('procStateTitle'),
   procStateDesc: $('procStateDesc'),
   bandwidthChart: $('bandwidthChart'),
-  denseGrip: $('denseGrip'),
   nav: $('nav'),
   inspIcon: $('inspIcon'),
   inspIconPh: $('inspIconPh'),
@@ -70,8 +71,8 @@ let viewMode = 'process';      // process 按进程明细 / app 按应用聚合
 let rateUnit = 'auto';         // 由设置屏更新
 let selected = null;           // { keyStr, mode, key, data }
 let screen = 'live';
-let todayBase = 0;             // 今日已落库的字节数（启动时从历史库取）
-let todayDelta = 0;            // 启动之后累加的字节数
+let todayBase = { down: 0, up: 0 };  // 今日已落库的字节数（启动时从历史库取）
+let todayDelta = { down: 0, up: 0 }; // 启动之后累加的字节数
 let todayStamp = new Date().toDateString();
 
 // 总带宽 60 秒环形缓冲
@@ -210,10 +211,11 @@ function accumulateToday(snap) {
   const stamp = new Date().toDateString();
   if (stamp !== todayStamp) {
     todayStamp = stamp;
-    todayBase = 0;
-    todayDelta = 0;
+    todayBase = { down: 0, up: 0 };
+    todayDelta = { down: 0, up: 0 };
   }
-  todayDelta += (snap.TotalDownloadBytes || 0) + (snap.TotalUploadBytes || 0);
+  todayDelta.down += snap.TotalDownloadBytes || 0;
+  todayDelta.up += snap.TotalUploadBytes || 0;
 }
 
 async function loadTodayBase() {
@@ -221,12 +223,15 @@ async function loadTodayBase() {
     const raw = await window.__TAURI__.core.invoke('history_daily', { days: 1 });
     const today = new Date();
     const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    let sum = 0;
+    const base = { down: 0, up: 0 };
     for (const r of JSON.parse(raw || '[]')) {
-      if (r.day === key) sum += (r.down || 0) + (r.up || 0);
+      if (r.day === key) {
+        base.down += r.down || 0;
+        base.up += r.up || 0;
+      }
     }
-    todayBase = sum;
-  } catch { todayBase = 0; }
+    todayBase = base;
+  } catch { todayBase = { down: 0, up: 0 }; }
 }
 
 // ===== 顶栏 =====
@@ -250,7 +255,7 @@ function statusKey(status) {
 
 function setStatus(kind) {
   const s = STATUS[kind] || STATUS.offline;
-  els.statusPill.className = `status-pill ${s.cls}`.trim();
+  els.statusPill.className = `top-status ${s.cls}`.trim();
   els.statusText.textContent = s.text;
   els.frame.classList.toggle('is-paused', kind === 'paused');
 }
@@ -262,7 +267,18 @@ function renderTopbar(snap) {
   els.totalDownUnit.textContent = down.unit;
   els.totalUpValue.textContent = up.value;
   els.totalUpUnit.textContent = up.unit;
-  setSplitText(els.todayTotal, fmtBytes(todayBase + todayDelta));
+
+  // 顶栏元信息承接原检查栏总览的「已采集 / N 个进程」：采集状态是常看项，
+  // 放在视野里比收进详情卡字段里顺手
+  const startedMs = snap.SessionStartedUnixMs || 0;
+  const upSec = startedMs > 0 ? ((snap.TimestampUnixMs || Date.now()) - startedMs) / 1000 : samples.length;
+  const procN = (snap.Processes || []).length;
+  els.topMeta.textContent = `已采集 ${fmtDuration(upSec)} · ${procN} 个进程`;
+
+  // 今日卡：合计大字 + 下载/上传两个小值
+  setSplitText(els.todayTotal, fmtBytes(todayBase.down + todayDelta.down + todayBase.up + todayDelta.up));
+  setSplitText(els.todayDown, fmtBytes(todayBase.down + todayDelta.down));
+  setSplitText(els.todayUp, fmtBytes(todayBase.up + todayDelta.up));
 
   const lost = snap.EventsLost || 0;
   els.lostDot.hidden = lost === 0;
@@ -868,62 +884,24 @@ function onDisconnected() {
 }
 
 // ===== 屏切换 =====
-// 岛的位置不动，只换岛内内容（§2.6）。视图切换和搜索只对实时屏有意义，
-// 换屏时隐藏它们，而不是留在那里点了没反应。
+// 主区三屏互斥显示；rail 的选中态跟过去。视图切换和搜索在表格卡头里，
+// 随 live 屏整体显隐，不需要单独处理。
 
 function setScreen(next) {
   if (next === screen) return;
   screen = next;
-  for (const pane of document.querySelectorAll('.pane[data-screen]')) {
+  for (const pane of document.querySelectorAll('.screen[data-screen]')) {
     pane.hidden = pane.dataset.screen !== next;
   }
-  for (const btn of els.nav.querySelectorAll('.nav-item')) {
+  for (const btn of els.nav.querySelectorAll('.ri[data-screen]')) {
     const on = btn.dataset.screen === next;
-    btn.classList.toggle('is-active', on);
+    btn.classList.toggle('is-on', on);
     btn.setAttribute('aria-current', on ? 'page' : 'false');
   }
-  els.viewToggle.hidden = next !== 'live';
-  $('searchBox').hidden = next !== 'live';
 
   if (next === 'live' && lastSnapshot) renderAll(lastSnapshot);
   if (next === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.onEnter();
   if (next === 'settings' && window.NetPeekSettingsUI) window.NetPeekSettingsUI.onEnter();
-}
-
-// ===== 密集模式 =====
-// 收起留白区和检查栏，把数据岛撑到整个下半部分。导航岛留在原位：
-// 唯一的导航入口不该被一个临时视图吞掉（这一条是对规格的有意偏离）。
-
-function setDense(on) {
-  els.shell.classList.toggle('is-dense', on);
-  els.denseGrip.setAttribute('aria-expanded', String(on));
-  els.denseGrip.title = on ? '双击恢复三段布局' : '双击展开进程表';
-  localStorage.setItem(DENSE_KEY, on ? '1' : '0');
-  // 布局变了，画布尺寸也变了，图得重画
-  requestAnimationFrame(() => {
-    if (screen === 'live') drawBandwidth();
-    if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
-  });
-}
-
-function bindDenseGrip() {
-  let startY = 0;
-  let dragging = false;
-  els.denseGrip.addEventListener('pointerdown', (e) => {
-    dragging = true;
-    startY = e.clientY;
-    els.denseGrip.setPointerCapture(e.pointerId);
-  });
-  els.denseGrip.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const dy = e.clientY - startY;
-    if (dy < -24) { setDense(true); dragging = false; }
-    else if (dy > 24) { setDense(false); dragging = false; }
-  });
-  els.denseGrip.addEventListener('pointerup', () => { dragging = false; });
-  els.denseGrip.addEventListener('dblclick', () => {
-    setDense(!els.shell.classList.contains('is-dense'));
-  });
 }
 
 // ===== 无边框窗口 =====
@@ -1020,8 +998,13 @@ function bindControls() {
   });
 
   els.nav.addEventListener('click', (e) => {
-    const btn = e.target.closest('.nav-item');
+    const btn = e.target.closest('.ri[data-screen]');
     if (btn) setScreen(btn.dataset.screen);
+  });
+
+  // 迷你窗入口：rail 底部的独立开关，托盘/能量球之外的第三个入口
+  $('miniToggle').addEventListener('click', async () => {
+    try { await window.__TAURI__.core.invoke('toggle_mini'); } catch { /* ignore */ }
   });
 
   // 今日合计 → 历史屏：实时屏里唯一指向「更早的数据」的数字，
@@ -1088,12 +1071,9 @@ window.NetPeekLive = {
 
 async function boot() {
   renderSortMarks();
-  setDense(localStorage.getItem(DENSE_KEY) === '1');
   setProcState('connecting');
-  els.viewToggle.hidden = false;
   bindTable();
   bindControls();
-  bindDenseGrip();
 
   // 管道监听先挂上：后面的主题、设置、首绘任何一步抛错都不该让界面收不到快照
   if (window.__TAURI__) {

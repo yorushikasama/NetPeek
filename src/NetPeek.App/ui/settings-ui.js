@@ -1,5 +1,4 @@
-// 设置屏交互层（§2.7）：和外观屏一样是「屏」而不是覆盖层。
-// 数据岛放三列可操作项（常规 / 历史数据 / 采集服务），检查栏放不可操作的说明（关于 / 归因边界）。
+// 设置屏交互层（v2）：左分区导航（snav）+ 右表单（sgroup），点分区切换显隐。
 // 破坏性动作（清空历史）原地二次确认，不弹模态框，5 秒无操作自动收回。
 //
 // 状态结构（camelCase，与 Rust settings.json 一致）：
@@ -11,6 +10,7 @@
   const CONFIRM_TIMEOUT = 5000;
 
   const els = {
+    snav: $('settingsNav'),
     rateUnit: $('setRateUnit'),
     autostart: $('setAutostart'),
     recordUnattributed: $('setRecordUnattributed'),
@@ -146,7 +146,28 @@
     els.histClear.hidden = false;
   }
 
+  // 分区切换：snav 选中态 + sgroup 显隐。切分区不重置任何状态，
+  // 回到设置屏时停在离开前的那一区更顺手。
+  function selectSection(sec) {
+    if (!els.snav) return;
+    for (const b of els.snav.querySelectorAll('button[data-sec]')) {
+      const on = b.dataset.sec === sec;
+      b.classList.toggle('is-on', on);
+      b.setAttribute('aria-selected', String(on));
+    }
+    for (const g of document.querySelectorAll('.sgroup[data-sec]')) {
+      g.hidden = g.dataset.sec !== sec;
+    }
+  }
+
   function bind() {
+    if (els.snav) {
+      els.snav.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-sec]');
+        if (btn) selectSection(btn.dataset.sec);
+      });
+    }
+
     els.rateUnit.addEventListener('change', () => {
       state.rateUnit = els.rateUnit.value;
       debouncedSave.schedule();

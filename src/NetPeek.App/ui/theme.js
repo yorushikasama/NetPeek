@@ -1,6 +1,16 @@
-// NetPeek 三模式主题系统。
-// 三个并列模式：①自定义背景+标准离线取色（默认） ②自定义背景+AI 自适应（可保存） ③定制化主题。
-// 共用一条流水线：分析 → 设计令牌（CSS 变量）→ WCAG 4.5:1 对比度校验 → 应用 → 可保存为主题。
+// NetPeek 皮肤系统（v2）。
+// 皮肤 = 一份 17 键颜色 token 表，运行时覆写到 documentElement 的同名 CSS 变量上；
+// 栅格、字号阶、间距、组件结构不在 token 里，任何皮肤下布局一致，换肤是安全的。
+//
+// 四类皮肤来源，共用同一条「token 表 → CSS 变量」流水线：
+//   1. 内置（plain / light / amber）：手写精确 token 表，出厂即用；
+//   2. 跟随背景图（image）：从背景图中位切分取色生成 token 表，可再叠 AI 生成（高级项）；
+//   3. 自定义（themes 里用户另存的皮肤）：在编辑器里改单键，当场生效；
+//   4. 旧配置迁移：三模式主题（standard / ai / custom）启动时自动映射到以上三类。
+//
+// token 分层（tokens.css §分层原则）：
+//   - --accent / --accent-ink / --sel-bar 管交互（选中、主按钮、开关、焦点条）；
+//   - --down / --up 只管数据（图表、速率、排行），永远不进 chrome。
 //
 // 依赖 Tauri 命令（window.__TAURI__.core.invoke）做配置持久化与背景图落盘；
 // 无 Tauri 环境（浏览器预览）时自动降级为 localStorage，方便调试。
@@ -73,7 +83,13 @@ function ensureContrast(fgHex, bgHex) {
   return rgbToHex(out);
 }
 
-// ---------- 中位切分取色 ----------
+function clamp(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+// ---------- 中位切分取色（跟随背景图皮肤用） ----------
 
 // 从 ImageData 提取主色板（中位切分，最多 maxColors 色）。返回 RGB 数组。
 function medianCut(imgData, maxColors = 8) {
@@ -161,7 +177,7 @@ function channelWithMaxSpan(bkt) {
   return best;
 }
 
-// 从色板挑出「主色」「强调色」：主色取权重最大且偏中性的色；强调取饱和度高者。
+// 从色板挑出「主色」（权重最大）与「强调色」（饱和度最高者）。
 function pickBase(palette) {
   if (!palette.length) return null;
   palette.sort((a, b) => b.weight - a.weight);
@@ -171,12 +187,131 @@ function pickBase(palette) {
   return { main, accent };
 }
 
-// ---------- 令牌生成 ----------
+// ---------- 内置皮肤（手写精确表，出厂即用） ----------
 
-// 标准离线取色：背景图 → 色板 → 完整设计令牌（hex 字符串）。
+// 17 键完整表。plain 与 tokens.css 的 :root 完全一致 —— 皮肤只是覆写同名变量。
+const SKINS = {
+  plain: {
+    id: 'plain',
+    name: '默认 · 朴素',
+    tokens: {
+      bg: '#1b1d21', panel: '#22252a', panelHi: '#2c2f36', panel2: '#17191d',
+      line: '#32363e', lineSoft: '#272a30',
+      text: '#e3e5e9', text2: '#9ba1a9', text3: '#686e77',
+      down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+      accent: '#e3e5e9', accentInk: '#1b1d21', selBar: '#c9cdd4',
+    },
+  },
+  light: {
+    id: 'light',
+    name: '浅色',
+    tokens: {
+      bg: '#f2f3f5', panel: '#ffffff', panelHi: '#eef0f4', panel2: '#e8eaee',
+      line: '#d6dade', lineSoft: '#e4e6ea',
+      text: '#23272e', text2: '#5b6270', text3: '#9098a4',
+      down: '#b45a10', up: '#2e6f9e', ok: '#1f6f44', warn: '#8a6608', error: '#b3352b',
+      accent: '#2f3540', accentInk: '#f2f3f5', selBar: '#565e6b',
+    },
+  },
+  amber: {
+    id: 'amber',
+    name: '琥珀暖意',
+    tokens: {
+      bg: '#201b16', panel: '#292219', panelHi: '#332a1f', panel2: '#1a1510',
+      line: '#3e3428', lineSoft: '#302820',
+      text: '#efe6d8', text2: '#a89a86', text3: '#776b5b',
+      down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+      accent: '#d98a3d', accentInk: '#2b1c0f', selBar: '#e2a55c',
+    },
+  },
+};
+
+// ---------- 令牌派生 ----------
+
+// 从核心键（bg / panel / text / down / up + 可选 accent）派生完整 17 键表。
+// 服务于动态路径：背景图取色、AI 生成、旧配置迁移。内置皮肤不走这里（手写精确值）。
+function expandTokens(core) {
+  const bgRgb = hexToRgb(core.bg);
+  const panelRgb = hexToRgb(core.panel);
+  const textRgb = hexToRgb(core.text);
+  // 文字亮 → 深色底：派生方向随之翻转
+  const dark = luminance(textRgb) > 0.5;
+  const toward = dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+
+  const out = {
+    bg: core.bg,
+    panel: core.panel,
+    // 抬一档：hover、选中底、悬停读数小卡
+    panelHi: rgbToHex(mix(panelRgb, toward, dark ? 0.06 : 0.10)),
+    // 凹一档：顶栏、rail、表头、输入框
+    panel2: rgbToHex(mix(bgRgb, { r: 0, g: 0, b: 0 }, dark ? 0.15 : 0.05)),
+    line: rgbToHex(mix(panelRgb, textRgb, dark ? 0.09 : 0.17)),
+    lineSoft: rgbToHex(mix(panelRgb, textRgb, dark ? 0.03 : 0.09)),
+    text: core.text,
+    text2: rgbToHex(mix(textRgb, bgRgb, dark ? 0.35 : 0.38)),
+    text3: rgbToHex(mix(textRgb, bgRgb, dark ? 0.62 : 0.60)),
+    down: core.down,
+    up: core.up,
+    ok: core.ok,
+    warn: core.warn,
+    error: core.error,
+    // 交互强调缺省 = 中性反白（深色）/ 中性深灰（浅色），与 v2 基底思路一致
+    accent: core.accent || core.text,
+  };
+
+  // 强调底上的文字：两个候选里谁对比度高用谁（琥珀这类中间亮度色靠它选黑字）
+  const acc = hexToRgb(out.accent);
+  const darkInk = { r: 21, g: 23, b: 27 };
+  const lightInk = { r: 242, g: 243, b: 245 };
+  out.accentInk = contrast(acc, darkInk) >= contrast(acc, lightInk)
+    ? rgbToHex(darkInk)
+    : rgbToHex(lightInk);
+  // 选中指示条 = 强调色略收敛一档
+  out.selBar = rgbToHex(mix(acc, bgRgb, 0.10));
+  return out;
+}
+
+// 旧版（v1 三模式主题）10 键 token → 新 17 键表。用于旧配置迁移与 AI 返回值归一。
+function convertLegacyTokens(t) {
+  if (!t || typeof t !== 'object') return null;
+  if (t.panelHi) return { ...t }; // 已是新格式
+  const core = {
+    bg: t.bg,
+    panel: t.panel,
+    text: t.text,
+    down: t.down,
+    up: t.up,
+    ok: t.ok,
+    warn: t.warn,
+    error: t.error,
+    accent: t.text, // 旧格式没有交互强调，用主文字色承接（中性反白）
+  };
+  const full = expandTokens(core);
+  // 旧键能对上的就沿用：border → line，muted → text2（text3 由 text2 派生）
+  if (/^#[0-9a-f]{6}$/i.test(t.border || '')) full.line = t.border;
+  if (/^#[0-9a-f]{6}$/i.test(t.muted || '')) {
+    full.text2 = t.muted;
+    full.text3 = rgbToHex(mix(hexToRgb(t.muted), hexToRgb(t.bg), 0.4));
+  }
+  return full;
+}
+
+// 对比度校验并修正：正文字阶与语义色相对 panel ≥ 4.5。
+// text3（弱文字阶）不校 —— 3:1 左右的弱对比是它的设计意图，校了层级就没了。
+function validateSkin(tokens) {
+  const out = { ...tokens };
+  for (const k of ['text', 'text2', 'down', 'up', 'ok', 'warn', 'error', 'accent']) {
+    if (/^#[0-9a-f]{6}$/i.test(out[k] || '')) out[k] = ensureContrast(out[k], out.panel);
+  }
+  return out;
+}
+
+// ---------- 背景图取色 → token 表 ----------
+
+// 标准离线取色：背景图 → 色板 → 完整 17 键 token 表。
 function tokensFromImage(imgData) {
   const palette = medianCut(imgData, 8);
-  if (!palette.length) return tokensFromPreset('dark');
+  if (!palette.length) return { ...SKINS.plain.tokens };
 
   const { main, accent } = pickBase(palette);
   const lum = luminance(main);
@@ -185,88 +320,97 @@ function tokensFromImage(imgData) {
   const bg = rgbToHex(main);
   // 玻璃面板底色：主色压暗 35%（深色）或提亮 55%（浅色）
   const panel = rgbToHex(mix(main, dark ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 }, dark ? 0.35 : 0.55));
-  const border = rgbToHex(mix(main, dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 }, 0.25));
 
   const text = ensureContrast(dark ? '#f2e6dc' : '#2a211b', panel);
-  const muted = ensureContrast(mix(hexToRgb(text), dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 }, 0.55), panel);
 
-  // 强调色：从色板提取有彩色；色板偏灰则用默认橙/蓝
+  // 有彩色提交互强调与语义色；色板偏灰则交互退回中性反白
   const sat = (c) => Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
   const colorful = palette.filter((c) => sat(c) > 60).sort((a, b) => b.weight - a.weight);
-  const down = ensureContrast(colorful[0] ? rgbToHex(colorful[0]) : '#f0913f', panel);
-  const up = ensureContrast(colorful[1] ? rgbToHex(colorful[1]) : '#7fa8c9', panel);
+  const accentHex = colorful[0] ? ensureContrast(rgbToHex(colorful[0]), panel) : text;
+  const down = ensureContrast(colorful[0] ? rgbToHex(colorful[0]) : '#f0963f', panel);
+  const up = ensureContrast(colorful[1] ? rgbToHex(colorful[1]) : '#62a9e8', panel);
 
-  return {
-    source: 'standard',
-    background: '',
-    tokens: {
-      bg,
-      panel,
-      border,
-      text,
-      muted,
-      down,
-      up,
-      ok: ensureContrast('#6fc884', panel),
-      warn: ensureContrast('#ebbd57', panel),
-      error: ensureContrast('#f97770', panel),
-    },
-    panelOpacity: 0.88,
-    blur: 24,
-    scrim: 0.30,
-  };
+  return validateSkin(expandTokens({
+    bg,
+    panel,
+    text,
+    down,
+    up,
+    ok: ensureContrast('#4cc38a', panel),
+    warn: ensureContrast('#e5b567', panel),
+    error: ensureContrast('#e57373', panel),
+    accent: accentHex,
+  }));
 }
 
-// 内置预设主题（定制化模式用）。深色一档的值即 §3.1 的令牌表。
-function tokensFromPreset(name) {
-  const presets = {
-    dark: {
-      bg: '#111418',
-      panel: '#1e1a16',
-      border: '#423c37',
-      text: '#f6efe8',
-      muted: '#b4a99e',
-      down: '#f0913f',
-      up: '#7fa8c9',
-      ok: '#6fc884',
-      warn: '#ebbd57',
-      // #e14b3a 在岛屿上只有 4.34、压着底图亮部 3.01，恰好覆盖它全部的出现位置（§3.1）
-      error: '#f97770',
-    },
-    light: {
-      bg: '#f5f2ee',
-      panel: '#ffffff',
-      border: '#ddd6cc',
-      text: '#2a211b',
-      muted: '#7a6a5e',
-      down: '#c96a1a',
-      up: '#2e6f9e',
-      ok: '#2e7d4f',
-      warn: '#9a7414',
-      error: '#c03a2b',
-    },
-    contrast: {
-      bg: '#000000',
-      panel: '#101418',
-      border: '#3a3f47',
-      text: '#ffffff',
-      muted: '#d0c8c0',
-      down: '#ff9f43',
-      up: '#5cb3ff',
-      ok: '#3ddc84',
-      warn: '#ffd24a',
-      error: '#ff6b5e',
-    },
-  };
-  const t = presets[name] || presets.dark;
-  return {
-    source: 'custom',
-    background: '',
-    tokens: { ...t },
-    panelOpacity: 0.88,
-    blur: 24,
-    scrim: 0.30,
-  };
+// ---------- 应用令牌 ----------
+
+// 纯色系：17 键全量覆写到 documentElement。皮肤切换走这里。
+function applyTokens(tokens, opts = {}) {
+  const root = document.documentElement;
+  const t = tokens;
+  const set = (k, v) => root.style.setProperty(k, v);
+  set('--bg', t.bg);
+  set('--panel', t.panel);
+  set('--panel-hi', t.panelHi);
+  set('--panel-2', t.panel2);
+  set('--line', t.line);
+  set('--line-soft', t.lineSoft);
+  set('--text', t.text);
+  set('--text-2', t.text2);
+  set('--text-3', t.text3);
+  set('--down', t.down);
+  set('--up', t.up);
+  set('--ok', t.ok);
+  set('--warn', t.warn);
+  set('--error', t.error);
+  set('--accent', t.accent);
+  set('--accent-ink', t.accentInk);
+  set('--sel-bar', t.selBar);
+  // colorScheme 跟着原生控件（滚动条、date input、勾选框）走
+  root.style.colorScheme = luminance(hexToRgb(t.text)) > 0.5 ? 'dark' : 'light';
+  if (!opts.silent) {
+    window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: { tokens: t } }));
+  }
+}
+
+// 背景图模式四件套：面板不透明度 / 背景模糊 / 背景压暗 / 背景图 url。
+// 仅「跟随背景图」皮肤会传背景；其余皮肤调用时 background 为空，全部归位。
+function applyBackdrop({ background, panelOpacity, bgBlur, scrim }) {
+  const root = document.documentElement;
+  const hasBg = !!background;
+  root.style.setProperty('--panel-op', hasBg ? String(clamp(panelOpacity ?? 1, 0.82, 1)) : '1');
+  root.style.setProperty('--bg-blur', hasBg ? `${Math.round(clamp(bgBlur ?? 0, 0, 40))}px` : '0px');
+  root.style.setProperty('--backdrop-dim', hasBg ? String(clamp(scrim ?? 0, 0.2, 0.6)) : '0');
+  root.style.setProperty('--theme-bg-image', hasBg ? `url("${background}")` : 'none');
+  document.body.classList.toggle('has-bg', hasBg);
+}
+
+// ---------- 皮肤解析 ----------
+
+// state + 皮肤 id → { tokens, background, panelOpacity, bgBlur, scrim }。
+// 皮肤 id：内置 'plain' | 'light' | 'amber'；'image'（跟随背景图）；其余视为 themes 里的自定义皮肤名。
+// 小窗等只想要颜色的调用方，忽略返回值里的 background 即可（mini 不做 backdrop）。
+function resolveSkin(state, id) {
+  const skinId = id || (state && state.skin) || 'plain';
+  if (SKINS[skinId]) {
+    return { tokens: { ...SKINS[skinId].tokens }, background: '', panelOpacity: 1, bgBlur: 0, scrim: 0 };
+  }
+  if (skinId === 'image') {
+    const draft = state && state.imageDraft;
+    return {
+      tokens: draft && draft.tokens ? { ...draft.tokens } : { ...SKINS.plain.tokens },
+      background: (state && state.backgroundImage) || '',
+      panelOpacity: clamp((state && state.panelOpacity) ?? 0.92, 0.82, 1),
+      bgBlur: clamp((state && state.bgBlur) ?? 0, 0, 40),
+      scrim: clamp((state && state.scrim) ?? 0.30, 0.2, 0.6),
+    };
+  }
+  const th = state && state.themes && state.themes[skinId];
+  if (th && th.tokens) {
+    return { tokens: { ...th.tokens }, background: '', panelOpacity: 1, bgBlur: 0, scrim: 0 };
+  }
+  return { tokens: { ...SKINS.plain.tokens }, background: '', panelOpacity: 1, bgBlur: 0, scrim: 0 };
 }
 
 // ---------- 配置持久化 ----------
@@ -300,70 +444,7 @@ function configStorage() {
   };
 }
 
-// ---------- 应用令牌 ----------
-
-function applyTheme(theme, opts = {}) {
-  const { tokens, background, panelOpacity, blur, scrim } = theme;
-  const root = document.documentElement;
-  const t = tokens;
-  // 对比度的参照面是岛屿底色，不是窗口底 —— 文字实际压在岛屿上（§3.1）。
-  const dark = luminance(hexToRgb(t.panel)) < 0.5;
-  const toward = dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
-
-  root.style.setProperty('--bg', t.bg);
-  root.style.setProperty('--surface', t.panel);
-  // 悬浮 / 选中 / 当前档胶囊用的不透明高亮底，从岛屿底色提（或压）一档得来。
-  root.style.setProperty('--surface-hi', rgbToHex(mix(hexToRgb(t.panel), toward, 0.08)));
-  root.style.setProperty('--text', t.text);
-  root.style.setProperty('--text-muted', t.muted);
-  root.style.setProperty('--down', t.down);
-  root.style.setProperty('--up', t.up);
-  root.style.setProperty('--ok', t.ok);
-  root.style.setProperty('--warn', t.warn);
-  root.style.setProperty('--error', t.error);
-
-  // 分隔线与描边用低透明度中性色：它和岛屿合成底色一起浮动，
-  // 深色描边在底图亮部实测只剩 1.12 对比度（§3.1）。
-  const tint = dark ? '255,255,255' : '0,0,0';
-  root.style.setProperty('--line', `rgba(${tint},0.10)`);
-  root.style.setProperty('--stroke', `rgba(${tint},0.18)`);
-
-  // 暖色亮边取语义下载色（§3.4）。同色外发光已去掉：那圈光没有光源可依，
-  // 在暗底上只是把边缘泛成一团橙雾，层次交给投影与这条亮边。
-  const d = hexToRgb(t.down);
-  root.style.setProperty('--edge', `rgba(${d.r},${d.g},${d.b},0.26)`);
-
-  // 三个范围由令牌算出来，不留不可读的余地：0.82 是上传蓝在底图最亮处仍过 4.5:1 的下限（§3.2）。
-  root.style.setProperty('--island-op', String(clamp(panelOpacity ?? 0.88, 0.82, 1)));
-  root.style.setProperty('--blur', `${Math.round(clamp(blur ?? 24, 0, 40))}px`);
-  root.style.setProperty('--scrim', String(clamp(scrim ?? 0.30, 0.2, 0.6)));
-  root.style.setProperty('--theme-bg-image', background ? `url("${background}")` : 'none');
-  root.style.colorScheme = dark ? 'dark' : 'light';
-
-  document.body.classList.toggle('has-bg', !!background);
-
-  if (!opts.silent) {
-    window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: { theme } }));
-  }
-}
-
-function clamp(v, lo, hi) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return lo;
-  return Math.min(hi, Math.max(lo, n));
-}
-
-// ---------- 主题列表 ----------
-
-function makeTheme(name, source, tokens, background, panelOpacity, blur) {
-  return { name, source, tokens, background, panelOpacity, blur };
-}
-
-function cloneTheme(t) {
-  return JSON.parse(JSON.stringify(t));
-}
-
-// ---------- AI 模式：调用 OpenAI 兼容多模态接口 ----------
+// ---------- AI 取色（跟随背景图皮肤的高级项）：OpenAI 兼容多模态接口 ----------
 
 async function aiGenerate(provider, imgDataUrl) {
   // 校验提供方配置与授权（授权在 UI 层把关）
@@ -381,6 +462,7 @@ async function aiGenerate(provider, imgDataUrl) {
       messages: [{
         role: 'user',
         content: [
+          // 仍要求旧 10 键：这套键名模型见过、生成质量稳，拿到手再 convertLegacyTokens 归一
           { type: 'text', text: '根据这张壁纸生成一套 UI 主题令牌，输出 JSON（不要代码块）：{"bg":"#hex","panel":"#hex","border":"#hex","text":"#hex","muted":"#hex","down":"#hex","up":"#hex","ok":"#hex","warn":"#hex","error":"#hex","panelOpacity":0.9,"blur":12}。颜色需与壁纸风格协调，保证文字可读。' },
           { type: 'image_url', image_url: { url: imgDataUrl } },
         ],
@@ -408,62 +490,128 @@ async function aiGenerate(provider, imgDataUrl) {
   };
 }
 
-// 对比度校验并修正：确保 text/muted/down/up/ok/warn/error 相对 panel ≥ 4.5
-function validateTokens(tokens) {
-  const out = { ...tokens };
-  for (const k of ['text', 'muted', 'down', 'up', 'ok', 'warn', 'error']) {
-    out[k] = ensureContrast(tokens[k], tokens.panel);
-  }
-  return out;
+// ---------- 状态：默认值与旧配置迁移 ----------
+
+function defaultState() {
+  return {
+    skin: 'plain',        // 内置 id | 'image' | themes 里的自定义皮肤名
+    backgroundImage: '',  // 仅 image 皮肤使用（已落盘路径）
+    panelOpacity: 0.92,   // image 皮肤：面板不透明度
+    bgBlur: 0,            // image 皮肤：背景模糊半径 px
+    scrim: 0.30,          // image 皮肤：背景压暗
+    imageDraft: null,     // image 皮肤的 token 表草稿 { tokens, source: 'standard'|'ai' }
+    custom: null,         // 自定义编辑器草稿 { tokens }（17 键完整表）
+    themes: {},           // 已另存的自定义皮肤 { name: { name, tokens } }
+    active: 'plain',      // 等于 skin（保留独立字段便于以后做「预览未应用」）
+    ai: { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false },
+  };
 }
 
-// 初始化：加载配置并应用
+// 就地迁移/补全，保证 state 满足新格式。
+function migrateState(state) {
+  // 旧版三模式（mode: standard | ai | custom）→ 新皮肤归属
+  if (typeof state.mode === 'string') {
+    const std = state.standard || {};
+    state.panelOpacity = clamp(std.panelOpacity ?? 0.92, 0.82, 1);
+    state.bgBlur = clamp(std.blur ?? 0, 0, 40);
+    state.scrim = clamp(std.scrim ?? 0.30, 0.2, 0.6);
+    state.backgroundImage = state.pendingBackground || '';
+
+    // 旧 themes → 新 themes：default 是出厂皮肤（= plain），即席取色结果不值得留
+    const themes = {};
+    for (const [name, th] of Object.entries(state.themes || {})) {
+      if (name === 'default' || !th || !th.tokens) continue;
+      const tokens = convertLegacyTokens(th.tokens);
+      if (tokens) themes[name] = { name, tokens };
+    }
+    state.themes = themes;
+
+    if (state.backgroundImage) {
+      // 有背景图的用户迁到「跟随背景图」：取色草稿留空（进外观屏后自动补），
+      // 面板先以 plain 中性基底浮在旧图上 —— 视觉连续，且 v2 本来就是半透面板。
+      state.skin = 'image';
+      state.imageDraft = null;
+    } else if (state.mode === 'custom' && state.active && themes[state.active]) {
+      state.skin = state.active; // 用户另存过的自定义皮肤，原样保留
+    } else {
+      state.skin = 'plain';
+    }
+
+    delete state.mode;
+    delete state.active;
+    delete state.standard;
+    delete state.custom;
+    delete state.pendingBackground;
+    delete state.aiApplied;
+  }
+
+  if (!SKINS[state.skin] && state.skin !== 'image' && !(state.themes && state.themes[state.skin])) {
+    state.skin = 'plain';
+  }
+  state.active = state.skin;
+  if (!state.themes || typeof state.themes !== 'object') state.themes = {};
+  for (const th of Object.values(state.themes)) {
+    if (!th || typeof th !== 'object' || !th.tokens) continue;
+    const fixed = convertLegacyTokens(th.tokens);
+    if (fixed) th.tokens = fixed;
+  }
+
+  if (state.skin === 'image') {
+    state.panelOpacity = clamp(state.panelOpacity ?? 0.92, 0.82, 1);
+    state.bgBlur = clamp(state.bgBlur ?? 0, 0, 40);
+    state.scrim = clamp(state.scrim ?? 0.30, 0.2, 0.6);
+    if (state.imageDraft && state.imageDraft.tokens) {
+      const fixed = convertLegacyTokens(state.imageDraft.tokens);
+      state.imageDraft = fixed ? { tokens: fixed, source: state.imageDraft.source || 'standard' } : null;
+    } else {
+      state.imageDraft = null;
+    }
+  } else {
+    state.backgroundImage = '';
+    state.imageDraft = null;
+  }
+
+  if (state.custom && !state.custom.tokens) state.custom = null;
+  if (state.custom && state.custom.tokens) {
+    const fixed = convertLegacyTokens(state.custom.tokens);
+    state.custom = fixed ? { tokens: fixed } : null;
+  }
+
+  if (!state.ai) state.ai = { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false };
+  if (!state.ai.provider) state.ai.provider = { endpoint: '', apiKey: '', model: 'gpt-4o-mini' };
+  return state;
+}
+
+// 初始化：加载配置、迁移、返回运行时状态。
 async function initTheme() {
   const storage = configStorage();
   const raw = await storage.load();
   const cfg = raw && typeof raw === 'object' ? raw : null;
   const fresh = !cfg;
-  const state = cfg || {
-    mode: 'standard', // standard | ai | custom
-    themes: {},
-    active: 'default',
-    standard: { panelOpacity: 0.88, blur: 24, scrim: 0.30 },
-    custom: tokensFromPreset('dark'),
-    ai: { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false, lastImageHash: '' },
-  };
-  // 兼容缺字段的旧配置
-  if (!state.themes) state.themes = {};
-  if (!state.standard) state.standard = { panelOpacity: 0.88, blur: 24, scrim: 0.30 };
-  if (state.standard.scrim == null) state.standard.scrim = 0.30;
-  // 旧配置的不透明度下限是 0.30，实测在纯白底图上把次要文字压到 1.77:1 —— 抬到 0.82（§2.7）
-  state.standard.panelOpacity = clamp(state.standard.panelOpacity ?? 0.88, 0.82, 1);
-  if (!state.ai) state.ai = { provider: { endpoint: '', apiKey: '', model: 'gpt-4o-mini' }, consented: false };
-  if (!state.ai.provider) state.ai.provider = { endpoint: '', apiKey: '', model: 'gpt-4o-mini' };
-  if (!state.custom) state.custom = tokensFromPreset('dark');
-  // 保证默认主题存在
-  if (!state.themes.default) {
-    state.themes.default = { ...tokensFromPreset('dark'), name: '默认深色', source: 'custom' };
-  }
-  if (!state.active) state.active = 'default';
+  const state = migrateState(cfg || defaultState());
   return { state, storage, fresh };
 }
 
-// 汇出供 UI 与测试使用
+// 汇出供 UI 与小窗使用
 window.NetPeekTheme = {
   THEME_EVENT,
+  SKINS,
   hexToRgb,
   rgbToHex,
+  mix,
   luminance,
   contrast,
   ensureContrast,
   clamp,
   medianCut,
+  pickBase,
   tokensFromImage,
-  tokensFromPreset,
-  validateTokens,
-  applyTheme,
-  makeTheme,
-  cloneTheme,
+  expandTokens,
+  convertLegacyTokens,
+  validateSkin,
+  applyTokens,
+  applyBackdrop,
+  resolveSkin,
   aiGenerate,
   configStorage,
   initTheme,

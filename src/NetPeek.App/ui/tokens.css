@@ -1,61 +1,58 @@
-/* NetPeek 设计令牌。唯一的一份，index.html 与 mini.html 都在自己的样式表之前加载它。
-   设计依据：docs/UI生成提示词.md §3。
+/* NetPeek 设计令牌（v2 · 朴素基底）—— 唯一令牌源。
+   index.html 与 mini.html 都先加载本文件再加载各自的组件样式。
 
-   为什么单独成文件：主界面和小窗是两个独立 webview，CSS 变量不跨窗口共享，
-   theme.js 的 applyTheme 也只能改到自己那一份 documentElement。两边各抄一份令牌时，
-   同一个值要在两个文件里改对才算改完 —— 颜色、字族、圆角、动效时长共 19 项在两份里
-   逐字重复过一轮。现在它们只有这一处声明。
-
-   运行期覆盖：theme.js 把主题色写在 documentElement 的行内 style 上，
-   行内声明优先级高于任何样式表，所以这里的值是「首帧兜底 + 非主题项的唯一来源」。
-   非主题项（字族、圆角、动效、z 轴）theme.js 从不改，永远读这里。 */
+   分层原则（docs/redesign/netpeek-redesign-v2.html §②）：
+   - 基底 = 中性灰黑，无蓝调无暖调。chrome（导航选中、表格选中、主按钮、开关、
+     品牌标）全部走中性反白；琥珀 / 钢蓝只属于下载 / 上传数据语义，永远不进 chrome。
+   - 皮肤 = theme.js 运行时把一份 JSON token 表覆写到 documentElement 上的同名变量。
+     皮肤可改颜色与三档圆角；栅格、字号阶、间距、组件结构不在 token 里，任何皮肤下
+     可用性一致 —— 换肤是安全的。
+   - --accent / --accent-ink / --sel-bar 管交互（选中、主按钮、开关、焦点条）；
+     --down / --up 只管数据（图表、速率、排行）。两者的分工是 v2 的核心约束。 */
 
 :root {
-  /* ---------- 颜色（§3.1）。theme.js 按当前主题覆盖这一组。---------- */
-  --bg: #111418;
-  --surface: #1e1a16;
-  --surface-hi: #2f2924;
-  --text: #f6efe8;
-  --text-muted: #b4a99e;
-  --down: #f0913f;
-  --up: #7fa8c9;
-  --ok: #6fc884;
-  --warn: #ebbd57;
-  --error: #f97770;
-  --line: rgba(255, 255, 255, 0.10);
-  --stroke: rgba(255, 255, 255, 0.18);
-  --edge: rgba(240, 145, 63, 0.26);
-  --theme-bg-image: none;
+  /* ---- 基底：中性灰黑 ---- */
+  --bg: #1b1d21;          /* 窗口底 */
+  --panel: #22252a;       /* 卡片 / 面板 */
+  --panel-hi: #2c2f36;    /* 抬起一档：hover、选中底、悬停读数小卡 */
+  --panel-2: #17191d;     /* 凹陷一档：顶栏、rail、表头、输入框 */
+  --line: #32363e;        /* 强边线：控件描边、表头分隔 */
+  --line-soft: #272a30;   /* 弱边线：卡片描边、行分隔、图表网格 */
 
-  /* 占比条：进程表行、小窗列表行、历史排行三处共用的极淡琥珀渐变强度。
-     渐变本身写在各自的组件规则里，只有百分比由 JS 按数据写进 --share。 */
-  --share-tint: 9%;
+  /* ---- 文字三阶 ---- */
+  --text: #e3e5e9;
+  --text-2: #9ba1a9;
+  --text-3: #686e77;
 
-  /* ---------- 岛屿材质（§3.2）。不透明度下限 0.82 是对比度实测结果，不是手感。---------- */
-  --island-op: 0.88;
-  --blur: 24px;
-  --scrim: 0.30;
+  /* ---- 语义色：只出现在数据上 ---- */
+  --down: #f0963f;        /* 下载 */
+  --up: #62a9e8;          /* 上传 */
+  --ok: #4cc38a;
+  --warn: #e5b567;
+  --error: #e57373;
 
-  /* ---------- 圆角五档（§3.4）---------- */
-  --r-frame: 20px;
-  --r-island: 16px;
-  --r-block: 10px;
-  --r-ctl: 8px;
-  --r-pill: 999px;
+  /* ---- 交互强调：中性反白（皮肤可覆写为任何彩色） ---- */
+  --accent: #e3e5e9;      /* 主按钮底、开关开态 */
+  --accent-ink: #1b1d21;  /* 强调底上的文字 */
+  --sel-bar: #c9cdd4;     /* 选中指示条、焦点环 */
 
-  /* ---------- 字族（§3.3）。所有数字走等宽族，避免每秒刷新时列宽抖动。---------- */
-  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+  /* ---- 背景图模式（「跟随背景图」皮肤专用；其余皮肤恒为不透明、无模糊） ---- */
+  --panel-op: 1;          /* 面板不透明度，仅 body.has-bg 时生效，下限 0.82 */
+  --bg-blur: 0px;         /* 背景图模糊半径 */
+  --backdrop-dim: 0;      /* 背景图压暗强度 0–0.6 */
+  --theme-bg-image: none; /* backdrop 层的背景图 url() */
+
+  /* ---- 形状 / 字体 / 动效（皮肤不可改） ---- */
+  --r-l: 12px;
+  --r-m: 8px;
+  --r-s: 6px;
+  --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
-
-  /* ---------- 动效三档（§3.6）---------- */
-  --t-fast: 150ms;
-  --t-mid: 200ms;
-  --t-slow: 260ms;
+  --t-fast: 120ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
 
-  /* ---------- z 轴语义层，不用 999 之类的裸数字 ---------- */
-  --z-scrim: 1;
-  --z-island: 2;
-  --z-grip: 3;
-  --z-resize: 40;
+  /* ---- 层级 ---- */
+  --z-backdrop: 0;
+  --z-shell: 1;
+  --z-edge: 40;
 }

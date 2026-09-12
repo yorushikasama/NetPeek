@@ -1,20 +1,20 @@
-/* NetPeek 小窗样式（§2.9）：能量球（窗口 108×108，球 92×92）与迷你窗
+/* NetPeek 小窗样式（v2）：能量球（窗口 108×108，球 92×92）与迷你窗
    （窗口 344×324，面板本体 320×300，四周各 12px 留给投影）双形态。
    窗口 transparent: true，body 无底色，只有形态元素有背景。
 
-   **不用外发光。** 自发光在桌面上只会糊出一团橙雾，观感廉价；而且透明窗口的
-   边界是硬的，超出去的光一律被裁成直线，圆形的光被方窗裁完就是四条边各一道
-   亮线、四个角什么都没有。层次感一律交给投影（面板）和球面明暗（球）。
-   面板形态的预算：面板外沿到窗口边 12px，投影的偏移 + 扩散之和要 ≤ 12。
+   v2 素壳：球与面板都是不透明纯色 + 1px 边线，无外发光、无光斑。层次交给
+   投影（面板）和球面明暗（球）。透明窗口的边界是硬的，任何超出去的光都会
+   被裁成直线，所以装饰一律不做。面板形态的预算：面板外沿到窗口边 12px，
+   投影的偏移 + 扩散之和要 ≤ 12。
 
    令牌统一在 tokens.css 里声明，mini.html 在本文件之前加载它。小窗是独立 webview，
    主界面写在自己 documentElement 上的变量不会继承过来，所以 tokens.css 的默认值
    在这里既是首帧兜底、也是非主题项（字族、圆角、动效）的唯一来源；mini.js 启动时
-   再读一遍主题配置覆盖颜色，那一步是异步的，第一帧必须能看。
+   再用 resolveSkin 读一遍皮肤配置覆盖颜色，那一步是异步的，第一帧必须能看。
 
    两条和主界面不同的规定：
    - 不做 backdrop-filter。透明窗口后面没有网页内容可采样，Windows 上这一项在透明窗口里
-     行为不一致（有时糊成灰块、有时完全无效），靠 0.88 的底色已经够。
+     行为不一致（有时糊成灰块、有时完全无效），纯色底已经够。
    - 按钮与滚动条比主界面小一档（.btn 28/12 对 30/13、.icon-btn 28 对 32、滚动条 6 对 8）：
      这里的头部只有 40px、脚只有 44px，主界面那一档塞不下。是适配，不是重复声明。 */
 
@@ -46,31 +46,28 @@ html, body {
   top: 50%;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
-  border: 1px solid var(--edge);
+  background: var(--panel);
+  border: 1px solid var(--line);
   /* 不加外发光。球是一颗有体积的实体，体积感由下面 ::before 的球面明暗负责；
-     再往外撒一圈同色辉光只会在桌面上糊出一团橙雾，而且透明窗口的边界是硬的，
-     圆形的光被方窗裁完就是四边各一条亮线。 */
+     再往外撒一圈同色辉光只会被透明窗口的硬边界裁成亮线。 */
   cursor: grab;
   /* hover 微抬：cursor:grab 只说得出「可拖」，说不出「可点开」。
-     1.04 够感知、不越界（95.7 < 108 窗口，发光预算不受影响）。
+     1.04 够感知、不越界（95.7 < 108 窗口）。
      只动 transform，reduced-motion 由全局媒体查询关掉。 */
   transition: transform var(--t-fast) var(--ease);
 }
 .orb:hover { transform: translate(-50%, -50%) scale(1.04); }
 .orb:active { transform: translate(-50%, -50%) scale(0.98); cursor: grabbing; }
-/* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪 */
-.orb:focus-visible { outline: 2px solid var(--down); outline-offset: 3px; }
+/* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪。
+   焦点环走交互强调（sel-bar），不占数据色。 */
+.orb:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 3px; }
 
 /* ---------- 球面光照（3D 材质，与流量无关） ----------
    原来球是「一块纯色圆盘 + 向外的光」，没有任何球面明暗，所以读作平面。
-   这两层补的是材质本身：左上受光、右下背光、球缘内侧压暗、底部一道环境反弹光，
-   外加受光方向上一个固定的镜面高光。
-   为什么用伪元素而不是并进 .orb 的 background：底色那条带 --island-op 半透明
-   （§2.9 要求球和桌面融合，渐变叠上去必须沿用同一透明度），
-   并进去会让球变成不透明的塑料块 —— §2.9 已经明确否掉了那种质感。
-   ::before 是第一个子节点，落在 halo/core/sheen/粒子之下；::after 只占左上角
-   一小块，不压中心数字。 */
+   这层补的是材质本身：左上受光、右下背光、球缘内侧压暗、底部一道环境反弹光。
+   为什么用伪元素而不是并进 .orb 的 background：并进去后 color-mix 的层级
+   会让明暗直接盖在边线上，单独一层好控强度。
+   ::before 是第一个子节点，落在环形规与数字之下。 */
 .orb::before {
   content: '';
   position: absolute;
@@ -78,37 +75,17 @@ html, body {
   border-radius: 50%;
   pointer-events: none;
   background:
-    /* 底部环境反弹：桌面把光打回球底，暖色、很淡 */
+    /* 底部环境反弹：桌面把光打回球底，很淡 */
     radial-gradient(circle at 50% 98%,
-      color-mix(in srgb, var(--down) 20%, transparent) 0%,
+      color-mix(in srgb, var(--down) 16%, transparent) 0%,
       transparent 44%),
-    /* 球面明暗：高光在 34%/28%，右下压到 34% 黑 —— 球体的体积感 */
+    /* 球面明暗：高光在 34%/28%，右下压到 30% 黑 —— 球体的体积感 */
     radial-gradient(circle at 34% 28%,
-      color-mix(in srgb, white 17%, transparent) 0%,
-      color-mix(in srgb, white 7%, transparent) 20%,
+      color-mix(in srgb, white 14%, transparent) 0%,
+      color-mix(in srgb, white 6%, transparent) 20%,
       transparent 46%,
-      color-mix(in srgb, black 13%, transparent) 76%,
-      color-mix(in srgb, black 34%, transparent) 100%);
-  opacity: var(--island-op);
-}
-
-/* 镜面高光：受光方向上一个锐利的小亮点，位置固定不动 —— 它是球面反射，
-   属于材质，不随流量变化。刻意做小做陡（核心 66% 白、28% 处就衰减到 26%、
-   62% 归零）：大面积柔光会读成「塑料按钮」，球面反射本来就是一个小而亮的点。 */
-.orb::after {
-  content: '';
-  position: absolute;
-  left: 23%;
-  top: 16%;
-  width: 24%;
-  height: 16%;
-  border-radius: 50%;
-  pointer-events: none;
-  background: radial-gradient(ellipse at 50% 50%,
-    color-mix(in srgb, white 66%, transparent) 0%,
-    color-mix(in srgb, white 26%, transparent) 28%,
-    transparent 62%);
-  opacity: calc(var(--island-op) * 0.85);
+      color-mix(in srgb, black 11%, transparent) 76%,
+      color-mix(in srgb, black 30%, transparent) 100%);
 }
 
 /* 原来这里有一整套「能量光效」：绕球外扩的 halo 光晕、球心随负载点亮的 core
@@ -122,10 +99,10 @@ html, body {
 
 /* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开） */
 .orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-/* 轨道用 --stroke（18% 白）而不是 --line（10%）：球底 #1e1a16 上 10% 白的对比
-   只有约 1.1:1，零流量时整个球读作一块空黑饼，「相对水位」的表盘感全靠轨道垫出来。
-   18% 在暗底上是「看得见但不抢」的一档，与控制件描边同一档。 */
-.orb-gauge .track { stroke: var(--stroke); }
+/* 轨道用实色 --line 而不是半透白：球底（--panel）上零流量的球不能读作一块
+   空黑饼，「相对水位」的表盘感全靠轨道垫出来。实色令牌让轨道跟随皮肤，
+   与控制件描边同一档。 */
+.orb-gauge .track { stroke: var(--line); }
 /* 弧线是实线，不带 drop-shadow 辉光。原来两条弧各挂一圈同色发光，和已删掉的
    核/晕是同一套「能量语言」；光一去掉，剩下这两圈反而成了糊边 —— 2.5px 的辉光
    在 4px 宽的弧上就是把线的边缘晕开，读作没对焦，而不是在发光。 */
@@ -152,8 +129,7 @@ html, body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   line-height: 1.1;
-  /* 不再需要那两圈 --surface 微光：它是为了把数字从球心光斑里托出来才加的，
-     光斑已经删掉，球心现在就是纯底色，字直接压上去反而更利。 */
+  /* 球心是纯底色，数字直接压上去反而更利 —— 不垫任何微光。 */
 }
 .orb-down .v { font-size: 20px; font-weight: 600; }
 .orb-down .u { font-size: 10px; font-weight: 500; margin-left: 2px; }
@@ -182,9 +158,9 @@ html, body {
   inset: 12px;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
-  border: 1px solid var(--edge);
-  border-radius: var(--r-island);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-l);
   overflow: hidden;
   /* 只留投影：向下 3 + blur 9 = 12，正好够到窗口下边，强度在边缘已接近 0。
      原来还叠了一层 12px 的同色外发光，那圈橙雾没有光源依据，观感廉价。 */
@@ -213,14 +189,14 @@ html, body {
   height: 8px;
   flex: none;
   border-radius: 50%;
-  background: var(--text-muted);
+  background: var(--text-2);
 }
 .panel-dot.is-ok { background: var(--ok); }
 .panel-dot.is-warn { background: var(--warn); }
 .panel-dot.is-error { background: var(--error); }
 
 /* 头部右侧的两枚操作钮。与主界面顶栏的窗口按钮同名同形（.icon-btn +
-   24 viewBox 的线性图标 + --r-ctl 圆角 + hover 换 --surface-hi），只把边长从
+   24 viewBox 的线性图标 + --r-s 圆角 + hover 换 --panel-hi），只把边长从
    32 收到 28 以适配 40px 高的头部。两枚按钮之间 2px：这是一个动作组，
    不是两个独立控件；间距再大就会被读成两件不相干的事。 */
 .panel-actions { display: flex; flex: none; gap: 2px; }
@@ -232,18 +208,18 @@ html, body {
   place-items: center;
   appearance: none;
   border: 0;
-  border-radius: var(--r-ctl);
+  border-radius: var(--r-s);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-2);
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .icon-btn svg { width: 16px; height: 16px; }
-.icon-btn:hover { background: var(--surface-hi); color: var(--text); }
-.icon-btn:active { background: color-mix(in srgb, var(--surface-hi) 92%, #000); }
+.icon-btn:hover { background: var(--panel-hi); color: var(--text); }
+.icon-btn:active { background: color-mix(in srgb, var(--panel-hi) 92%, #000); }
 /* 隐藏小窗 = 主界面「隐藏到托盘」的同义操作，用同一档危险色反馈 */
 .icon-btn.is-danger:hover { background: var(--error); color: #1a0f0e; }
-.icon-btn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
+.icon-btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
 
 .panel-total {
   display: flex;
@@ -291,7 +267,7 @@ html, body {
   flex: none;
   height: 32px;
   padding: 0 6px;
-  border-radius: var(--r-ctl);
+  border-radius: var(--r-s);
   /* 占比条：和主界面进程表 / 历史排行同一条（§2.5），渐变写在这里，
      只有百分比由 mini.js 按数据写进 --share。原来整条渐变在 JS 里拼字符串，
      琥珀是写死的字面量，换主题后这条一直是旧的橙色。 */
@@ -309,8 +285,8 @@ html, body {
   display: grid;
   place-items: center;
   border-radius: 4px;
-  background: var(--surface-hi);
-  color: var(--text-muted);
+  background: var(--panel-hi);
+  color: var(--text-2);
   font-size: 10px;
   font-weight: 600;
 }
@@ -324,7 +300,7 @@ html, body {
 .pitem .prate.is-down { color: var(--down); }
 .pitem .prate.is-up { color: var(--up); }
 .pitem .prate .ic { width: 10px; height: 10px; vertical-align: -1px; margin-right: 1px; }
-.panel-empty { padding: 10px 6px; font-size: 12px; color: var(--text-muted); }
+.panel-empty { padding: 10px 6px; font-size: 12px; color: var(--text-2); }
 
 /* 脚 44：只剩「暂停 / 主界面」两个键。「退出」搬去托盘右键菜单 ——
    和「主界面」并排等宽时误点一下就把采集停了，那不该是随手可及的位置。
@@ -343,8 +319,8 @@ html, body {
   border-top: 1px solid var(--line);
 }
 
-/* 与主界面 .btn 同一族（--stroke 描边、--r-ctl 圆角、hover 转 --down 描边、
-   :active 落回 --surface-hi），高度 30→28、字号 13→12 以适配 44px 的脚。 */
+/* 与主界面 .btn 同一族（--line 描边、--r-s 圆角、hover 抬 --panel-hi、
+   :active 落回深一档），高度 30→28、字号 13→12 以适配 44px 的脚。 */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -353,8 +329,8 @@ html, body {
   flex: none;
   height: 28px;
   padding: 0 12px;
-  border: 1px solid var(--stroke);
-  border-radius: var(--r-ctl);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
   background: transparent;
   color: var(--text);
   font-family: inherit;
@@ -364,9 +340,9 @@ html, body {
     background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .btn .ic { width: 14px; height: 14px; flex: none; }
-.btn:hover { border-color: color-mix(in srgb, var(--down) 60%, transparent); background: var(--surface-hi); }
-.btn:active { background: color-mix(in srgb, var(--surface-hi) 92%, #000); }
-.btn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
+.btn:hover { border-color: color-mix(in srgb, var(--text-2) 55%, transparent); background: var(--panel-hi); }
+.btn:active { background: color-mix(in srgb, var(--panel-hi) 92%, #000); }
+.btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
 .btn:disabled { opacity: 0.4; pointer-events: none; }
 
 /* 暂停/恢复：双态控件的两个态。状态挂在 aria-pressed 上，图标由它决定显隐
@@ -387,7 +363,7 @@ html, body {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--stroke);
+  background: var(--line);
   border: 1px solid transparent;
   background-clip: padding-box;
   border-radius: 3px;

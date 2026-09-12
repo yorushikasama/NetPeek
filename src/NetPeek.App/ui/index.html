@@ -10,250 +10,522 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<!-- 浮岛构图（docs/UI生成提示词.md §2.1）：底图铺满整窗并压暗，四块圆角岛屿浮在上面，
-     中间留一片不放任何 UI 的留白区给底图。窗口无系统边框，圆角与拖动自绘。 -->
+<!-- v2 布局（docs/redesign/netpeek-redesign-v2.html）：48px 顶栏 + 52px 导航 rail +
+     主区（中心卡片列 + 300px 右栏）。留白区与检查栏岛删除，外观并入设置屏。
+     分层靠底色差 + 1px 边线，无毛玻璃无投影；背景图（跟随背景图皮肤）铺在全窗底层。
+     窗口无系统边框，圆角与拖动自绘。 -->
 <div class="frame" id="frame">
-  <div class="backdrop"></div>
-  <div class="scrim"></div>
+  <div class="backdrop" aria-hidden="true"></div>
 
-  <div class="shell" id="shell">
+  <!-- ========== 顶栏（48px）：品牌格与 rail 等宽；状态 + 元信息 + 速率 + 窗口钮 ========== -->
+  <header class="topbar" id="topbar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" />
+      </svg>
+    </div>
 
-    <!-- ========== 顶栏岛（§2.2）：世界的状态 + 看数据的控件 ========== -->
-    <header class="island island--top" id="topbar" data-tauri-drag-region>
-      <div class="topbar" data-tauri-drag-region>
-        <div class="topbar-left" data-tauri-drag-region>
-          <div class="brand" data-tauri-drag-region>
-            <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" />
-            </svg>
-            <span class="brand-name">NetPeek</span>
+    <div class="top-status" id="statusPill" role="status">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="statusText">未连接采集服务</span>
+      <span class="lost-dot" id="lostDot" role="img" hidden title="事件丢失"></span>
+    </div>
+    <div class="top-meta" id="topMeta" data-tauri-drag-region>—</div>
+
+    <div class="top-rates" data-tauri-drag-region>
+      <div class="rate is-down" title="下载速率">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg>
+        <span class="v" id="totalDownValue">0</span><span class="u" id="totalDownUnit">B/s</span>
+      </div>
+      <div class="rate is-up" title="上传速率">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+        <span class="v" id="totalUpValue">0</span><span class="u" id="totalUpUnit">B/s</span>
+      </div>
+    </div>
+
+    <div class="winbtns">
+      <button type="button" class="icon-btn" id="winMin" title="最小化" aria-label="最小化">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round"><path d="M5 12h14" /></svg>
+      </button>
+      <button type="button" class="icon-btn" id="winMax" title="最大化" aria-label="最大化">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <rect x="5.5" y="5.5" width="13" height="13" rx="2" /></svg>
+      </button>
+      <button type="button" class="icon-btn is-danger" id="winClose" title="隐藏到托盘" aria-label="隐藏到托盘">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ========== 导航 rail（52px）：监控 / 历史 / 设置 + 底部迷你窗入口 ========== -->
+  <nav class="rail" aria-label="主导航">
+    <div id="nav">
+      <button type="button" class="ri is-on" data-screen="live" data-tip="监控" aria-label="监控" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" /></svg>
+      </button>
+      <button type="button" class="ri" data-screen="history" data-tip="历史" aria-label="历史" aria-current="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+      </button>
+      <button type="button" class="ri" data-screen="settings" data-tip="设置" aria-label="设置" aria-current="false">
+        <!-- sliders-horizontal：settings 齿轮在 18px 下齿廓糊成斑点，换滑杆更清晰 -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round"><path d="M21 4h-7" /><path d="M10 4H3" /><path d="M14 2v4" /><path d="M21 12h-9" /><path d="M8 12H3" /><path d="M8 10v4" /><path d="M21 20h-5" /><path d="M12 20H3" /><path d="M16 18v4" /></svg>
+      </button>
+    </div>
+    <span class="rail-grow" aria-hidden="true"></span>
+    <button type="button" class="ri" id="miniToggle" data-tip="迷你窗" aria-label="打开迷你窗">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+           stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M14.5 4v16" /></svg>
+    </button>
+  </nav>
+
+  <!-- ========== 主区 ========== -->
+  <main class="main">
+
+    <!-- ===== 屏 1 实时：带宽图 + 进程表（中心）；今日 + 30 天 + 详情（右栏） ===== -->
+    <section class="screen screen-live" data-screen="live">
+      <div class="center">
+        <div class="card chart-card">
+          <div class="card-head">
+            <h4>实时带宽</h4><span class="cnt">最近 60 秒</span>
+            <span class="sp"></span>
+            <div class="legend">
+              <span class="is-down"><i></i>下载</span>
+              <span class="is-up"><i></i>上传</span>
+            </div>
           </div>
-
-          <div class="status-pill" id="statusPill">
-            <span class="status-dot"></span>
-            <span id="statusText">未连接采集服务</span>
-          </div>
-          <span class="lost-dot" id="lostDot" role="img" hidden title="事件丢失"></span>
-
-          <div class="total">
-            <span class="total-arrow down">↓</span>
-            <span class="total-value down" id="totalDownValue">0</span>
-            <span class="total-unit down" id="totalDownUnit">B/s</span>
-          </div>
-          <div class="total">
-            <span class="total-arrow up">↑</span>
-            <span class="total-value up" id="totalUpValue">0</span>
-            <span class="total-unit up" id="totalUpUnit">B/s</span>
-          </div>
-
-          <!-- 即时速率组与累计组的分界：一屏里两种时间尺度（这一秒 / 今天），
-               不分组会被读成同一张表里的四个数。 -->
-          <span class="topbar-sep" aria-hidden="true"></span>
-
-          <!-- 今日合计可点：实时屏看到「今天用了不少」，下一动作就是去历史屏看明细。
-               这是从实时屏进历史屏唯一不用先认导航图标的路径。 -->
-          <button type="button" class="today" id="todayBtn" title="查看历史明细">
-            <span class="today-label">今日合计</span>
-            <span class="today-value" id="todayTotal">—</span>
-            <svg class="today-go" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m9 6 6 6-6 6" />
-            </svg>
-          </button>
+          <div class="plot"><canvas id="bandwidthChart" role="img" aria-label="总带宽最近 60 秒曲线"></canvas></div>
         </div>
 
-        <div data-tauri-drag-region></div>
-
-        <div class="topbar-right">
-          <div class="segmented" id="viewToggle" role="tablist" aria-label="视图">
-            <button type="button" class="is-active" data-view="process" role="tab" aria-selected="true">按进程</button>
-            <button type="button" data-view="app" role="tab" aria-selected="false">按应用</button>
+        <div class="card table-card">
+          <div class="card-head">
+            <h4>进程</h4><span class="cnt" id="procCount">—</span>
+            <span class="sp"></span>
+            <!-- 视图切换与搜索就近放在它们作用的表头旁（v2 迁移：顶栏只留 4 类元素） -->
+            <div class="segmented" id="viewToggle" role="tablist" aria-label="视图">
+              <button type="button" class="is-active" data-view="process" role="tab" aria-selected="true">按进程</button>
+              <button type="button" data-view="app" role="tab" aria-selected="false">按应用</button>
+            </div>
+            <label class="search" id="searchBox">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20.5 20.5-4.2-4.2" /></svg>
+              <input id="search" type="search" placeholder="搜索应用 / PID / IP" autocomplete="off"
+                     title="支持前缀：=精确匹配  !=不等于  !不包含；其余按包含匹配。可搜应用名、路径、PID、对端 IP、端口、服务名、国家码"
+                     aria-label="搜索应用、PID、对端 IP 或服务名" />
+            </label>
           </div>
-
-          <label class="search" id="searchBox">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                 stroke-linecap="round" aria-hidden="true">
-              <circle cx="11" cy="11" r="7" /><path d="m20.5 20.5-4.2-4.2" />
-            </svg>
-            <input id="search" type="search" placeholder="搜索应用 / PID / IP" autocomplete="off"
-                   title="支持前缀：=精确匹配  !=不等于  !不包含；其余按包含匹配。可搜应用名、路径、PID、对端 IP、端口、服务名、国家码"
-                   aria-label="搜索应用、PID、对端 IP 或服务名" />
-          </label>
-
-          <div class="win-controls">
-            <button type="button" class="icon-btn" id="winMin" title="最小化" aria-label="最小化">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round"><path d="M5 12h14" /></svg>
-            </button>
-            <button type="button" class="icon-btn" id="winMax" title="最大化" aria-label="最大化">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-                <rect x="5.5" y="5.5" width="13" height="13" rx="2" /></svg>
-            </button>
-            <button type="button" class="icon-btn is-danger" id="winClose" title="隐藏到托盘" aria-label="隐藏到托盘">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
-            </button>
+          <div class="table-zone">
+            <div class="table-wrap" id="tableWrap">
+              <table class="proc-table">
+                <colgroup>
+                  <col /><col class="col-peer" /><col class="col-pid" />
+                  <col class="col-down" /><col class="col-up" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th data-sort="name" scope="col" aria-sort="none">应用 <span class="sort-mark"></span></th>
+                    <th scope="col">对端</th>
+                    <th class="is-num" data-sort="pid" scope="col" aria-sort="none"><span id="pidLabel">PID</span> <span class="sort-mark"></span></th>
+                    <th class="is-num is-sorted" data-sort="download" scope="col" aria-sort="descending"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg> 下载 <span class="sort-mark"></span></th>
+                    <th class="is-num" data-sort="upload" scope="col" aria-sort="none"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg> 上传 <span class="sort-mark"></span></th>
+                  </tr>
+                </thead>
+                <tbody id="rows"></tbody>
+              </table>
+            </div>
+            <div class="skeleton-rows" id="procSkeleton" hidden aria-hidden="true">
+              <div class="skeleton-row"></div><div class="skeleton-row"></div>
+              <div class="skeleton-row"></div><div class="skeleton-row"></div>
+              <div class="skeleton-row"></div><div class="skeleton-row"></div>
+            </div>
+            <div class="state-box" id="procState" hidden>
+              <div class="state-title" id="procStateTitle">采集服务未连接</div>
+              <div class="state-desc" id="procStateDesc">
+                NetPeek 的 ETW 采集需要 LocalSystem 权限。请确认 NetPeekCollector 服务正在运行。
+              </div>
+              <div class="state-actions" id="procStateActions">
+                <button type="button" class="btn" id="retryConnect">重试连接</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </header>
-    <!-- ========== 导航岛（§2.3）：四项纯图标，Lucide 线性图标族 ========== -->
-    <nav class="island island--nav" aria-label="主导航">
-      <div class="nav" id="nav">
-        <button type="button" class="nav-item is-active" data-screen="live" data-tip="实时" aria-label="实时">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 12h3.5l2-6.5 3.5 13 2.5-8 1.8 4.5H22" />
-          </svg>
-        </button>
-        <button type="button" class="nav-item" data-screen="history" data-tip="历史" aria-label="历史">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 4v16h16" /><path d="M8 20v-5M13 20v-9M18 20v-4" />
-          </svg>
-        </button>
-        <button type="button" class="nav-item" data-screen="theme" data-tip="外观" aria-label="外观">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
-               stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2.5" />
-            <circle cx="9" cy="9" r="1.8" />
-            <path d="m21 15.5-3.6-3.6a2 2 0 0 0-2.8 0L6.5 21" />
-          </svg>
-        </button>
-        <button type="button" class="nav-item" data-screen="settings" data-tip="设置" aria-label="设置">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
-               stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12.9 2h-1.8a1.6 1.6 0 0 0-1.6 1.6v.4a1.6 1.6 0 0 1-.8 1.4l-.5.3a1.6 1.6 0 0 1-1.6 0l-.3-.2a1.6 1.6 0 0 0-2.2.6l-.4.7a1.6 1.6 0 0 0 .6 2.2l.3.2a1.6 1.6 0 0 1 .8 1.4v.6a1.6 1.6 0 0 1-.8 1.4l-.3.2a1.6 1.6 0 0 0-.6 2.2l.4.7a1.6 1.6 0 0 0 2.2.6l.3-.2a1.6 1.6 0 0 1 1.6 0l.5.3a1.6 1.6 0 0 1 .8 1.4v.4A1.6 1.6 0 0 0 11.1 22h1.8a1.6 1.6 0 0 0 1.6-1.6v-.4a1.6 1.6 0 0 1 .8-1.4l.5-.3a1.6 1.6 0 0 1 1.6 0l.3.2a1.6 1.6 0 0 0 2.2-.6l.4-.7a1.6 1.6 0 0 0-.6-2.2l-.3-.2a1.6 1.6 0 0 1-.8-1.4v-.6a1.6 1.6 0 0 1 .8-1.4l.3-.2a1.6 1.6 0 0 0 .6-2.2l-.4-.7a1.6 1.6 0 0 0-2.2-.6l-.3.2a1.6 1.6 0 0 1-1.6 0l-.5-.3a1.6 1.6 0 0 1-.8-1.4v-.4A1.6 1.6 0 0 0 12.9 2Z" />
-          </svg>
-        </button>
-      </div>
-    </nav>
 
-    <!-- ========== 留白区（§2.1）：底图的地盘，不放 UI ========== -->
-    <!-- 无底图态不再放引导块（2026-09-12 评估移除）：「不设背景图」是正当稳态，
-         常驻推广位违背本区原则，背景图入口收敛到外观屏。无底图时的虚空感由
-         backdrop 的暗场渐变承担（styles.css 的 body:not(.has-bg) .backdrop）。 -->
-    <div class="stage"></div>
-    <!-- ========== 检查栏岛（§2.4）========== -->
-    <aside class="island island--inspector" aria-label="检查栏">
+      <aside class="sidebar">
+        <!-- 今日卡：实时屏看到「今天用了不少」，下一动作就是去历史屏看明细 -->
+        <div class="rc">
+          <div class="rc-head">
+            <h5>今日</h5>
+            <span class="sp"></span>
+            <button type="button" class="linkish" id="todayBtn" title="查看历史明细">
+              详情<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+            </button>
+          </div>
+          <div class="big" id="todayTotal">—</div>
+          <div class="duorow">
+            <span class="it is-down">下载<b id="todayDown">—</b></span>
+            <span class="it is-up">上传<b id="todayUp">—</b></span>
+          </div>
+        </div>
 
-      <!-- 屏 1 实时：选中一行→详情态，未选中→总览态 -->
-      <div class="pane" data-screen="live">
-        <div class="inspector">
-          <div class="insp-sec insp-head">
-            <img class="insp-icon" id="inspIcon" alt="" hidden />
-            <span class="insp-icon is-placeholder" id="inspIconPh">NP</span>
-            <div class="insp-titles">
-              <div class="insp-name truncate" id="inspName">总览</div>
-              <div class="insp-path" id="inspPath">等待采集服务连接…</div>
-              <div class="insp-meta truncate" id="inspMeta">—</div>
+        <!-- 30 天下载：未选中进程时画全部应用，选中后跟随选中行（与 v1 行为一致） -->
+        <div class="rc">
+          <div class="rc-head">
+            <h5 id="insp30Title">30 天下载（全部应用）</h5>
+            <span class="sp"></span>
+            <span class="rc-aside" id="insp30Total">合计 —</span>
+          </div>
+          <div class="rc-plot"><canvas id="insp30Chart" role="img" aria-label="最近 30 天每日下载柱状图"></canvas></div>
+        </div>
+
+        <!-- 详情卡：选中一行 → 应用详情；未选中 → 总览字段 -->
+        <div class="rc is-fill" id="detailCard">
+          <div class="rc-head">
+            <img class="app-badge" id="inspIcon" alt="" hidden />
+            <span class="app-badge is-placeholder" id="inspIconPh">NP</span>
+            <div class="rc-titles">
+              <div class="rc-name truncate" id="inspName">总览</div>
             </div>
           </div>
+          <div class="rc-path" id="inspPath">等待采集服务连接…</div>
+          <div class="rc-meta truncate" id="inspMeta">—</div>
 
-          <div class="insp-sec insp-totals">
-            <div class="insp-total-row">
-              <span class="insp-total-value down" id="inspDownTotal">—</span>
-              <span class="insp-total-label">累计下载</span>
-            </div>
-            <div class="insp-total-row">
-              <span class="insp-total-value up" id="inspUpTotal">—</span>
-              <span class="insp-total-label" id="inspUpLabel">累计上传</span>
-            </div>
+          <div class="duorow">
+            <span class="it is-down"><span class="lbl">累计下载</span><b id="inspDownTotal">—</b></span>
+            <span class="it is-up"><span class="lbl" id="inspUpLabel">累计上传</span><b id="inspUpTotal">—</b></span>
           </div>
 
           <!-- 详情态：这个应用这一分钟怎么走的 -->
-          <div class="insp-sec insp-chart-sec" id="inspLiveSec" hidden>
-            <div class="sec-head">
-              <span class="sec-title">实时用量</span>
-              <span class="sec-aside">
-                <span class="down" id="inspLiveDown"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>—</span>
-                <span class="up" id="inspLiveUp"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>—</span>
-              </span>
+          <div class="insp-live" id="inspLiveSec" hidden>
+            <div class="insp-live-head">
+              <span class="is-down" id="inspLiveDown"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>—</span>
+              <span class="is-up" id="inspLiveUp"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>—</span>
+              <span class="insp-live-cap">实时用量</span>
             </div>
-            <div class="chart"><canvas id="inspLiveChart" role="img" aria-label="选中应用最近 60 秒速率曲线"></canvas></div>
+            <div class="rc-plot small"><canvas id="inspLiveChart" role="img" aria-label="选中应用最近 60 秒速率曲线"></canvas></div>
           </div>
 
           <!-- 总览态：字段组。归因说明挂在归因覆盖率上，不另设入口。 -->
-          <div class="insp-sec" id="inspFieldsSec">
-            <dl class="insp-fields">
-              <dt>归因覆盖率</dt><dd class="is-link" id="fldCoverage" role="button" tabindex="0"
-                  title="点开查看归因规则">—</dd>
-              <dt>采集服务</dt><dd id="fldService">—</dd>
-              <dt>ETW 丢事件</dt><dd id="fldLost">—</dd>
-              <dt>历史库占用</dt><dd id="fldDbSize">—</dd>
-            </dl>
-            <div class="attrib-note" id="attribNote" hidden>
-              <ul>
-                <li>流量按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
-                <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
-                <li>重传单独统计，不混入上传量。</li>
-              </ul>
+          <dl class="insp-fields" id="inspFieldsSec">
+            <dt>归因覆盖率</dt><dd class="is-link" id="fldCoverage" role="button" tabindex="0"
+                title="点开查看归因规则">—</dd>
+            <dt>采集服务</dt><dd id="fldService">—</dd>
+            <dt>ETW 丢事件</dt><dd id="fldLost">—</dd>
+            <dt>历史库占用</dt><dd id="fldDbSize">—</dd>
+          </dl>
+          <div class="attrib-note" id="attribNote" hidden>
+            <ul>
+              <li>流量按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
+              <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
+              <li>重传单独统计，不混入上传量。</li>
+            </ul>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ===== 屏 2 历史：工具栏 + 全高柱图（中心）；应用排行（右栏） ===== -->
+    <section class="screen screen-hist" data-screen="history" hidden>
+      <div class="center">
+        <div class="card hist-toolbar-card">
+          <div class="hist-toolbar">
+            <div class="segmented" id="histRange" aria-label="历史日期范围">
+              <button type="button" data-days="7">近 7 天</button>
+              <button type="button" class="is-active" data-days="30">近 30 天</button>
+              <button type="button" data-days="90">近 90 天</button>
+              <button type="button" id="histCustomToggle" aria-expanded="false" aria-controls="histCustomRange">自定义…</button>
+            </div>
+            <span class="hist-note" id="histAggNote" hidden>按周聚合</span>
+            <div class="hist-sum">
+              <span class="is-down">↓ <b id="histSumDown">—</b></span>
+              <span class="is-up">↑ <b id="histSumUp">—</b></span>
+              <span class="is-total">合计 <b id="histSumAll">—</b></span>
+            </div>
+            <span class="sp"></span>
+            <button type="button" class="btn" id="histExport">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4" /><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>导出 CSV
+            </button>
+          </div>
+          <!-- 自定义区间收在工具栏卡内：开启时把柱图往下压，不再用绝对定位浮层 -->
+          <form class="hist-custom-range" id="histCustomRange" hidden novalidate>
+            <label class="hist-date-field" for="histStartDate">
+              <span>开始日期</span>
+              <input type="date" id="histStartDate" required />
+            </label>
+            <label class="hist-date-field" for="histEndDate">
+              <span>结束日期</span>
+              <input type="date" id="histEndDate" required />
+            </label>
+            <div class="hist-custom-actions">
+              <button type="submit" class="btn is-primary" id="histCustomApply">应用</button>
+              <button type="button" class="btn" id="histCustomCancel">取消</button>
+            </div>
+            <p class="hist-range-error" id="histRangeError" role="alert" hidden></p>
+          </form>
+        </div>
+
+        <div class="card hist-chart-card">
+          <div class="card-head">
+            <h4 id="histRangeTitle">近 30 天</h4><span class="cnt" id="histRangeSub">点柱状图上的某一天可只看那天</span>
+            <span class="sp"></span>
+            <div class="legend">
+              <span class="is-down"><i></i>下载</span>
+              <span class="is-up"><i></i>上传</span>
+            </div>
+          </div>
+          <!-- tabindex + 方向键：柱图原本纯 click，键盘用户选不了某一天（U3） -->
+          <div class="plot"><canvas id="histChart" tabindex="0" role="img"
+               aria-label="历史流量每日柱状图，按左右方向键选择某一天，Esc 取消选中"></canvas></div>
+        </div>
+      </div>
+
+      <aside class="sidebar">
+        <div class="rc is-fill">
+          <div class="rc-head">
+            <h5 id="histRankTitle">应用排行</h5>
+            <span class="sp"></span>
+            <span class="rc-aside">按下载</span>
+          </div>
+          <div class="rank-list" id="histRank"></div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ===== 屏 3 设置：左分区导航 + 右表单（外观并入，皮肤即外观） ===== -->
+    <section class="screen screen-settings" data-screen="settings" hidden>
+      <div class="snav" id="settingsNav" role="tablist" aria-label="设置分区">
+        <button type="button" class="is-on" data-sec="general" role="tab" aria-selected="true">常规</button>
+        <button type="button" data-sec="appearance" role="tab" aria-selected="false">外观</button>
+        <button type="button" data-sec="data" role="tab" aria-selected="false">数据</button>
+        <button type="button" data-sec="alerts" role="tab" aria-selected="false">提醒</button>
+        <button type="button" data-sec="service" role="tab" aria-selected="false">服务</button>
+        <button type="button" data-sec="about" role="tab" aria-selected="false">关于</button>
+      </div>
+
+      <div class="sbody">
+        <span class="save-hint" id="saveHint" role="status" aria-live="polite"></span>
+
+        <!-- 常规 -->
+        <div class="sgroup" data-sec="general">
+          <h4>常规</h4>
+          <p>显示单位与系统行为。改动防抖自动写盘，没有「保存」按钮。</p>
+          <div class="srow">
+            <div class="t"><b>速率显示单位</b><small>自动挡按数值大小逐级切换；固定值后速率与总量都按该单位显示</small></div>
+            <label class="field-inline">
+              <select id="setRateUnit">
+                <option value="auto">自动（B / KB / MB / GB）</option>
+                <option value="kb">固定 KB</option>
+                <option value="mb">固定 MB</option>
+                <option value="gb">固定 GB</option>
+              </select>
+            </label>
+          </div>
+          <div class="srow">
+            <div class="t"><b>登录时自动启动</b><small>写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run</small></div>
+            <label class="switch"><input type="checkbox" id="setAutostart" /><i></i></label>
+          </div>
+          <div class="srow">
+            <div class="t"><b>记录系统未归因流量</b><small>采集端尚未分表，字段已预留</small></div>
+            <label class="switch"><input type="checkbox" id="setRecordUnattributed" /><i></i></label>
+          </div>
+        </div>
+
+        <!-- 外观：皮肤 = 整套 token 的预设包 -->
+        <div class="sgroup" data-sec="appearance" hidden>
+          <h4>皮肤</h4>
+          <p>整套视觉 token 的预设包，结构与布局不变。选「跟随背景图」可从图片提取主色。</p>
+          <div class="skin-cards" id="skinCards">
+            <button type="button" class="skin-card" data-skin="plain">
+              <span class="pv pv-plain" aria-hidden="true"></span>
+              <b>默认 · 朴素</b><small>中性灰黑 + 反白交互。出厂皮肤。</small>
+            </button>
+            <button type="button" class="skin-card" data-skin="light">
+              <span class="pv pv-light" aria-hidden="true"></span>
+              <b>浅色</b><small>明亮环境，语义色调到浅底可读。</small>
+            </button>
+            <button type="button" class="skin-card" data-skin="amber">
+              <span class="pv pv-amber" aria-hidden="true"></span>
+              <b>琥珀暖意</b><small>暖黑底 + 琥珀交互色。</small>
+            </button>
+            <button type="button" class="skin-card" data-skin="image">
+              <span class="pv pv-image" aria-hidden="true"></span>
+              <b>跟随背景图</b><small>从图片取色生成；含 AI 取色（高级）。</small>
+            </button>
+          </div>
+
+          <!-- 跟随背景图皮肤的专属区：背景图 + 面板微调 + AI 取色 -->
+          <div class="image-skin-block" id="imageSkinBlock" hidden>
+            <div class="srow">
+              <div class="t"><b>背景图</b><small>铺在整个窗口底层，面板微微透出</small></div>
+              <div class="bg-thumb" id="bgThumb" hidden></div>
+              <button type="button" class="btn" id="bgPick">选择图片…</button>
+              <button type="button" class="btn ghost" id="bgClear">移除</button>
+              <input type="file" id="bgFile" accept="image/*" hidden />
+            </div>
+            <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
+            <div class="srow">
+              <div class="t"><b>面板不透明度</b><small>0.82 – 1.00，越低底图越明显；下限保证 4.5:1 对比</small></div>
+              <div class="slider">
+                <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.92"
+                       aria-label="面板不透明度" />
+                <span class="value" id="opValue">0.92</span>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="t"><b>背景模糊</b><small>只模糊底图，不模糊面板内容</small></div>
+              <div class="slider">
+                <input type="range" id="stdBlur" min="0" max="40" step="1" value="0" aria-label="背景模糊" />
+                <span class="value" id="blurValue">0 px</span>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="t"><b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small></div>
+              <div class="slider">
+                <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
+                       aria-label="背景压暗" />
+                <span class="value" id="scrimValue">0.30</span>
+              </div>
+            </div>
+
+            <!-- AI 取色：跟随背景图皮肤的高级选项 -->
+            <div class="ai-fields" id="aiSection">
+              <h5>AI 取色（高级）</h5>
+              <p class="note">把背景缩略图交给多模态模型生成整套配色；失败自动回退本地取色。</p>
+              <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
+              <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
+              <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
+              <label class="check">
+                <input type="checkbox" id="aiConsent" />
+                <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
+              </label>
+              <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
+              <div class="note" id="aiStatus"></div>
             </div>
           </div>
 
-          <!-- 这个应用一个月用了多少。296px 宽挤不开双色分组柱，上传去历史屏看。 -->
-          <div class="insp-sec insp-chart-sec">
-            <div class="sec-head">
-              <span class="sec-title" id="insp30Title">30 天下载</span>
-              <span class="sec-aside" id="insp30Total">合计 —</span>
+          <!-- 自定义皮肤编辑器：在当前皮肤基础上改 token，命名另存 -->
+          <div class="custom-skin-block" id="customSkinBlock">
+            <h5>自定义皮肤</h5>
+            <p class="note">改动当场生效并可另存为自己的皮肤；下载与上传语义锁定，可调明度不能换语义。</p>
+            <div class="swatches">
+              <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
+              <label class="swatch"><input type="color" id="cPanel" /><span>面板</span></label>
+              <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
+              <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
+              <label class="swatch" title="交互强调：选中条 / 主按钮 / 开关"><input type="color" id="cAccent" /><span>强调</span></label>
+              <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
+                <input type="color" id="cDown" /><span>下载 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
+              <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
+                <input type="color" id="cUp" /><span>上传 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
+              <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
+              <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
+              <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
+              <label class="swatch"><input type="color" id="cBorder" /><span>边线</span></label>
             </div>
-            <div class="chart"><canvas id="insp30Chart" role="img" aria-label="选中应用最近 30 天每日下载柱状图"></canvas></div>
+            <div class="bg-actions is-spaced">
+              <button type="button" class="btn" data-preset="plain">朴素</button>
+              <button type="button" class="btn" data-preset="light">浅色</button>
+              <button type="button" class="btn" data-preset="amber">琥珀</button>
+            </div>
+            <div class="bg-actions">
+              <input type="text" id="themeName" placeholder="皮肤名称" class="text-input" />
+              <button type="button" class="btn is-primary" id="themeSave">另存</button>
+            </div>
+            <div class="theme-list" id="themeList"></div>
+            <button type="button" class="btn" id="themeReset">还原默认</button>
           </div>
         </div>
-      </div>
-      <!-- 屏 3 历史（§2.6）：区间合计 + 应用排行（取前 8，检查栏放得下几行就显示几行，其余滚动） -->
-      <div class="pane" data-screen="history" hidden>
-        <div class="inspector">
-          <div class="insp-sec insp-head">
-            <div class="insp-titles">
-              <div class="insp-name" id="histRangeTitle">近 30 天</div>
-              <div class="insp-path" id="histRangeSub">点柱状图上的某一天可只看那天</div>
+
+        <!-- 数据 -->
+        <div class="sgroup" data-sec="data" hidden>
+          <h4>历史数据</h4>
+          <p>分钟聚合每整分钟落库一次；保留周期之外的数据自动修剪。</p>
+          <div class="srow">
+            <div class="t"><b>保留周期</b><small id="histStats">暂无历史数据</small></div>
+            <label class="field-inline">
+              <select id="setRetention">
+                <option value="7">7 天</option>
+                <option value="30">30 天</option>
+                <option value="90">90 天</option>
+                <option value="365">365 天</option>
+                <option value="0">永久保留</option>
+              </select>
+            </label>
+          </div>
+          <div class="srow">
+            <div class="t"><b>清空历史</b><small>删除全部已落库数据，不可恢复；原地二次确认</small></div>
+            <div class="srow-actions">
+              <button type="button" class="btn" id="histRefresh">刷新概览</button>
+              <button type="button" class="btn is-danger" id="histClear">清空历史</button>
             </div>
           </div>
-          <div class="insp-sec range-totals">
-            <div class="range-total-row"><span class="label">下载</span><span class="value down" id="histSumDown">—</span></div>
-            <div class="range-total-row"><span class="label">上传</span><span class="value up" id="histSumUp">—</span></div>
-            <div class="range-total-row"><span class="label">总量</span><span class="value" id="histSumAll">—</span></div>
+          <div class="confirm-inline" id="histClearConfirm" hidden>
+            <button type="button" class="btn is-danger" id="histClearYes">确认清空</button>
+            <button type="button" class="btn" id="histClearNo">取消</button>
           </div>
-          <div class="insp-sec is-fill">
-            <div class="sec-head"><span class="sec-title" id="histRankTitle">应用排行</span></div>
-            <div class="rank-list" id="histRank"></div>
+
+          <h4 class="is-spaced">国家 / 地区库</h4>
+          <div class="note" id="geoDbInfo">内嵌 DB-IP 库</div>
+          <div class="srow">
+            <div class="t"><b>换用自定义库</b><small>对端国家默认由内嵌 DB-IP 免费库判断，装到哪个版本就停在那。换成自己的 MaxMind GeoLite2 / DB-IP 的 .mmdb 即可随时更新，换完立即生效</small></div>
+            <div class="srow-actions">
+              <button type="button" class="btn" id="geoDbPick">选择 MMDB…</button>
+              <button type="button" class="btn" id="geoDbReset">用回内置库</button>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- 屏 0 外观（§2.7）：模式三选一 + 背景图 -->
-      <div class="pane" data-screen="theme" hidden>
-        <div class="form">
-          <div class="col-title">主题模式</div>
-          <div class="seg-radio" role="radiogroup" aria-label="主题模式">
-            <label><input type="radio" name="tmode" value="standard" checked /><span>标准取色</span></label>
-            <label><input type="radio" name="tmode" value="ai" /><span>AI 自适应</span></label>
-            <label><input type="radio" name="tmode" value="custom" /><span>定制</span></label>
+        <!-- 提醒 -->
+        <div class="sgroup" data-sec="alerts" hidden>
+          <h4>网速提醒</h4>
+          <p>超过阈值弹系统通知，0 = 关闭；同一方向 5 分钟内不重复提醒。</p>
+          <div class="srow">
+            <div class="t"><b>下载超过（MB/s）</b><small>持续高于该值时提醒</small></div>
+            <input type="number" class="num-input" id="setDownAlert" min="0" max="10000" step="1" value="0" inputmode="numeric" aria-label="下载提醒阈值 MB/s" />
           </div>
-          <div class="note" id="modeNote">从背景图提主色，完全离线、即时生效。</div>
-
-          <div class="col-title is-spaced">背景图</div>
-          <div class="bg-thumb" id="bgThumb"></div>
-          <div class="bg-actions">
-            <button type="button" class="btn" id="bgPick">选择图片…</button>
-            <button type="button" class="btn" id="bgClear">无背景</button>
-            <input type="file" id="bgFile" accept="image/*" hidden />
+          <div class="srow">
+            <div class="t"><b>上传超过（MB/s）</b><small>持续高于该值时提醒</small></div>
+            <input type="number" class="num-input" id="setUpAlert" min="0" max="10000" step="1" value="0" inputmode="numeric" aria-label="上传提醒阈值 MB/s" />
           </div>
-          <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
         </div>
-      </div>
-      <!-- 屏 4 设置（§2.7）：可操作项都在数据岛，检查栏放不可操作的说明 -->
-      <div class="pane" data-screen="settings" hidden>
-        <div class="form">
-          <div class="col-title">关于</div>
+
+        <!-- 服务 -->
+        <div class="sgroup" data-sec="service" hidden>
+          <h4>采集服务</h4>
+          <p>NetPeekCollector 以 LocalSystem 运行，ETW 内核会话需要管理员权限。</p>
+          <div class="srow">
+            <div class="t"><b>状态</b><small id="svcEventsLost"></small></div>
+            <div class="srow-actions">
+              <span class="note" id="svcStatus">未连接采集服务</span>
+            </div>
+          </div>
+          <div class="srow">
+            <div class="t"><b>暂停 / 恢复</b><small>暂停只停止累计与落库，服务本身不退出，恢复后从当前时刻接着算</small></div>
+            <div class="srow-actions">
+              <button type="button" class="btn" id="svcPause">暂停采集</button>
+              <button type="button" class="btn" id="svcLog">查看日志</button>
+            </div>
+          </div>
+          <div class="note num" id="svcLogPath"></div>
+          <div class="note">
+            采集服务没有控制台输出，启动失败、采集异常、进程崩溃的堆栈都只写进上面这个日志文件。
+          </div>
+        </div>
+
+        <!-- 关于 -->
+        <div class="sgroup" data-sec="about" hidden>
+          <h4>关于</h4>
           <div class="note">NetPeek v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</div>
           <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
           <div class="note">国家/地区库：DB-IP Country Lite（© DB-IP.com，CC BY 4.0），每月随版本更新。</div>
-
-          <div class="col-title is-spaced">归因边界</div>
+          <h4 class="is-spaced">归因边界</h4>
           <div class="attrib-note">
             <ul>
               <li>按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
@@ -264,252 +536,8 @@
           </div>
         </div>
       </div>
-    </aside>
-    <!-- ========== 数据岛（§2.5）========== -->
-    <section class="island island--data" aria-label="数据">
-      <button type="button" class="dense-grip" id="denseGrip" aria-expanded="false"
-              aria-label="展开 / 收起密集模式" title="拖动或双击：展开 / 收起密集模式"></button>
-
-      <!-- 屏 1 实时：左带宽图答「总带宽这一分钟怎么走的」，右进程表答「谁在占带宽」 -->
-      <div class="pane data-live" data-screen="live">
-        <div class="bandwidth">
-          <div class="sec-head">
-            <span class="sec-title">实时带宽</span>
-            <span class="legend">
-              <span class="down"><i></i><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>下载</span>
-              <span class="up"><i></i><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>上传</span>
-            </span>
-          </div>
-          <div class="chart"><canvas id="bandwidthChart" role="img" aria-label="总带宽最近 60 秒曲线"></canvas></div>
-        </div>
-
-        <div class="vrule"></div>
-
-        <div class="proc">
-          <div class="table-wrap" id="tableWrap">
-            <table class="proc-table">
-              <!-- 应用列不给固定宽度：table-layout:fixed + width:100% 下，剩余宽度全归它。
-                   四列都写死像素时，密集模式的数据岛比默认窄 80px，合计 639px 的列宽撑爆
-                   overflow-x:hidden 的容器，上传列连表头一起被岛屿右边缘裁掉。 -->
-              <colgroup>
-                <col /><col class="col-peer" /><col class="col-pid" />
-                <col class="col-down" /><col class="col-up" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th data-sort="name" scope="col" aria-sort="none">应用 <span class="sort-mark"></span></th>
-                  <th scope="col">对端</th>
-                  <th class="is-num" data-sort="pid" scope="col" aria-sort="none"><span id="pidLabel">PID</span> <span class="sort-mark"></span></th>
-                  <th class="is-num is-sorted" data-sort="download" scope="col" aria-sort="descending"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg> 下载 <span class="sort-mark"></span></th>
-                  <th class="is-num" data-sort="upload" scope="col" aria-sort="none"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg> 上传 <span class="sort-mark"></span></th>
-                </tr>
-              </thead>
-              <tbody id="rows"></tbody>
-            </table>
-          </div>
-          <div class="skeleton-rows" id="procSkeleton" hidden aria-hidden="true">
-            <div class="skeleton-row"></div><div class="skeleton-row"></div>
-            <div class="skeleton-row"></div><div class="skeleton-row"></div>
-            <div class="skeleton-row"></div><div class="skeleton-row"></div>
-          </div>
-          <div class="state-box" id="procState" hidden>
-            <div class="state-title" id="procStateTitle">采集服务未连接</div>
-            <div class="state-desc" id="procStateDesc">
-              NetPeek 的 ETW 采集需要 LocalSystem 权限。请确认 NetPeekCollector 服务正在运行。
-            </div>
-            <div class="state-actions" id="procStateActions">
-              <button type="button" class="btn" id="retryConnect">重试连接</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <!-- 屏 3 历史（§2.6）：柱状图直接可比、可点，这一屏不放折线图 -->
-      <div class="pane hist-data" data-screen="history" hidden>
-        <div class="hist-toolbar">
-          <div class="segmented" id="histRange" aria-label="历史日期范围">
-            <button type="button" data-days="7">近 7 天</button>
-            <button type="button" class="is-active" data-days="30">近 30 天</button>
-            <button type="button" data-days="90">近 90 天</button>
-            <button type="button" id="histCustomToggle" aria-expanded="false" aria-controls="histCustomRange">自定义…</button>
-          </div>
-          <span class="hist-note" id="histAggNote" hidden>按周聚合</span>
-          <span class="spacer"></span>
-          <button type="button" class="btn" id="histExport">导出 CSV</button>
-        </div>
-        <form class="hist-custom-range" id="histCustomRange" hidden novalidate>
-          <label class="hist-date-field" for="histStartDate">
-            <span>开始日期</span>
-            <input type="date" id="histStartDate" required />
-          </label>
-          <label class="hist-date-field" for="histEndDate">
-            <span>结束日期</span>
-            <input type="date" id="histEndDate" required />
-          </label>
-          <div class="hist-custom-actions">
-            <button type="submit" class="btn is-primary" id="histCustomApply">应用</button>
-            <button type="button" class="btn" id="histCustomCancel">取消</button>
-          </div>
-          <p class="hist-range-error" id="histRangeError" role="alert" hidden></p>
-        </form>
-        <!-- tabindex + 方向键：柱图原本纯 click，键盘用户选不了某一天（U3） -->
-        <div class="chart hist-chart"><canvas id="histChart" tabindex="0" role="img"
-             aria-label="历史流量每日柱状图，按左右方向键选择某一天，Esc 取消选中"></canvas></div>
-      </div>
-
-      <!-- 屏 0 外观（§2.7）：留白区和其余三岛都还在画面里，改令牌当场生效，不造假预览卡 -->
-      <div class="pane cols3" data-screen="theme" hidden>
-        <div class="col">
-          <div class="col-title">微调</div>
-          <div class="slider">
-            <div class="slider-head"><span>岛屿不透明度</span><span class="value" id="opValue">0.88</span></div>
-            <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.88"
-                   aria-label="岛屿不透明度" />
-          </div>
-          <div class="slider">
-            <div class="slider-head"><span>全局压暗</span><span class="value" id="scrimValue">0.30</span></div>
-            <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
-                   aria-label="全局压暗" />
-          </div>
-          <div class="slider">
-            <div class="slider-head"><span>背景模糊</span><span class="value" id="blurValue">24 px</span></div>
-            <input type="range" id="stdBlur" min="0" max="40" step="1" value="24" aria-label="背景模糊" />
-          </div>
-          <div class="note">不透明度下限 0.82 是实测值，再低会跌破 4.5:1。</div>
-          <div class="ai-fields" id="aiSection" hidden>
-            <div class="col-title is-spaced">AI 提供方</div>
-            <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
-            <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
-            <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
-            <label class="check">
-              <input type="checkbox" id="aiConsent" />
-              <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
-            </label>
-            <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
-            <div class="note" id="aiStatus"></div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="col-title">语义色</div>
-          <div class="swatches">
-            <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
-            <label class="swatch"><input type="color" id="cPanel" /><span>岛屿</span></label>
-            <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
-            <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
-            <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
-              <input type="color" id="cDown" /><span>下载 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
-            <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
-              <input type="color" id="cUp" /><span>上传 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
-            <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
-            <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
-            <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
-            <label class="swatch"><input type="color" id="cBorder" /><span>描边</span></label>
-          </div>
-          <div class="bg-actions is-spaced">
-            <button type="button" class="btn" data-preset="dark">经典深色</button>
-            <button type="button" class="btn" data-preset="light">经典浅色</button>
-            <button type="button" class="btn" data-preset="contrast">高对比</button>
-          </div>
-          <div class="note">下载与上传语义锁定：可调明度，不能换语义。</div>
-        </div>
-
-        <div class="col">
-          <div class="col-title">主题列表</div>
-          <div class="bg-actions">
-            <input type="text" id="themeName" placeholder="主题名称" class="text-input" />
-            <button type="button" class="btn is-primary" id="themeSave">保存</button>
-          </div>
-          <div class="theme-list" id="themeList"></div>
-          <button type="button" class="btn is-bottom" id="themeReset">还原默认</button>
-        </div>
-      </div>
-      <!-- 屏 4 设置（§2.7）：破坏性动作原地二次确认，不弹模态框。
-           三列都是可操作项；「关于」与归因边界在检查栏，那两块没有可点的东西。
-           保存是防抖自动写盘，没有「保存」按钮 —— 改动到底存没存住需要一个瞬态回执。 -->
-      <div class="pane cols3" data-screen="settings" hidden>
-        <span class="save-hint" id="saveHint" role="status" aria-live="polite"></span>
-        <div class="col">
-          <div class="col-title">常规</div>
-          <label class="field">速率显示单位
-            <select id="setRateUnit">
-              <option value="auto">自动（B / KB / MB / GB）</option>
-              <option value="kb">固定 KB</option>
-              <option value="mb">固定 MB</option>
-              <option value="gb">固定 GB</option>
-            </select>
-          </label>
-          <label class="check">
-            <input type="checkbox" id="setAutostart" />
-            <span>登录时自动启动（写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run）</span>
-          </label>
-          <label class="check">
-            <input type="checkbox" id="setRecordUnattributed" />
-            <span>记录系统未归因流量（采集端尚未分表，字段已预留）</span>
-          </label>
-          <div class="note">
-            单位设成固定值后，速率与总量都按该单位显示；自动挡按数值大小逐级切换。
-          </div>
-          <div class="col-title is-spaced">国家 / 地区库</div>
-          <div class="note" id="geoDbInfo">内嵌 DB-IP 库</div>
-          <div class="bg-actions">
-            <button type="button" class="btn" id="geoDbPick">选择 MMDB…</button>
-            <button type="button" class="btn" id="geoDbReset">用回内置库</button>
-          </div>
-          <div class="note">
-            对端国家默认由内嵌的 DB-IP 免费库判断，装到哪个版本就停在那个版本的数据。
-            换成自己的 MaxMind GeoLite2 / DB-IP 的 .mmdb 文件即可随时更新，换完立即生效。
-          </div>
-        </div>
-
-        <div class="col">
-          <!-- 原来三列是「常规+提醒+国家库 / 历史数据 / 采集服务」，第一列比二、三列
-               长出一倍，三列的下缘参差。把「网速提醒」挪到第二列首，三列各带
-               1~2 组，长度回到同一量级（交互与 ID 一律未动）。 -->
-          <div class="col-title">网速提醒</div>
-          <label class="field">下载超过（MB/s）<input type="number" id="setDownAlert" min="0" max="10000" step="1" value="0" inputmode="numeric" /></label>
-          <label class="field">上传超过（MB/s）<input type="number" id="setUpAlert" min="0" max="10000" step="1" value="0" inputmode="numeric" /></label>
-          <div class="note">超过阈值弹系统通知，0 = 关闭；同一方向 5 分钟内不重复提醒。</div>
-
-          <div class="col-title is-spaced">历史数据</div>
-          <label class="field">保留周期
-            <select id="setRetention">
-              <option value="7">7 天</option>
-              <option value="30">30 天</option>
-              <option value="90">90 天</option>
-              <option value="365">365 天</option>
-              <option value="0">永久保留</option>
-            </select>
-          </label>
-          <div class="note" id="histStats">暂无历史数据</div>
-          <div class="bg-actions">
-            <button type="button" class="btn" id="histRefresh">刷新概览</button>
-            <button type="button" class="btn" id="histClear">清空历史</button>
-          </div>
-          <div class="confirm-inline" id="histClearConfirm" hidden>
-            <button type="button" class="btn is-danger" id="histClearYes">确认清空</button>
-            <button type="button" class="btn" id="histClearNo">取消</button>
-          </div>
-        </div>
-
-        <div class="col">
-          <div class="col-title">采集服务</div>
-          <div class="note" id="svcStatus">未连接采集服务</div>
-          <div class="note" id="svcEventsLost"></div>
-          <div class="bg-actions">
-            <button type="button" class="btn" id="svcPause">暂停采集</button>
-            <button type="button" class="btn" id="svcLog">查看日志</button>
-          </div>
-          <div class="note num" id="svcLogPath"></div>
-          <div class="note">
-            暂停只停止累计与落库，采集服务本身不退出，恢复后从当前时刻接着算。
-          </div>
-          <div class="note">
-            采集服务以 LocalSystem 运行，ETW 内核会话需要管理员权限。它没有控制台输出，
-            启动失败、采集异常、进程崩溃的堆栈都只写进上面这个日志文件。
-          </div>
-        </div>
-      </div>
     </section>
-  </div><!-- /.shell -->
+  </main>
 
   <!-- 无边框窗口的缩放热区（decorations:false 后系统边框没了，得自己给） -->
   <div class="resize-edge" data-dir="North"></div>

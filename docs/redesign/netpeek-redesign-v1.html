@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NetPeek 重设计稿 v1 — 监控优先的紧凑仪表板</title>
+<style>
+  /* ============ 设计稿页面自身（浅色交付板） ============ */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #f4f5f7; color: #1c2130; font-size: 14px; line-height: 1.65;
+  }
+  .board { max-width: 1320px; margin: 0 auto; padding: 40px 28px 96px; }
+  header.board-head { margin-bottom: 8px; }
+  .board-head h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  .board-head .sub { color: #5c6675; margin-top: 6px; font-size: 14px; }
+  .board-head .sub b { color: #b3261e; font-weight: 600; }
+  nav.toc {
+    position: sticky; top: 0; z-index: 50; display: flex; gap: 4px; flex-wrap: wrap;
+    background: rgba(244,245,247,.92); backdrop-filter: blur(8px);
+    padding: 10px 0; border-bottom: 1px solid #e2e5ea; margin-bottom: 32px;
+  }
+  nav.toc a {
+    color: #3d4657; text-decoration: none; font-size: 13px; padding: 4px 12px;
+    border-radius: 999px; border: 1px solid transparent;
+  }
+  nav.toc a:hover { border-color: #c9cfd8; background: #fff; }
+  section.block { margin-bottom: 64px; }
+  .block > h2 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .block > .lead { color: #5c6675; max-width: 78ch; margin-bottom: 20px; }
+  .card {
+    background: #fff; border: 1px solid #e3e6eb; border-radius: 14px;
+    padding: 22px 24px; margin-bottom: 16px;
+  }
+  .card h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  table.eval { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.eval th, table.eval td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #eceef2; vertical-align: top; }
+  table.eval th { color: #7a8494; font-weight: 600; font-size: 12px; letter-spacing: .04em; }
+  table.eval td:first-child { font-weight: 600; white-space: nowrap; color: #b3261e; }
+  table.eval tr:last-child td { border-bottom: 0; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #eef1f5; color: #4a5468; margin-right: 4px; }
+  .pill.hot { background: #fdeceb; color: #b3261e; }
+
+  /* mock 舞台 */
+  .mockbar { display: flex; align-items: center; gap: 10px; margin: 18px 0 10px; }
+  .mockbar .lbl { font-size: 13px; color: #7a8494; }
+  .mockbar button {
+    font: inherit; font-size: 12px; padding: 3px 12px; border-radius: 999px;
+    border: 1px solid #c9cfd8; background: #fff; color: #3d4657; cursor: pointer;
+  }
+  .mockbar button.on { background: #1c2130; color: #fff; border-color: #1c2130; }
+  .mock-wrap { overflow: hidden; border-radius: 16px; border: 1px solid #dde1e7; background: #e8eaee; position: relative; }
+  .mock { transform-origin: top left; }
+  .anno { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }
+  .anno .a { background: #fff; border: 1px solid #e3e6eb; border-radius: 10px; padding: 10px 14px; font-size: 12.5px; color: #4a5468; }
+  .anno .a b { color: #1c2130; display: block; font-size: 12.5px; margin-bottom: 2px; }
+  .anno .a .tag { color: #0b7a5c; font-weight: 600; }
+
+  /* 组件样品行 */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+  .sw { border-radius: 10px; overflow: hidden; border: 1px solid #e3e6eb; background: #fff; }
+  .sw .c { height: 56px; }
+  .sw .n { padding: 6px 10px 8px; font-size: 11.5px; }
+  .sw .n b { display: block; font-size: 12px; }
+  .sw .n span { color: #7a8494; font-family: Consolas, monospace; font-size: 10.5px; }
+  .specimen { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; }
+
+  /* ============ 新设计 tokens（mock 内部统一用 .np 作用域） ============ */
+  .np {
+    --bg: #0d1117; --panel: #151b23; --panel-hi: #1b2430; --panel-2: #10151c;
+    --line: #232d3a; --line-soft: #1b2430;
+    --text: #e6eaf2; --text-2: #97a3b4; --text-3: #5f6b7d;
+    --down: #f0963f; --up: #62a9e8;
+    --ok: #34d399; --warn: #fbbf24; --error: #f87171;
+    --r-l: 12px; --r-m: 8px; --r-s: 6px;
+    --num: "Segoe UI", Consolas, monospace;
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 13px; line-height: 1.5;
+  }
+  .np * { box-sizing: border-box; margin: 0; padding: 0; }
+  .np .num { font-family: var(--num); font-variant-numeric: tabular-nums; }
+
+  /* ---- 应用骨架 ---- */
+  .np.app { width: 1180px; height: 720px; display: grid;
+    grid-template-columns: 52px minmax(0,1fr); grid-template-rows: 48px minmax(0,1fr); }
+  .np.topbar {
+    grid-area: 1/1/2/3; display: flex; align-items: center; gap: 14px;
+    padding: 0 12px 0 0; border-bottom: 1px solid var(--line-soft); background: var(--panel-2);
+  }
+  .np.brand { width: 52px; display: grid; place-items: center; border-right: 1px solid var(--line-soft); height: 100%; }
+  .np.brand i { width: 20px; height: 20px; border-radius: 6px; display: block;
+    background: linear-gradient(135deg, var(--down), #d97c2b); position: relative; }
+  .np.brand i::after { content:""; position: absolute; inset: 5px 5px auto auto; width: 6px; height: 6px;
+    border-radius: 2px; background: var(--up); }
+  .np.status {
+    display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 12px;
+    border-radius: 999px; background: var(--panel-hi); border: 1px solid var(--line);
+    font-size: 12px; color: var(--text-2);
+  }
+  .np.status i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .np.status b { color: var(--text); font-weight: 500; }
+  .np.top-meta { color: var(--text-3); font-size: 12px; }
+  .np.topbar .sp { flex: 1; }
+  .np.rates { display: flex; align-items: baseline; gap: 18px; }
+  .np.rate { display: flex; align-items: baseline; gap: 6px; }
+  .np.rate svg { width: 11px; height: 11px; align-self: center; }
+  .np.rate .v { font-size: 20px; font-weight: 600; font-family: var(--num); font-variant-numeric: tabular-nums; }
+  .np.rate .u { font-size: 11px; color: var(--text-3); }
+  .np.rate.is-down .v { color: var(--down); } .np.rate.is-up .v { color: var(--up); }
+  .np.winbtns { display: flex; gap: 2px; margin-left: 6px; }
+  .np.winbtns span { width: 34px; height: 30px; display: grid; place-items: center; border-radius: 6px; color: var(--text-2); }
+  .np.winbtns span:hover { background: var(--panel-hi); color: var(--text); }
+  .np.winbtns span.x:hover { background: #e81123; color: #fff; }
+
+  /* 导航 rail */
+  .np.rail { grid-area: 2/1/3/2; border-right: 1px solid var(--line-soft); background: var(--panel-2);
+    display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 4px; }
+  .np.rail .ri { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+    color: var(--text-3); position: relative; }
+  .np.rail .ri:hover { background: var(--panel-hi); color: var(--text); }
+  .np.rail .ri.on { background: var(--panel-hi); color: var(--text); }
+  .np.rail .ri.on::before { content: ""; position: absolute; left: -6px; top: 10px; bottom: 10px;
+    width: 3px; border-radius: 2px; background: var(--down); }
+  .np.rail .grow { flex: 1; }
+  .np.rail svg { width: 18px; height: 18px; }
+
+  /* 主区 */
+  .np.main { grid-area: 2/2/3/3; display: grid; min-height: 0;
+    grid-template-columns: minmax(0,1fr) 300px; }
+  .np.center { display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 12px; }
+  .np.cardx { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r-l); }
+  .np.cardx .ch { display: flex; align-items: center; gap: 10px; padding: 10px 14px; }
+  .np.cardx .ch h4 { font-size: 13px; font-weight: 600; }
+  .np.cardx .ch .cnt { color: var(--text-3); font-size: 12px; }
+  .np.cardx .ch .sp { flex: 1; }
+  .np.legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-2); }
+  .np.legend i { width: 8px; height: 8px; border-radius: 3px; display: inline-block; margin-right: 5px; }
+  .np.legend .d i { background: var(--down); } .np.legend .u i { background: var(--up); }
+
+  .np.chart-card { flex: 0 0 264px; display: flex; flex-direction: column; }
+  .np.chart-card .plot { flex: 1; min-height: 0; padding: 2px 8px 4px; }
+  .np.search { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-m); color: var(--text-3); width: 200px; font-size: 12px; }
+  .np.search svg { width: 13px; height: 13px; }
+
+  /* 进程表 */
+  .np.table-card { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .np.pt { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .np.pt th { text-align: left; font-weight: 500; font-size: 11.5px; color: var(--text-3);
+    padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+  .np.pt th.r, .np.pt td.r { text-align: right; }
+  .np.pt td { padding: 7px 12px; border-bottom: 1px solid var(--line-soft); }
+  .np.pt tr:last-child td { border-bottom: 0; }
+  .np.pt tr.sel td { background: rgba(240,150,63,.07); }
+  .np.pt tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--down); }
+  .np.pt .app { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .np.pt .ic { width: 22px; height: 22px; border-radius: 6px; background: var(--panel-hi);
+    border: 1px solid var(--line); display: grid; place-items: center; font-size: 10px; font-weight: 600; color: var(--text-2); flex: none; }
+  .np.pt .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .np.pt .nm small { display: block; color: var(--text-3); font-size: 11px; }
+  .np.pt .peers { color: var(--text-2); font-size: 12px; }
+  .np.pt .peers b { color: var(--text-2); font-weight: 500; background: var(--panel-hi); border-radius: 4px; padding: 1px 6px; font-size: 11px; margin-right: 4px; }
+  .np.pt .rv { font-family: var(--num); font-variant-numeric: tabular-nums; font-size: 13.5px; font-weight: 500; }
+  .np.pt .rv .u { font-size: 10.5px; color: var(--text-3); font-weight: 400; margin-left: 2px; }
+  .np.pt .d { color: var(--down); } .np.pt .u-c { color: var(--up); }
+
+  /* 右栏 */
+  .np.rail-r { border-left: 1px solid var(--line-soft); background: var(--panel-2);
+    display: flex; flex-direction: column; gap: 12px; padding: 12px; min-height: 0; }
+  .np.rc { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r-l); padding: 12px 14px; }
+  .np.rc h5 { font-size: 12px; font-weight: 500; color: var(--text-3); margin-bottom: 8px; display: flex; align-items: center; }
+  .np.rc h5 .sp { flex: 1; }
+  .np.rc h5 a { color: var(--text-2); font-size: 11.5px; text-decoration: none; }
+  .np.rc h5 a:hover { color: var(--text); }
+  .np.big { font-size: 26px; font-weight: 600; font-family: var(--num); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .np.big .u { font-size: 12px; color: var(--text-3); font-weight: 400; margin-left: 3px; }
+  .np.duorow { display: flex; gap: 16px; margin-top: 8px; }
+  .np.duorow .it { font-size: 12px; color: var(--text-2); }
+  .np.duorow .it b { display: block; font-size: 14px; font-family: var(--num); font-variant-numeric: tabular-nums; font-weight: 500; }
+  .np.duorow .it b .u { font-size: 10px; color: var(--text-3); font-weight: 400; }
+  .np.duorow .it.d b { color: var(--down); } .np.duorow .it.u b { color: var(--up); }
+  .np.rank { display: flex; flex-direction: column; }
+  .np.rank .rr { display: flex; align-items: center; gap: 9px; padding: 6px 0; position: relative; }
+  .np.rank .rr + .rr { border-top: 1px solid var(--line-soft); }
+  .np.rank .ic { width: 20px; height: 20px; border-radius: 5px; background: var(--panel-hi); border: 1px solid var(--line);
+    display: grid; place-items: center; font-size: 9.5px; font-weight: 600; color: var(--text-2); flex: none; }
+  .np.rank .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+  .np.rank .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--line-soft); }
+  .np.rank .bar i { display: block; height: 100%; border-radius: 1px; background: var(--down); }
+  .np.rank .vv { font-family: var(--num); font-size: 12.5px; color: var(--down); font-weight: 500; }
+  .np.rank .vv .u { font-size: 10px; color: var(--text-3); font-weight: 400; }
+
+  /* segmented / 按钮 */
+  .np.seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-m); padding: 2px; gap: 2px; }
+  .np.seg span { padding: 4px 12px; font-size: 12px; color: var(--text-2); border-radius: 6px; cursor: default; }
+  .np.seg span.on { background: var(--panel-hi); color: var(--text); }
+  .np.btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+    border-radius: var(--r-m); border: 1px solid var(--line); background: var(--panel-hi);
+    color: var(--text); font-size: 12.5px; }
+  .np.btn.primary { background: var(--down); border-color: transparent; color: #1a1206; font-weight: 600; }
+  .np.btn.ghost { background: transparent; color: var(--text-2); }
+  .np.btn svg { width: 13px; height: 13px; }
+
+  /* 历史屏专用 */
+  .np.hist-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .np.hist-sum { display: flex; align-items: baseline; gap: 14px; color: var(--text-2); font-size: 12px; }
+  .np.hist-sum b { font-family: var(--num); font-size: 14px; font-weight: 600; }
+  .np.hist-sum b .u { font-size: 10.5px; font-weight: 400; color: var(--text-3); }
+  .np.hist-sum .d b { color: var(--down); } .np.hist-sum .u-c b { color: var(--up); }
+  .np.hist-sum .t b { color: var(--text); }
+  .np.big-chart { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .np.big-chart .plot { flex: 1; min-height: 0; padding: 4px 10px 6px; }
+  .np.day-line { display: flex; align-items: center; gap: 18px; padding: 9px 14px; border-top: 1px solid var(--line-soft); font-size: 12.5px; color: var(--text-2); }
+  .np.day-line b { color: var(--text); font-weight: 500; }
+  .np.day-line .num { font-weight: 500; }
+  .np.day-line .d { color: var(--down); } .np.day-line .u-c { color: var(--up); }
+
+  /* 设置屏专用 */
+  .np.settings { display: grid; grid-template-columns: 190px minmax(0,1fr); min-height: 0; height: 100%; }
+  .np.snav { border-right: 1px solid var(--line-soft); background: var(--panel-2); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .np.snav span { padding: 8px 12px; border-radius: var(--r-m); font-size: 13px; color: var(--text-2); }
+  .np.snav span.on { background: var(--panel-hi); color: var(--text); font-weight: 500; }
+  .np.sbody { padding: 18px 22px; overflow: hidden; }
+  .np.sgroup { max-width: 620px; margin-bottom: 26px; }
+  .np.sgroup > h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .np.sgroup > p { font-size: 12px; color: var(--text-3); margin-bottom: 12px; }
+  .np.srow { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line-soft); }
+  .np.srow .t { flex: 1; min-width: 0; }
+  .np.srow .t b { display: block; font-size: 13px; font-weight: 500; }
+  .np.srow .t small { color: var(--text-3); font-size: 11.5px; }
+  .np.switch { width: 36px; height: 20px; border-radius: 999px; background: var(--panel-hi); border: 1px solid var(--line); position: relative; flex: none; }
+  .np.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-3); }
+  .np.switch.on { background: var(--down); border-color: transparent; }
+  .np.switch.on::after { left: 18px; background: #1a1206; }
+  .np.input { height: 30px; min-width: 90px; padding: 0 10px; border-radius: var(--r-m);
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text); font-size: 12.5px;
+    display: inline-flex; align-items: center; }
+  .np.theme-cards { display: flex; gap: 10px; }
+  .np.tcard { flex: 1; border: 1px solid var(--line); border-radius: var(--r-l); padding: 12px; background: var(--panel); }
+  .np.tcard.on { border-color: var(--down); box-shadow: 0 0 0 1px var(--down) inset; }
+  .np.tcard .pv { height: 52px; border-radius: 8px; margin-bottom: 10px; border: 1px solid var(--line-soft); }
+  .np.tcard b { font-size: 12.5px; display: block; }
+  .np.tcard small { color: var(--text-3); font-size: 11px; line-height: 1.45; display: block; margin-top: 3px; }
+  .np.slider { width: 180px; height: 4px; border-radius: 2px; background: var(--panel-hi); position: relative; }
+  .np.slider i { position: absolute; left: 0; top: 0; bottom: 0; width: 55%; border-radius: 2px; background: var(--down); }
+  .np.slider::after { content: ""; position: absolute; left: 55%; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--text); transform: translate(-50%,-50%); box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+
+  /* 迷你窗 mock */
+  .np.mini-stage { display: flex; gap: 60px; align-items: flex-end; padding: 40px 48px; background:
+      radial-gradient(90% 90% at 20% 10%, rgba(240,150,63,.08), transparent 60%),
+      radial-gradient(80% 80% at 90% 90%, rgba(98,169,232,.07), transparent 60%), var(--bg);
+    border-radius: 16px; }
+  .np.orb-wrap { width: 108px; height: 108px; display: grid; place-items: center; }
+  .np.orb { width: 92px; height: 92px; border-radius: 50%; position: relative;
+    background: radial-gradient(circle at 32% 26%, #242f3e, #131a23 62%, #0c1016);
+    box-shadow: 0 0 18px rgba(240,150,63,.28), inset 0 -8px 16px rgba(0,0,0,.55), inset 0 6px 12px rgba(255,255,255,.06);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
+  .np.orb::after { content: ""; position: absolute; top: 12px; left: 18px; width: 26px; height: 14px;
+    border-radius: 50%; background: rgba(255,255,255,.14); filter: blur(4px); transform: rotate(-18deg); }
+  .np.orb .ov { font-family: var(--num); font-size: 15px; font-weight: 600; }
+  .np.orb .ov .u { font-size: 8.5px; font-weight: 400; opacity: .75; }
+  .np.orb .d { color: var(--down); } .np.orb .u-c { color: var(--up); font-size: 12.5px; display: flex; align-items: center; gap: 3px; }
+  .np.orb .u-c svg { width: 9px; height: 9px; }
+  .np.mini { width: 320px; height: 300px; border-radius: 16px; background: var(--panel);
+    border: 1px solid var(--line); box-shadow: 0 16px 40px rgba(0,0,0,.5);
+    display: flex; flex-direction: column; overflow: hidden; }
+  .np.mini .mh { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+  .np.mini .mh b { font-size: 12.5px; font-weight: 600; }
+  .np.mini .mh .sp { flex: 1; }
+  .np.mini .mh span { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; color: var(--text-3); }
+  .np.mini .mh span:hover { background: var(--panel-hi); color: var(--text); }
+  .np.mini .tot { display: flex; align-items: baseline; gap: 16px; padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+  .np.mini .tot .it { display: flex; align-items: baseline; gap: 5px; }
+  .np.mini .tot .v { font-family: var(--num); font-size: 16px; font-weight: 600; }
+  .np.mini .tot .v .u { font-size: 10px; font-weight: 400; color: var(--text-3); }
+  .np.mini .tot .d .v { color: var(--down); } .np.mini .tot .u-c .v { color: var(--up); }
+  .np.mini .tot svg { width: 10px; height: 10px; }
+  .np.mini .lst { flex: 1; min-height: 0; padding: 4px 12px; }
+  .np.mini .li { display: flex; align-items: center; gap: 9px; padding: 6px 0; }
+  .np.mini .li + .li { border-top: 1px solid var(--line-soft); }
+  .np.mini .li .ic { width: 18px; height: 18px; border-radius: 5px; background: var(--panel-hi); border: 1px solid var(--line);
+    display: grid; place-items: center; font-size: 8.5px; font-weight: 600; color: var(--text-2); flex: none; }
+  .np.mini .li .nm { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .np.mini .li .rv { font-family: var(--num); font-size: 11.5px; display: flex; align-items: center; gap: 3px; }
+  .np.mini .li .rv svg { width: 8px; height: 8px; }
+  .np.mini .li .rv .u { font-size: 9px; color: var(--text-3); }
+  .np.mini .mf { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line-soft); }
+  .np.mini .mf .np.btn { flex: 1; justify-content: center; height: 30px; }
+
+  footer.board-foot { color: #8a93a3; font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="board">
+
+  <header class="board-head">
+    <h1>NetPeek 界面重设计稿 <span style="color:#8a93a3;font-weight:400">v1</span></h1>
+    <div class="sub">方向：<b style="color:#1c2130">监控优先的紧凑仪表板</b> ・ 2026-09-12 ・ 范围：实时 / 历史 / 设置（合并外观）/ 迷你窗 + 设计语言</div>
+  </header>
+
+  <nav class="toc">
+    <a href="#eval">① 评估</a><a href="#lang">② 设计语言</a><a href="#live">③ 实时屏</a>
+    <a href="#history">④ 历史屏</a><a href="#settings">⑤ 设置屏</a><a href="#mini">⑥ 迷你窗</a><a href="#grid">⑦ 栅格与迁移</a>
+  </nav>
+
+  <!-- ================= ① 评估 ================= -->
+  <section class="block" id="eval">
+    <h2>① 当前设计评估：五个根本问题</h2>
+    <p class="lead">结论先行：现版不是「细节不好看」，而是<b>空间分配、信息密度、视觉语言</b>三个层面的方向性问题。逐条如下，右侧是新设计给出的答案。</p>
+    <div class="card">
+      <table class="eval">
+        <tr><th style="width:150px">问题</th><th>具体表现（证据）</th><th style="width:44%">新设计的对策</th></tr>
+        <tr>
+          <td>空间倒挂 <span class="pill hot">最致命</span></td>
+          <td>实时屏约 40% 的面积给了「留白区」——一块只为背景图呼吸、不放任何数据的区域；核心带宽图被压在底部 250px，进程表只剩 ~5 行可见。监控工具看不到监控数据。</td>
+          <td>删除留白区。带宽图升为主区上半主角，进程表占满剩余高度（~12 行可见）。背景图改为全屏底层，面板微透即可保留「浮在底图上」的特色，不再为它牺牲面积。</td>
+        </tr>
+        <tr>
+          <td>信息密度过低</td>
+          <td>380px 宽检查栏的默认总览态只有 2 个数字 + 一个 NP 占位块；外观、设置两个屏内容贫瘠（各 3~5 个控件）却要占整屏；顶栏一行塞 7 类元素。</td>
+          <td>检查栏收窄至 300px 并填满有效内容（今日卡 + 30 天图 + Top 进程/选中详情）；外观并入设置；顶栏只留状态、元信息、速率、窗口钮，搜索下放到进程表头（就近原则）。</td>
+        </tr>
+        <tr>
+          <td>视觉语言分裂</td>
+          <td>主窗是暖色消费级「漂浮岛屿」（琥珀+米中性+毛玻璃），迷你窗是科幻「能量球」，图表是橙蓝工业语义——三套气质。毛玻璃在无背景图时纯耗 GPU。</td>
+          <td>统一为「深色技术底」：蓝黑底 + 1px 低对比边线分层（弃用投影和毛玻璃），琥珀/蓝只留给数据语义，交互用中性色。迷你窗同源换肤。</td>
+        </tr>
+        <tr>
+          <td>信息架构过繁</td>
+          <td>主题三模式（标准取色 / AI 自适应 / 定制）对普通用户过于复杂；外观与设置分两屏，导航 4 项；设置屏三列卡片配平仍显拼凑。</td>
+          <td>外观并入设置，导航 4→3。设置改为「左分区导航 + 右表单」（Windows 设置心智），主题三模式收敛为外观区内的三张卡片，AI 降为高级选项。</td>
+        </tr>
+        <tr>
+          <td>历史屏被压缩</td>
+          <td>历史数据挤在 250px 高的数据岛内：工具栏、柱图、排行互相争抢，柱图高度不足，趋势难以辨认。</td>
+          <td>历史屏主区全高：工具栏一行、柱图占满主区（~400px）、底部日详情行；排行移入右栏与实时屏同构。</td>
+        </tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>新设计五条原则</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 24px;font-size:13px;color:#4a5468">
+        <div><b style="color:#1c2130">1. 数据密度优先</b><br>每一寸面积都要回答一个用户问题。</div>
+        <div><b style="color:#1c2130">2. 一屏一焦点</b><br>实时 = 带宽图 + 进程表；历史 = 趋势 + 排行。</div>
+        <div><b style="color:#1c2130">3. 一种语言</b><br>深色技术底 + 双语义色 + 中性交互，主窗与迷你窗同源。</div>
+        <div><b style="color:#1c2130">4. 装饰让位功能</b><br>无留白区、无毛玻璃、无投影层级；分层靠底色差 + 1px 边线。</div>
+        <div><b style="color:#1c2130">5. 架构瘦身</b><br>外观并入设置，导航 4→3；控件就近放在它作用的对象旁。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ② 设计语言 ================= -->
+  <section class="block" id="lang">
+    <h2>② 设计语言</h2>
+    <p class="lead">蓝黑技术底（非暖黑），琥珀与蓝只承担「下载/上传」数据语义，交互一律中性色——语义不再被装饰稀释。分层用底色差 + 1px 边线，不用投影。</p>
+    <div class="card">
+      <h3>色彩 tokens</h3>
+      <div class="swatches">
+        <div class="sw"><div class="c" style="background:#0d1117"></div><div class="n"><b>bg 窗口底</b><span>#0D1117</span></div></div>
+        <div class="sw"><div class="c" style="background:#151b23"></div><div class="n"><b>panel 面板</b><span>#151B23</span></div></div>
+        <div class="sw"><div class="c" style="background:#1b2430"></div><div class="n"><b>panel-hi 抬起</b><span>#1B2430</span></div></div>
+        <div class="sw"><div class="c" style="background:#232d3a"></div><div class="n"><b>line 边线</b><span>#232D3A</span></div></div>
+        <div class="sw"><div class="c" style="background:#e6eaf2"></div><div class="n"><b>text 主文字</b><span>#E6EAF2</span></div></div>
+        <div class="sw"><div class="c" style="background:#97a3b4"></div><div class="n"><b>text-2 次要</b><span>#97A3B4</span></div></div>
+        <div class="sw"><div class="c" style="background:#5f6b7d"></div><div class="n"><b>text-3 辅助</b><span>#5F6B7D</span></div></div>
+        <div class="sw"><div class="c" style="background:#f0963f"></div><div class="n"><b>down 下载·品牌</b><span>#F0963F</span></div></div>
+        <div class="sw"><div class="c" style="background:#62a9e8"></div><div class="n"><b>up 上传</b><span>#62A9E8</span></div></div>
+        <div class="sw"><div class="c" style="background:#34d399"></div><div class="n"><b>ok 正常</b><span>#34D399</span></div></div>
+        <div class="sw"><div class="c" style="background:#fbbf24"></div><div class="n"><b>warn 提醒</b><span>#FBBF24</span></div></div>
+        <div class="sw"><div class="c" style="background:#f87171"></div><div class="n"><b>error 异常</b><span>#F87171</span></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>关键规则与组件样品</h3>
+      <div class="specimen np" style="border-radius:12px;padding:20px 24px;background:#0d1117;width:100%">
+        <span class="np btn primary">主要按钮</span>
+        <span class="np btn">描边按钮</span>
+        <span class="np btn ghost">幽灵按钮</span>
+        <span class="np seg"><span class="on">7 天</span><span>30 天</span><span>90 天</span><span>自定义</span></span>
+        <span class="np status"><i></i><b>监控中</b>&nbsp;12 个进程</span>
+        <span class="np switch on"></span>
+        <span class="np switch"></span>
+        <span class="np input">输入框</span>
+        <span class="np rate is-down"><svg viewBox="0 0 24 24" fill="none" stroke="#f0963f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg><span class="v num">1.4</span><span class="u">MB/s</span></span>
+        <span class="np rate is-up"><svg viewBox="0 0 24 24" fill="none" stroke="#62a9e8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg><span class="v num">96</span><span class="u">KB/s</span></span>
+      </div>
+      <div style="font-size:12.5px;color:#4a5468;margin-top:10px;line-height:1.8">
+        圆角：面板 12 / 控件 8 / 小件 6；数字一律 tabular-nums；速率/流量的「数字重音 + 单位降级」规则沿用现版（已统一拆分）。<br>
+        字体阶：12 辅助 → 13 正文 → 13.5 表内数字 → 16 卡内强调 → 20 顶栏速率 → 26 大卡数字。<br>
+        选中态：surface-hi 底 + 左侧 2px 琥珀条（见实时屏进程表选中行），不引入第三种彩色。
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ③ 实时屏 ================= -->
+  <section class="block" id="live">
+    <h2>③ 实时屏（监控主屏）</h2>
+    <p class="lead">带宽图从底部 250px 升为主区主角；进程表占满剩余高度；检查栏收窄至 300px 并填满有效内容。搜索下放到表头；今日合计与 30 天图收进右栏卡。</p>
+    <div class="mockbar">
+      <span class="lbl">缩放</span>
+      <button data-z="1">100%</button><button data-z="0.66" class="on">66%</button><button data-z="0.5">50%</button>
+    </div>
+    <div class="mock-wrap">
+      <div class="mock np app">
+        <!-- 顶栏 -->
+        <div class="topbar">
+          <div class="brand"><i></i></div>
+          <span class="status"><i></i><b>监控中</b>&nbsp;·&nbsp;12 个进程</span>
+          <span class="top-meta">已采集 2 时 34 分</span>
+          <span class="sp"></span>
+          <div class="rates">
+            <span class="rate is-down"><svg viewBox="0 0 24 24" fill="none" stroke="#f0963f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg><span class="v num">1.4</span><span class="u">MB/s</span></span>
+            <span class="rate is-up"><svg viewBox="0 0 24 24" fill="none" stroke="#62a9e8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg><span class="v num">96</span><span class="u">KB/s</span></span>
+          </div>
+          <div class="winbtns">
+            <span><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></span>
+            <span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></span>
+            <span class="x"><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+          </div>
+        </div>
+        <!-- 导航 rail -->
+        <div class="rail">
+          <span class="ri on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.6a7 7 0 0 0-2 1.2l-2.3-1-2 3.5 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.5 2.3-1a7 7 0 0 0 2 1.2l.4 2.6h4l.4-2.6a7 7 0 0 0 2-1.2l2.3 1 2-3.5-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></span>
+          <span class="grow"></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="5"/><rect x="3" y="3" width="18" height="18" rx="4" opacity=".45"/></svg></span>
+        </div>
+        <!-- 主区 -->
+        <div class="main">
+          <div class="center">
+            <!-- 带宽图卡 -->
+            <div class="cardx chart-card">
+              <div class="ch">
+                <h4>实时带宽</h4><span class="cnt">最近 60 秒</span>
+                <span class="sp"></span>
+                <span class="legend"><span class="d"><i></i>下载</span><span class="u"><i></i>上传</span></span>
+              </div>
+              <div class="plot">
+                <svg width="100%" height="100%" viewBox="0 0 820 210" preserveAspectRatio="none">
+                  <defs>
+                    <linearGradient id="gd" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#f0963f" stop-opacity=".28"/><stop offset="1" stop-color="#f0963f" stop-opacity="0"/>
+                    </linearGradient>
+                    <linearGradient id="gu" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#62a9e8" stop-opacity=".22"/><stop offset="1" stop-color="#62a9e8" stop-opacity="0"/>
+                    </linearGradient>
+                  </defs>
+                  <g stroke="#1b2430" stroke-width="1">
+                    <line x1="0" y1="52" x2="820" y2="52"/><line x1="0" y1="105" x2="820" y2="105"/><line x1="0" y1="157" x2="820" y2="157"/><line x1="0" y1="209" x2="820" y2="209"/>
+                  </g>
+                  <g fill="#5f6b7d" font-size="10" font-family="Consolas">
+                    <text x="4" y="48">1.2 MB/s</text><text x="4" y="101">800 KB/s</text><text x="4" y="153">400 KB/s</text><text x="4" y="205">0</text>
+                  </g>
+                  <path d="M0,168 L40,150 80,155 120,132 160,142 200,112 240,124 280,96 320,110 360,86 400,100 440,74 480,92 520,62 560,80 600,58 640,74 680,52 720,66 760,48 820,60 L820,210 0,210 Z" fill="url(#gd)"/>
+                  <path d="M0,168 L40,150 80,155 120,132 160,142 200,112 240,124 280,96 320,110 360,86 400,100 440,74 480,92 520,62 560,80 600,58 640,74 680,52 720,66 760,48 820,60" fill="none" stroke="#f0963f" stroke-width="2"/>
+                  <path d="M0,196 L60,192 120,194 180,188 240,191 300,186 360,190 420,184 480,188 540,182 600,186 660,180 720,184 780,179 820,182 L820,210 0,210 Z" fill="url(#gu)"/>
+                  <path d="M0,196 L60,192 120,194 180,188 240,191 300,186 360,190 420,184 480,188 540,182 600,186 660,180 720,184 780,179 820,182" fill="none" stroke="#62a9e8" stroke-width="2"/>
+                  <circle cx="820" cy="60" r="3.5" fill="#f0963f"/><circle cx="820" cy="182" r="3.5" fill="#62a9e8"/>
+                </svg>
+              </div>
+            </div>
+            <!-- 进程表卡 -->
+            <div class="cardx table-card">
+              <div class="ch">
+                <h4>进程</h4><span class="cnt">12 个</span>
+                <span class="sp"></span>
+                <span class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>搜索应用或路径</span>
+              </div>
+              <table class="pt">
+                <tr><th>应用</th><th>对端</th><th class="r">PID</th><th class="r">↓ 下载 ▾</th><th class="r">↑ 上传</th></tr>
+                <tr class="sel">
+                  <td><div class="app"><span class="ic">C</span><div class="nm">chrome.exe<small>C:\Program Files\Google\Chrome\Application</small></div></div></td>
+                  <td class="peers"><b>443×12</b>142.250.72.14 等</td><td class="r num">12896</td>
+                  <td class="r rv d">1.2<span class="u">MB/s</span></td><td class="r rv u-c">96<span class="u">KB/s</span></td>
+                </tr>
+                <tr>
+                  <td><div class="app"><span class="ic">C</span><div class="nm">Code.exe<small>C:\Users\Administrator\AppData\Local\Programs</small></div></div></td>
+                  <td class="peers"><b>443×6</b>20.205.243.166 等</td><td class="r num">22140</td>
+                  <td class="r rv d">108<span class="u">KB/s</span></td><td class="r rv u-c">12<span class="u">KB/s</span></td>
+                </tr>
+                <tr>
+                  <td><div class="app"><span class="ic">W</span><div class="nm">WeChat.exe<small>D:\Program Files\Tencent\WeChat</small></div></div></td>
+                  <td class="peers"><b>80×4</b>101.226.96.8 等</td><td class="r num">9032</td>
+                  <td class="r rv d">64<span class="u">KB/s</span></td><td class="r rv u-c">28<span class="u">KB/s</span></td>
+                </tr>
+                <tr>
+                  <td><div class="app"><span class="ic">a</span><div class="nm">aria2c.exe<small>D:\tools\aria2</small></div></div></td>
+                  <td class="peers"><b>443×2</b>104.21.5.19 等</td><td class="r num">15604</td>
+                  <td class="r rv d">52<span class="u">KB/s</span></td><td class="r rv u-c">4<span class="u">KB/s</span></td>
+                </tr>
+                <tr>
+                  <td><div class="app"><span class="ic">s</span><div class="nm">svchost.exe<small>C:\Windows\System32</small></div></div></td>
+                  <td class="peers"><b>443×3</b>203.119.25.1 等</td><td class="r num">1812</td>
+                  <td class="r rv d">8<span class="u">KB/s</span></td><td class="r rv u-c">2<span class="u">KB/s</span></td>
+                </tr>
+                <tr>
+                  <td><div class="app"><span class="ic">e</span><div class="nm">explorer.exe<small>C:\Windows</small></div></div></td>
+                  <td class="peers"><b>—</b></td><td class="r num">5408</td>
+                  <td class="r rv d">0<span class="u">B/s</span></td><td class="r rv u-c">0<span class="u">B/s</span></td>
+                </tr>
+              </table>
+            </div>
+          </div>
+          <!-- 右栏 -->
+          <div class="rail-r">
+            <div class="rc">
+              <h5>今日 <span class="sp"></span><a href="#live">详情 ›</a></h5>
+              <div class="big num">2.39<span class="u">GB</span></div>
+              <div class="duorow">
+                <span class="it d">下载<b class="num">1.28<span class="u">GB</span></b></span>
+                <span class="it u">上传<b class="num">1.11<span class="u">GB</span></b></span>
+              </div>
+            </div>
+            <div class="rc">
+              <h5>近 30 天</h5>
+              <svg width="100%" height="86" viewBox="0 0 272 86" preserveAspectRatio="none">
+                <g fill="#f0963f">
+                  <rect x="2" y="66" width="6" height="20" rx="1.5"/><rect x="11" y="58" width="6" height="28" rx="1.5"/><rect x="20" y="70" width="6" height="16" rx="1.5"/><rect x="29" y="62" width="6" height="24" rx="1.5"/><rect x="38" y="74" width="6" height="12" rx="1.5"/><rect x="47" y="52" width="6" height="34" rx="1.5"/><rect x="56" y="64" width="6" height="22" rx="1.5"/><rect x="65" y="70" width="6" height="16" rx="1.5"/><rect x="74" y="44" width="6" height="42" rx="1.5"/><rect x="83" y="60" width="6" height="26" rx="1.5"/><rect x="92" y="72" width="6" height="14" rx="1.5"/><rect x="101" y="56" width="6" height="30" rx="1.5"/><rect x="110" y="66" width="6" height="20" rx="1.5"/><rect x="119" y="48" width="6" height="38" rx="1.5"/><rect x="128" y="68" width="6" height="18" rx="1.5"/><rect x="137" y="58" width="6" height="28" rx="1.5"/><rect x="146" y="74" width="6" height="12" rx="1.5"/><rect x="155" y="40" width="6" height="46" rx="1.5"/><rect x="164" y="62" width="6" height="24" rx="1.5"/><rect x="173" y="70" width="6" height="16" rx="1.5"/><rect x="182" y="54" width="6" height="32" rx="1.5"/><rect x="191" y="66" width="6" height="20" rx="1.5"/><rect x="200" y="72" width="6" height="14" rx="1.5"/><rect x="209" y="50" width="6" height="36" rx="1.5"/><rect x="218" y="64" width="6" height="22" rx="1.5"/><rect x="227" y="76" width="6" height="10" rx="1.5"/><rect x="236" y="42" width="6" height="44" rx="1.5"/><rect x="245" y="60" width="6" height="26" rx="1.5"/><rect x="254" y="68" width="6" height="18" rx="1.5"/><rect x="263" y="30" width="6" height="56" rx="1.5"/>
+                </g>
+                <line x1="0" y1="85" x2="272" y2="85" stroke="#232d3a"/>
+              </svg>
+              <div style="font-size:11px;color:var(--text-3);margin-top:6px">8月14日 — 9月12日</div>
+            </div>
+            <div class="rc" style="flex:1;min-height:0">
+              <h5>chrome.exe <span class="sp"></span><span style="color:var(--text-3);font-size:11px">PID 12896</span></h5>
+              <div style="font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:10px">C:\Program Files\Google\Chrome\Application</div>
+              <div class="duorow" style="margin-top:0">
+                <span class="it d">会话累计下载<b class="num">221.7<span class="u">MB</span></b></span>
+                <span class="it u">上传<b class="num">35.2<span class="u">MB</span></b></span>
+              </div>
+              <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft);font-size:12px;color:var(--text-2)">
+                对端 <b style="color:var(--text);font-weight:500">12</b> 个 ・ 最常连 <span class="num" style="color:var(--text)">142.250.72.14</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="anno">
+      <div class="a"><b><span class="tag">布局</span> 留白区删除</b>带宽图升为主区上半（264px+弹性），进程表占满剩余高度，可见行数 ~5 → ~12。背景图改全屏底层，面板微透。</div>
+      <div class="a"><b><span class="tag">信息</span> 右栏 380→300px，默认态有内容</b>今日卡（大数字+下载/上传拆分）+ 近30天柱图 + 选中进程详情；未选中时第三卡自动换成 Top 3 排行。</div>
+      <div class="a"><b><span class="tag">就近</span> 搜索下放到进程表头</b>顶栏只剩状态、元信息、速率、窗口钮 4 类；搜索贴着它过滤的对象。</div>
+      <div class="a"><b><span class="tag">语言</span> 弃用毛玻璃与投影</b>蓝黑技术底 + 1px 边线分层；选中行 = 浅琥珀底 + 左侧 2px 琥珀条；琥珀/蓝只属于数据。</div>
+    </div>
+  </section>
+
+  <!-- ================= ④ 历史屏 ================= -->
+  <section class="block" id="history">
+    <h2>④ 历史屏</h2>
+    <p class="lead">历史从 250px 数据岛解放到主区全高：柱图 ~400px 高，趋势终于可读；排行移入右栏，与实时屏右栏同构。</p>
+    <div class="mock-wrap">
+      <div class="mock np app">
+        <div class="topbar">
+          <div class="brand"><i></i></div>
+          <span class="status"><i></i><b>监控中</b>&nbsp;·&nbsp;12 个进程</span>
+          <span class="top-meta">已采集 2 时 34 分</span>
+          <span class="sp"></span>
+          <div class="rates">
+            <span class="rate is-down"><svg viewBox="0 0 24 24" fill="none" stroke="#f0963f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg><span class="v num">1.4</span><span class="u">MB/s</span></span>
+            <span class="rate is-up"><svg viewBox="0 0 24 24" fill="none" stroke="#62a9e8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg><span class="v num">96</span><span class="u">KB/s</span></span>
+          </div>
+          <div class="winbtns">
+            <span><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></span>
+            <span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></span>
+            <span class="x"><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+          </div>
+        </div>
+        <div class="rail">
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+          <span class="ri on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.6a7 7 0 0 0-2 1.2l-2.3-1-2 3.5 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.5 2.3-1-2 3.5 2 3.5 2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></span>
+          <span class="grow"></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="5"/><rect x="3" y="3" width="18" height="18" rx="4" opacity=".45"/></svg></span>
+        </div>
+        <div class="main">
+          <div class="center">
+            <div class="cardx" style="padding:12px 14px">
+              <div class="hist-tools">
+                <span class="seg"><span class="on">7 天</span><span>30 天</span><span>90 天</span><span>自定义</span></span>
+                <span class="hist-sum">
+                  <span class="d">↓ <b class="num">1.28<span class="u">GB</span></b></span>
+                  <span class="u-c">↑ <b class="num">1.39<span class="u">GB</span></b></span>
+                  <span class="t">合计 <b class="num">2.67<span class="u">GB</span></b></span>
+                </span>
+                <span class="sp" style="flex:1"></span>
+                <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>导出 CSV</span>
+              </div>
+            </div>
+            <div class="cardx big-chart">
+              <div class="ch"><h4>9月6日 — 9月12日</h4><span class="cnt">悬停看数值 ・ 点击选中某天</span><span class="sp"></span>
+                <span class="legend"><span class="d"><i></i>下载</span><span class="u"><i></i>上传</span></span></div>
+              <div class="plot">
+                <svg width="100%" height="100%" viewBox="0 0 820 330" preserveAspectRatio="none">
+                  <g stroke="#1b2430"><line x1="0" y1="82" x2="820" y2="82"/><line x1="0" y1="164" x2="820" y2="164"/><line x1="0" y1="246" x2="820" y2="246"/><line x1="0" y1="328" x2="820" y2="328"/></g>
+                  <g fill="#5f6b7d" font-size="10" font-family="Consolas"><text x="4" y="78">600 MB</text><text x="4" y="160">400 MB</text><text x="4" y="242">200 MB</text><text x="4" y="324">0</text></g>
+                  <g>
+                    <rect x="52" y="164" width="34" height="164" rx="3" fill="#f0963f"/><rect x="90" y="123" width="34" height="205" rx="3" fill="#62a9e8"/>
+                    <rect x="169" y="205" width="34" height="123" rx="3" fill="#f0963f"/><rect x="207" y="172" width="34" height="156" rx="3" fill="#62a9e8"/>
+                    <rect x="286" y="98" width="34" height="230" rx="3" fill="#f0963f"/><rect x="324" y="74" width="34" height="254" rx="3" fill="#62a9e8"/>
+                    <rect x="403" y="246" width="34" height="82" rx="3" fill="#f0963f"/><rect x="441" y="213" width="34" height="115" rx="3" fill="#62a9e8"/>
+                    <rect x="520" y="139" width="34" height="189" rx="3" fill="#f0963f"/><rect x="558" y="115" width="34" height="213" rx="3" fill="#62a9e8"/>
+                    <rect x="637" y="189" width="34" height="139" rx="3" fill="#f0963f"/><rect x="675" y="156" width="34" height="172" rx="3" fill="#62a9e8"/>
+                    <rect x="754" y="287" width="34" height="41" rx="3" fill="#f0963f" opacity=".45"/><rect x="792" y="270" width="24" height="58" rx="3" fill="#62a9e8" opacity=".45"/>
+                  </g>
+                  <g fill="#5f6b7d" font-size="11" text-anchor="middle">
+                    <text x="88" y="325" dy="-330" transform="translate(0,330)">9/6</text>
+                  </g>
+                  <g fill="#97a3b4" font-size="11" text-anchor="middle">
+                    <text x="90" y="345">9/6</text><text x="207" y="345">9/7</text><text x="324" y="345">9/8</text><text x="441" y="345">9/9</text><text x="558" y="345">9/10</text><text x="675" y="345">9/11</text><text x="784" y="345">9/12</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="day-line">
+                <b>9月12日</b>
+                <span class="d">下载 <span class="num">82.4 MB</span></span>
+                <span class="u-c">上传 <span class="num">116.2 MB</span></span>
+                <span>合计 <span class="num" style="color:var(--text)">198.6 MB</span></span>
+                <span style="color:var(--text-3)">・ 用量最高：chrome.exe（41.2 MB）</span>
+                <span style="flex:1"></span>
+                <span style="color:var(--text-3);font-size:11.5px">今天仍在累计，柱体以半透明显示</span>
+              </div>
+            </div>
+          </div>
+          <div class="rail-r">
+            <div class="rc" style="flex:1;min-height:0;display:flex;flex-direction:column">
+              <h5>应用排行 <span class="sp"></span><span style="color:var(--text-3);font-size:11px">按下载</span></h5>
+              <div class="rank" style="flex:1">
+                <div class="rr"><span class="ic">C</span><span class="nm">chrome.exe</span><span class="vv num">830.9<span class="u">MB</span></span><span class="bar"><i style="width:100%"></i></span></div>
+                <div class="rr"><span class="ic">C</span><span class="nm">Code.exe</span><span class="vv num">380.2<span class="u">MB</span></span><span class="bar"><i style="width:46%"></i></span></div>
+                <div class="rr"><span class="ic">W</span><span class="nm">WeChat.exe</span><span class="vv num">310.5<span class="u">MB</span></span><span class="bar"><i style="width:37%"></i></span></div>
+                <div class="rr"><span class="ic">a</span><span class="nm">aria2c.exe</span><span class="vv num">188.4<span class="u">MB</span></span><span class="bar"><i style="width:23%"></i></span></div>
+                <div class="rr"><span class="ic">s</span><span class="nm">svchost.exe</span><span class="vv num">96.1<span class="u">MB</span></span><span class="bar"><i style="width:12%"></i></span></div>
+                <div class="rr"><span class="ic">q</span><span class="nm">QQMusic.exe</span><span class="vv num">64.8<span class="u">MB</span></span><span class="bar"><i style="width:8%"></i></span></div>
+                <div class="rr"><span class="ic">e</span><span class="nm">explorer.exe</span><span class="vv num">21.3<span class="u">MB</span></span><span class="bar"><i style="width:3%"></i></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="anno">
+      <div class="a"><b><span class="tag">布局</span> 主区全高给趋势</b>柱图从 ~150px 升到 ~400px，7 天档双柱（下载/上传并排）清晰可辨；今天（进行中）的柱体半透明，一眼区分「未完结」。</div>
+      <div class="a"><b><span class="tag">结构</span> 排行进右栏，与实时屏同构</b>右栏在两屏间位置、宽度一致，切换不跳；占比条压底 2px，不抢数值。</div>
+      <div class="a"><b><span class="tag">信息</span> 日详情固定底行</b>点选某天后的明细从浮层/隐藏态改为常驻底行：日期、下载、上传、合计、最高用量应用。</div>
+      <div class="a"><b><span class="tag">保留</span> 既有强项不动</b>悬停读数卡、点击选日、键盘选日、自定义区间浮层（Esc/校验）、CSV 导出全部保留。</div>
+    </div>
+  </section>
+
+  <!-- ================= ⑤ 设置屏 ================= -->
+  <section class="block" id="settings">
+    <h2>⑤ 设置屏（外观并入）</h2>
+    <p class="lead">导航 4→3（监控 / 历史 / 设置）。设置改为「左分区导航 + 右表单」的 Windows 设置心智；主题三模式收敛为外观分区的三张卡片，背景图与 AI 取色各归其位。</p>
+    <div class="mock-wrap">
+      <div class="mock np app">
+        <div class="topbar">
+          <div class="brand"><i></i></div>
+          <span class="status"><i></i><b>监控中</b>&nbsp;·&nbsp;12 个进程</span>
+          <span class="top-meta">已采集 2 时 34 分</span>
+          <span class="sp"></span>
+          <div class="rates">
+            <span class="rate is-down"><svg viewBox="0 0 24 24" fill="none" stroke="#f0963f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg><span class="v num">1.4</span><span class="u">MB/s</span></span>
+            <span class="rate is-up"><svg viewBox="0 0 24 24" fill="none" stroke="#62a9e8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg><span class="v num">96</span><span class="u">KB/s</span></span>
+          </div>
+          <div class="winbtns">
+            <span><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></span>
+            <span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></span>
+            <span class="x"><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+          </div>
+        </div>
+        <div class="rail">
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <span class="ri on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.6a7 7 0 0 0-2 1.2l-2.3-1-2 3.5 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.5 2.3-1-2 3.5 2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></span>
+          <span class="grow"></span>
+          <span class="ri"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="5"/><rect x="3" y="3" width="18" height="18" rx="4" opacity=".45"/></svg></span>
+        </div>
+        <div class="main" style="grid-template-columns:minmax(0,1fr)">
+          <div class="settings">
+            <div class="snav">
+              <span class="on">常规</span><span>外观</span><span>数据</span><span>提醒</span><span>关于</span>
+            </div>
+            <div class="sbody">
+              <div class="sgroup">
+                <h4>外观</h4>
+                <p>主题与背景。所有改动即时生效、自动保存。</p>
+                <div class="theme-cards">
+                  <div class="tcard on">
+                    <div class="pv" style="background:linear-gradient(135deg,#151b23 60%,#1b2430);border-bottom:3px solid #f0963f"></div>
+                    <b>深色技术</b><small>默认。蓝黑底 + 双语义色，监控场景最佳可读性。</small>
+                  </div>
+                  <div class="tcard">
+                    <div class="pv" style="background:linear-gradient(135deg,#e8ebf0 60%,#dde3ea);border-bottom:3px solid #f0963f"></div>
+                    <b>浅色</b><small>明亮环境使用，同一套语义色。</small>
+                  </div>
+                  <div class="tcard">
+                    <div class="pv" style="background:linear-gradient(135deg,#10151c 45%,#2b3a4d);border-bottom:3px solid #62a9e8"></div>
+                    <b>跟随背景图取色</b><small>从背景图提取主色。含 AI 取色（高级）。</small>
+                  </div>
+                </div>
+                <div class="srow"><div class="t"><b>背景图</b><small>铺在整个窗口底层，面板微微透出</small></div><span class="btn">选择图片…</span><span class="btn ghost">移除</span></div>
+                <div class="srow"><div class="t"><b>面板不透明度</b><small>0.82 – 1.00，越低底图越明显</small></div><span class="slider"><i></i></span></div>
+              </div>
+              <div class="sgroup">
+                <h4>常规</h4>
+                <div class="srow"><div class="t"><b>跟随系统启动</b><small>登录 Windows 后自动开始监控</small></div><span class="switch on"></span></div>
+                <div class="srow"><div class="t"><b>速率单位</b><small>自动按量级换算，或固定 MB/s</small></div><span class="input">自动 ▾</span></div>
+                <div class="srow"><div class="t"><b>自动检查更新</b><small>每 7 天静默检查一次</small></div><span class="switch"></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="anno">
+      <div class="a"><b><span class="tag">架构</span> 外观并入设置</b>导航 4→3。主题从「整屏三模式 + 三列色板」收敛为三张主题卡；AI 取色收进「跟随背景图取色」卡内的高级选项。</div>
+      <div class="a"><b><span class="tag">心智</span> 左分区 + 右表单</b>常规 / 外观 / 数据 / 提醒 / 关于 五个分区，点击切换（或滚动锚定），不再三列拼卡。</div>
+      <div class="a"><b><span class="tag">新增</span> 面板不透明度滑块</b>背景图改全屏底层后，用「面板不透明度」控制透出程度——取代现版「留白区」的呼吸职责，且可调。</div>
+      <div class="a"><b><span class="tag">保留</span> 交互规则不变</b>自动保存 + 「已自动保存」瞬态回执；清空历史等破坏性动作仍原地二次确认。</div>
+    </div>
+  </section>
+
+  <!-- ================= ⑥ 迷你窗 ================= -->
+  <section class="block" id="mini">
+    <h2>⑥ 迷你窗（能量球 + 面板）</h2>
+    <p class="lead">形态保留（球是好特色），换肤对齐新语言：蓝黑底、双语义色、与主窗同一套 tokens；面板控件与主窗同族。</p>
+    <div class="mock-wrap" style="background:#e8eaee">
+      <div class="mock np" style="width:1180px;background:transparent">
+        <div class="mini-stage" style="height:360px">
+          <div class="orb-wrap">
+            <div class="orb">
+              <span class="ov d num">1.4<span class="u"> MB/s</span></span>
+              <span class="ov u-c num"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg>96<span class="u"> KB/s</span></span>
+            </div>
+          </div>
+          <div class="mini">
+            <div class="mh">
+              <b>NetPeek</b><span class="sp"></span>
+              <span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></span>
+              <span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+            </div>
+            <div class="tot">
+              <span class="it d"><svg viewBox="0 0 24 24" fill="none" stroke="#f0963f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg><span class="v num">1.4<span class="u"> MB/s</span></span></span>
+              <span class="it u-c"><svg viewBox="0 0 24 24" fill="none" stroke="#62a9e8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg><span class="v num">96<span class="u"> KB/s</span></span></span>
+              <span style="flex:1"></span>
+              <span style="font-size:10.5px;color:var(--text-3)">监控中</span>
+            </div>
+            <div class="lst">
+              <div class="li"><span class="ic">C</span><span class="nm">chrome.exe</span><span class="rv" style="color:var(--down)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg>1.2<span class="u"> MB/s</span></span></div>
+              <div class="li"><span class="ic">C</span><span class="nm">Code.exe</span><span class="rv" style="color:var(--down)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg>108<span class="u"> KB/s</span></span></div>
+              <div class="li"><span class="ic">W</span><span class="nm">WeChat.exe</span><span class="rv" style="color:var(--up)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-5 5m5-5 5 5"/></svg>28<span class="u"> KB/s</span></span></div>
+              <div class="li"><span class="ic">a</span><span class="nm">aria2c.exe</span><span class="rv" style="color:var(--down)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-5-5m5 5 5-5"/></svg>52<span class="u"> KB/s</span></span></div>
+            </div>
+            <div class="mf">
+              <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 9v6M14 9v6"/><rect x="4" y="4" width="16" height="16" rx="3"/></svg>暂停</span>
+              <span class="btn ghost">主界面</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="anno">
+      <div class="a"><b><span class="tag">语言</span> 与主窗同源换肤</b>球体从「暖琥珀发光」改为深色球壳 + 琥珀数据光晕；面板与主窗同 tokens（panel/line/双色），不再是另一套气质。</div>
+      <div class="a"><b><span class="tag">信息</span> 面板结构保持</b>总量行 + Top4 列表 + 底部「暂停 / 主界面」双按钮；每行只显示该应用主方向速率（不再双行挤压）。</div>
+      <div class="a"><b><span class="tag">保留</span> 交互全部不动</b>默认右下角落位、就近边锚定展开、拖动、键盘可达（role=button + Enter/Space）、暂停双态。</div>
+    </div>
+  </section>
+
+  <!-- ================= ⑦ 栅格与迁移 ================= -->
+  <section class="block" id="grid">
+    <h2>⑦ 栅格系统与迁移要点</h2>
+    <div class="card">
+      <h3>布局栅格（1180×720 默认窗口）</h3>
+      <table class="eval">
+        <tr><th>区域</th><th>现版</th><th>新版</th><th>说明</th></tr>
+        <tr><td>顶栏</td><td>58px，7 类元素</td><td><b>48px，4 类元素</b></td><td>品牌格与 rail 等宽（52px），状态 + 元信息 + 速率 + 窗口钮</td></tr>
+        <tr><td>导航</td><td>64px 悬浮岛，4 项</td><td><b>52px 贴边 rail，3 项</b></td><td>监控 / 历史 / 设置；底部小窗入口；选中 = 抬起底 + 2px 琥珀条</td></tr>
+        <tr><td>留白区</td><td>~40% 面积（装饰）</td><td><b>删除</b></td><td>背景图改全屏底层 + 面板不透明度滑块</td></tr>
+        <tr><td>检查栏</td><td>380px，默认态空</td><td><b>300px，内容填满</b></td><td>今日卡 + 30 天图 + 详情/Top3；两屏右栏同构</td></tr>
+        <tr><td>带宽图</td><td>底部 250px</td><td><b>主区上半主角</b></td><td>实时屏 264px+；历史屏 ~400px</td></tr>
+        <tr><td>间距/圆角</td><td>14px gutter / 圆角岛</td><td><b>12px gutter / 12·8·6 圆角</b></td><td>8 的基础网格；分层靠底色差 + 1px 线，弃投影/毛玻璃</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>迁移影响面（实施时的注意点）</h3>
+      <div style="font-size:13px;color:#4a5468;line-height:1.9">
+        1. <b>纯前端重构</b>：Rust/采集端零改动；所有 invoke 接口、事件名、数据格式保持。<br>
+        2. <b>token 整体换表</b>：styles.css 的 :root 变量一换，80% 视觉自动迁移；岛屿毛玻璃、投影、stage 相关规则整段删除。<br>
+        3. <b>结构改动集中</b>：index.html 的 shell 从「四块漂浮岛」改为「顶栏 + rail + 主区（中心+右栏）」；外观屏删除，其功能搬入设置屏分区。<br>
+        4. <b>需要重新验证的既有能力</b>：主题取色（背景图 → 主色）在「面板不透明度」模式下重新标定默认值；三档响应式断点按新栅格重算；canvas 图表颜色改读新 token。<br>
+        5. <b>功能零删减</b>：暂停/恢复、排序、搜索、检查详情、历史导出、主题自定义、迷你窗两形态全部保留；变化只在「放哪里、长什么样」。
+      </div>
+    </div>
+  </section>
+
+  <footer class="board-foot">
+    NetPeek 重设计稿 v1 ・ 本稿为静态高保真示意（假数据），用于确认方向与布局；确认后按「栅格与迁移」逐屏实施。<br>
+    反馈方式：直接说「某屏 某处 怎么改」，或确认「按此实施」。
+  </footer>
+</div>
+
+<script>
+  // mock 缩放
+  function applyZoom(z) {
+    document.querySelectorAll('.mock').forEach(m => {
+      m.style.transform = 'scale(' + z + ')';
+      const wrap = m.parentElement;
+      wrap.style.height = (m.offsetHeight * z + 2) + 'px';
+    });
+    document.querySelectorAll('.mockbar button').forEach(b =>
+      b.classList.toggle('on', +b.dataset.z === z));
+  }
+  document.querySelectorAll('.mockbar button').forEach(b =>
+    b.addEventListener('click', () => applyZoom(+b.dataset.z)));
+  window.addEventListener('load', () => applyZoom(0.66));
+</script>
+</body>
+</html>

@@ -301,11 +301,13 @@
   // ---------- 主题 ----------
 
   // 小窗只要令牌，不要背景图：透明窗口后面没有网页内容，backdrop-filter 无从取样。
-  function applyTokens(theme) {
+  // payload 是主界面广播的 { tokens, background }（背景已剥掉），或 initTokens 里
+  // 自己包的同一形状 —— 真正落地的只有 tokens 那 17 键。
+  function applyTokens(payload) {
     const T = window.NetPeekTheme;
-    if (!T || !theme || !theme.tokens) return;
+    if (!T || !payload || !payload.tokens) return;
     try {
-      T.applyTheme({ ...theme, background: '' }, { silent: true });
+      T.applyTokens(payload.tokens, { silent: true });
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }
   }
 
@@ -314,8 +316,8 @@
     if (!T) return;
     try {
       const boot = await T.initTheme();
-      const { state } = boot;
-      applyTokens(state.themes[state.active] || Object.values(state.themes)[0]);
+      const skin = T.resolveSkin(boot.state); // 内置 / image / 自定义皮肤统一从这走
+      applyTokens({ tokens: skin.tokens });
     } catch { /* 读不到配置就用兜底值 */ }
   }
 
