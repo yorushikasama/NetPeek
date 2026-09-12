@@ -38,9 +38,28 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     // 只在快照线程（GetSnapshot）与连接切换间隙访问，二者严格串行。
     private readonly HashSet<string> _iconPathsSent = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>ETW 会话的启动状态。见 <see cref="_state"/>。</summary>
+    private enum SessionState
+    {
+        /// <summary>会话正在后台启动（含残留会话清理），还没开始收事件。</summary>
+        Starting = 0,
+
+        /// <summary>会话已就绪，正在收事件。</summary>
+        Running = 1,
+
+        /// <summary>启动失败或事件线程异常退出（通常是缺管理员权限）。</summary>
+        Failed = 2,
+    }
+
     private TraceEventSession? _session;
     private Thread? _processThread;
-    private volatile bool _started;
+    private Thread? _startThread;
+
+    /// <summary>
+    /// 会话状态。启动线程写一次，快照线程每帧读；底层是 int，volatile 保证可见性。
+    /// </summary>
+    private volatile SessionState _state = SessionState.Starting;
+
     private volatile bool _paused;
     private volatile bool _disposed;
 
@@ -68,7 +87,19 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         _metadata = metadata;
         _icons = icons;
         _sessionStartedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        StartSession();
+
+        // 会话启动放后台线程：EnableKernelProvider 与残留会话清理都是同步内核调用，
+        // 实测合计 0.3–2.4 s（清理残留那次最慢）。放在构造函数里就是把这段时间挂在
+        // DI 容器建 singleton 的路径上 —— Host.Run() 要等它，管道也就跟着晚开，
+        // UI 在这期间连不上管道，表现成「刚启动那几秒卡住」。
+        // 改成后台起：管道立刻开始监听，UI 马上连上并收到 Status="starting" 的帧，
+        // 界面显示「正在启动采集」而不是干等。会话就绪后下一帧自动转 ok。
+        _startThread = new Thread(StartSession)
+        {
+            IsBackground = true,
+            Name = "NetPeek.ETW.Start",
+        };
+        _startThread.Start();
     }
 
     private void StartSession()
@@ -100,6 +131,17 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             parser.TcpIpRetransmitIPV6 += OnRetransmitV6;
             // 刻意不订阅 TcpIpTCPCopy / TcpIpTCPCopyIPV6（Event ID 18），避免下载量翻倍。
 
+            // 建会话期间可能已经 Dispose 了（服务启动到立刻停止、或启动超过 Dispose
+            // 的 3s join 上限）。此时 Dispose 早已把 _session 读空走人，这个会话没人
+            // 会再去停 —— ETW 会话是内核对象，进程退出也不消失，会以残留会话留到
+            // 下次启动。所以在赋值前自查一次，是自己建的就自己拆掉，别赋值也别起线程。
+            if (_disposed)
+            {
+                session.Stop();
+                session.Dispose();
+                return;
+            }
+
             _session = session;
             _processThread = new Thread(() => ProcessEvents(session))
             {
@@ -108,12 +150,12 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             };
             _processThread.Start();
 
-            _started = true;
+            _state = SessionState.Running;
             _logger.LogInformation("ETW 会话已启动：{Session}", SessionName);
         }
         catch (Exception ex)
         {
-            _started = false;
+            _state = SessionState.Failed;
             _logger.LogError(ex, "ETW 会话启动失败（需要管理员权限）。");
             _session?.Dispose();
             _session = null;
@@ -133,7 +175,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         }
         catch (Exception ex)
         {
-            _started = false;
+            _state = SessionState.Failed;
             _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止");
         }
     }
@@ -222,17 +264,27 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     public TrafficSnapshot GetSnapshot()
     {
         var paused = _paused;
+        var state = _state;
         var snapshot = new TrafficSnapshot
         {
             TimestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            Status = !_started ? "error" : (paused ? "paused" : "ok"),
+            // starting 与 error 必须分开：会话在后台起（含残留清理，实测 0.3–2.4s），
+            // 这段窗口里没有事件可报，但那不是故障。都报 error 会让 UI 在每次启动的
+            // 头几秒稳定显示「服务异常 · 需管理员权限」——一句与事实相反的错误播报。
+            Status = state switch
+            {
+                SessionState.Running => paused ? "paused" : "ok",
+                SessionState.Starting => "starting",
+                _ => "error",
+            },
             EventsLost = (ulong)ReadEventsLost(),
             SessionStartedUnixMs = _sessionStartedUnixMs,
         };
 
-        if (!_started)
+        if (state != SessionState.Running)
         {
-            return snapshot; // 空进程列表 + error 状态，UI 据此显示“服务异常”。
+            // 空进程列表：starting 时还没有事件，error 时采集已停。
+            return snapshot;
         }
 
         var processes = new List<ProcessTraffic>(_counters.Count);
@@ -299,12 +351,18 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 }
             }
 
-            // 图标增量下发：仅当路径首次出现时提取并放进 IconUpdates（提取较贵，
-            // 由 ProcessIconCache 内部缓存兜底）；未下发过的帧不带任何图标数据，
-            // 免得每秒把几十 KB 的 base64 沿管道搬四个来回。
-            if (!string.IsNullOrEmpty(counter.Path) && _iconPathsSent.Add(counter.Path))
+            // 图标增量下发：路径首次出现时下发一次，之后不再重复；未下发过的帧不带
+            // 任何图标数据，免得每秒把几十 KB 的 base64 沿管道搬四个来回。
+            //
+            // 提取是异步的（见 ProcessIconCache）：TryGetDataUrl 拿不到就说明后台还没
+            // 提完，本帧跳过、下一帧再问。**必须等真正拿到才记进 _iconPathsSent** ——
+            // 先标记再提取的话，未就绪的那一次就把路径永久标成「已发送」，这个图标
+            // 再也不会下发，UI 上那一行就永远是首字母占位牌。
+            if (!string.IsNullOrEmpty(counter.Path)
+                && !_iconPathsSent.Contains(counter.Path)
+                && _icons.TryGetDataUrl(counter.Path, out var icon))
             {
-                var icon = _icons.GetDataUrl(counter.Path);
+                _iconPathsSent.Add(counter.Path);
                 if (icon.Length > 0)
                 {
                     iconUpdates ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -391,7 +449,19 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         }
 
         _disposed = true;
-        _started = false;
+        _state = SessionState.Failed;
+
+        // 必须先等启动线程收工，再去停会话。会话现在是后台建的，如果这里先把
+        // _session 读空、启动线程随后才 new TraceEventSession 并赋值，那个会话就
+        // 没人停了 —— ETW 会话是内核对象，进程退出也不会自动消失，只会以「残留
+        // 会话」的形式留到下次启动（StartSession 开头那段清理正是为它准备的）。
+        // _disposed 已置位，启动线程建完会自查并自行拆掉，这里只需等它走完。
+        var starter = _startThread;
+        _startThread = null;
+        if (starter != null && starter.IsAlive && starter != Thread.CurrentThread)
+        {
+            starter.Join(TimeSpan.FromSeconds(3));
+        }
 
         var session = _session;
         _session = null;

@@ -68,7 +68,13 @@ public sealed class TrafficSnapshot
     /// <summary>采集服务启动时刻（Unix 毫秒），UI 据此计算会话时长。</summary>
     public long SessionStartedUnixMs { get; set; }
 
-    /// <summary>采集状态：ok / paused / error。</summary>
+    /// <summary>
+    /// 采集状态：
+    /// <c>ok</c> = 正在收事件；<c>paused</c> = 用户暂停（累计值保持，速率报 0）；
+    /// <c>starting</c> = ETW 会话还在后台启动（含残留会话清理，实测 0.3–2.4s），
+    /// 管道已在推帧但 Processes 为空 —— 这是正常启动流程，UI 不应报错；
+    /// <c>error</c> = 会话启动失败或事件线程异常退出（通常缺管理员权限）。
+    /// </summary>
     public string Status { get; set; } = "ok";
 
     /// <summary>
