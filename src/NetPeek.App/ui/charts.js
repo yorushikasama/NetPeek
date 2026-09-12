@@ -210,7 +210,10 @@
     }
     const yMax = niceMax(dataMax || 1);
     const r = drawFrame(ctx, w, h, yMax, opt);
-    if (!groups.length) return null;
+    if (!groups.length) {
+      canvas._barOpt = null;
+      return null;
+    }
 
     const seriesCount = Math.max(1, groups[0].values.length);
     const innerGap = seriesCount > 1 ? 3 : 0;
@@ -257,6 +260,14 @@
         lastRight = cx + half + 10;
       }
     }
+
+    // 悬停读数（opt.seriesNames 提供时启用）：竖参考线立在组中央 + 深色小卡，
+    // 卡片画法与折线图同一套。数据点圆点有意不画 —— 零值日的圆点会趴在底边上，
+    // 读成凭空多出来的一条横线（折线图没这个问题，圆点总在曲线上）。
+    const hoverIdx = opt.seriesNames ? barHoverIndexAt(canvas, r, groups.length) : -1;
+    if (hoverIdx >= 0) drawBarHover(ctx, r, groups, hoverIdx, opt, colors);
+    canvas._barOpt = opt;
+    attachBarHover(canvas);
 
     return {
       indexAt(clientX) {
@@ -403,6 +414,84 @@
       canvas.style.cursor = '';
       if (canvas._lineOpt) line(canvas, canvas._lineOpt);
     });
+  }
+
+  // 与 attachLineHover 同一套「缓存入参 + mousemove 整帧重画」的模式。
+  function attachBarHover(canvas) {
+    if (canvas._barHoverBound) return;
+    canvas._barHoverBound = true;
+    canvas.addEventListener('mousemove', (e) => {
+      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
+      canvas.style.cursor = canvas._barOpt ? 'crosshair' : '';
+      if (canvas._barOpt) bars(canvas, canvas._barOpt);
+    });
+    canvas.addEventListener('mouseleave', () => {
+      canvas._hoverX = -1;
+      canvas.style.cursor = '';
+      if (canvas._barOpt) bars(canvas, canvas._barOpt);
+    });
+  }
+
+  // 光标落在哪个柱组里。与折线图不同，出绘图区即算无悬停、不留 6px 余量 ——
+  // 柱与柱有明确边界，贴着 y 轴标注还弹出读数反而含糊。
+  function barHoverIndexAt(canvas, r, n) {
+    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
+    const x = canvas._hoverX;
+    if (x < r.left || x > r.right) return -1;
+    return Math.max(0, Math.min(n - 1, Math.floor(((x - r.left) / r.plotW) * n)));
+  }
+
+  // 柱悬停小卡：组标签做标题（tipTitle 可覆盖，周聚合标「当周」），
+  // 各系列值用 fmtFull 全精度 —— 与折线悬停「轴上紧凑、卡里全精度」的分工一致。
+  function drawBarHover(ctx, r, groups, idx, opt, colors) {
+    const g = groups[idx];
+    const pitch = r.plotW / groups.length;
+    const cx = Math.round(r.left + (idx + 0.5) * pitch) + 0.5;
+
+    ctx.save();
+    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(cx, r.top);
+    ctx.lineTo(cx, r.bottom);
+    ctx.stroke();
+
+    const names = opt.seriesNames || [];
+    const rows = g.values.map((v, si) => ({
+      color: colors[si] || colors[0],
+      label: names[si] || '数值',
+      text: fmtFull(v || 0, opt.tipSuffix || ''),
+    }));
+    ctx.font = FONT_NUM;
+    const title = String(opt.tipTitle ? opt.tipTitle(g, idx) : (g.label ?? ''));
+    let textW = ctx.measureText(title).width;
+    for (const row of rows) textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
+    const boxW = textW + 22;
+    const boxH = 20 + rows.length * 14;
+    let bx = cx + 8;
+    if (bx + boxW > r.right + PAD_R) bx = cx - 8 - boxW;
+    const by = r.top + 4;
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--surface-hi') || '#2f2924';
+    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    roundRectPath(ctx, bx, by, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+    ctx.fillText(title, bx + 10, by + 11);
+    rows.forEach((row, i) => {
+      const ry = by + 26 + i * 14;
+      ctx.fillStyle = row.color;
+      ctx.fillRect(bx + 10, ry - 3, 6, 6);
+      ctx.fillStyle = cssVar('--text') || '#f6efe8';
+      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
+    });
+    ctx.restore();
   }
 
   window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };

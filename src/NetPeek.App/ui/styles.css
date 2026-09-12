@@ -1,55 +1,9 @@
 /* NetPeek 浮岛式界面样式。设计依据：docs/UI生成提示词.md 第 1–3 节。
    底图是画面主角：四块圆角岛屿浮在压暗后的底图上，中间留一片不放 UI 的留白区。
-   材质是「暖色亮边 + 同色外发光」，不是「灰描边 + 黑投影」—— 半透明岛屿上的深色描边
-   在底图亮部实测只剩 1.12 对比度（§3.1），所以分隔线一律用低透明度白色，跟着底色浮动。 */
+   材质是「暖色亮边 + 投影」，不是「灰描边 + 黑投影」—— 半透明岛屿上的深色描边
+   在底图亮部实测只剩 1.12 对比度（§3.1），所以分隔线一律用低透明度白色，跟着底色浮动。
 
-:root {
-  /* 颜色（§3.1）。theme.js 按当前主题覆盖这一组。 */
-  --bg: #111418;
-  --surface: #1e1a16;
-  --surface-hi: #2f2924;
-  --text: #f6efe8;
-  --text-muted: #b4a99e;
-  --down: #f0913f;
-  --up: #7fa8c9;
-  --ok: #6fc884;
-  --warn: #ebbd57;
-  --error: #f97770;
-  --line: rgba(255, 255, 255, 0.10);
-  --stroke: rgba(255, 255, 255, 0.18);
-  --edge: rgba(240, 145, 63, 0.26);
-  --glow-warm: rgba(240, 145, 63, 0.10);
-  --glow-pulse: rgba(240, 145, 63, 0.18);
-  --theme-bg-image: none;
-
-  /* 岛屿材质（§3.2）。不透明度下限 0.82 是对比度实测结果，不是手感。 */
-  --island-op: 0.88;
-  --blur: 24px;
-  --scrim: 0.30;
-
-  /* 圆角五档（§3.4） */
-  --r-frame: 20px;
-  --r-island: 16px;
-  --r-block: 10px;
-  --r-ctl: 8px;
-  --r-pill: 999px;
-
-  /* 字族（§3.3）。所有数字走等宽族，避免每秒刷新时列宽抖动。 */
-  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
-  --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
-
-  /* 动效三档（§3.6） */
-  --t-fast: 150ms;
-  --t-mid: 200ms;
-  --t-slow: 260ms;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-
-  /* z 轴语义层，不用 999 之类的裸数字 */
-  --z-scrim: 1;
-  --z-island: 2;
-  --z-grip: 3;
-  --z-resize: 40;
-}
+   设计令牌不在这个文件里，见 tokens.css（index.html 在本文件之前加载它）。 */
 
 * { box-sizing: border-box; }
 
@@ -124,7 +78,10 @@ body:not(.has-bg) .scrim { display: none; }
   height: 100%;
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) 380px;
-  grid-template-rows: 58px minmax(356px, 1fr) 250px;
+  /* 中排/数据岛按比例分享窗口高度：原来数据岛定死 250px，窗口一高全部增量
+     都灌进留白区，中排被拉成一大片、数据岛仍只露出 6 行 —— 上下失衡。
+     250 是 720 高（默认窗口）的实测值，30vh 让更高的窗口按比例分给数据岛。 */
+  grid-template-rows: 58px minmax(340px, 1fr) minmax(250px, 30vh);
   gap: 14px;
   padding: 14px;
 }
@@ -133,7 +90,7 @@ body:not(.has-bg) .scrim { display: none; }
 /* 导航岛例外：它的 tooltip 要飘到岛外（§2.3 图标导航必须有悬浮标签） */
 .island--nav { grid-area: 2 / 1 / 3 / 2; align-self: start; height: 268px; overflow: visible; }
 .stage       { grid-area: 2 / 2 / 3 / 3; }
-.island--inspector { grid-area: 2 / 3 / 3 / 4; min-height: 356px; }
+.island--inspector { grid-area: 2 / 3 / 3 / 4; min-height: 340px; }
 .island--data { grid-area: 3 / 1 / 4 / 4; }
 
 /* 密集模式（§2.5）：数据岛向上吃掉留白区与检查栏，表格可见 15 行。
@@ -173,7 +130,11 @@ body:not(.has-bg) .scrim { display: none; }
   border-radius: var(--r-island);
   background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   backdrop-filter: blur(var(--blur));
-  box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28);
+  /* 只保留一层向下的投影当层次。原来还叠了 `0 0 24px var(--glow-warm)` 的同色外
+     发光：那圈光没有光源可依，在暗底上只是把岛屿边缘泛成一团橙雾，观感廉价，
+     而且四岛间距只有 14px，相邻两岛的光互相糊在一起，反倒吃掉了「各自是一块
+     独立岛屿」的边界。层次感由投影 + --edge 亮边负责，够了。 */
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
 /* 无底图时岛屿转不透明并关掉模糊：背后没有画面可采样，模糊只是白耗 GPU（§2.8）。 */
@@ -181,14 +142,6 @@ body:not(.has-bg) .island {
   background: var(--surface);
   backdrop-filter: none;
 }
-
-/* 唯一一处装饰性动效：从静默跨到有流量的那一刻涨一次发光再落回。
-   只在跨过边界时触发，不跟每帧数据（§3.6）。 */
-@keyframes island-glow {
-  0%, 100% { box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28); }
-  45%      { box-shadow: 0 0 30px var(--glow-pulse), 0 6px 20px rgba(0, 0, 0, 0.28); }
-}
-.island.is-waking { animation: island-glow 300ms var(--ease); }
 
 /* ---------- 通用文字与数字 ---------- */
 
@@ -198,6 +151,13 @@ body:not(.has-bg) .island {
 .muted { color: var(--text-muted); }
 .unit { font-size: 75%; opacity: 0.75; margin-left: 2px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 列内分组间距。.col / .form 的 gap 是 10px，一档新分组（小标题或它下面的动作行）
+   需要比同组内的行距再开一点，否则「语义色 / 主题列表」这类小标题会读作上一组的尾行。 */
+.is-spaced { margin-top: 6px; }
+/* 沉到列底：列是 flex-direction:column，auto 上边距吃掉全部剩余高度。
+   用在「还原默认」这类收尾动作上 —— 它不该跟在列表下面浮着。 */
+.is-bottom { margin-top: auto; }
 
 /* 焦点环统一。键盘要能走完整个界面，不许 outline:none 而不给替代（§3.5）。 */
 :focus-visible {
@@ -284,9 +244,32 @@ body:not(.has-bg) .island {
   align-items: baseline;
   gap: 8px;
   white-space: nowrap;
+  /* 可点（跳历史屏）：按钮化但外观不变，hover 用「标签变亮 + 箭头浮现」表达可进 */
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
-.today-label { font-size: 13px; color: var(--text-muted); }
+.today-label { font-size: 13px; color: var(--text-muted); transition: color var(--t-fast) var(--ease); }
+.today:hover .today-label { color: var(--text); }
+.today:focus-visible { outline: 2px solid var(--down); outline-offset: 2px; }
 .today-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; }
+.today-go {
+  width: 12px;
+  height: 12px;
+  align-self: center;
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.today:hover .today-go { opacity: 1; transform: none; }
+
+/* 即时速率组与累计组（今日合计）之间的分组分界 */
+.topbar-sep { width: 1px; height: 22px; background: var(--line); flex: none; }
 
 /* ---------- 控件：胶囊档位组 / 搜索 / 图标钮（§3.5）---------- */
 
@@ -478,11 +461,13 @@ body:not(.has-bg) .island {
 .nav-item:hover::after { opacity: 1; }
 
 /* ---------- 留白区（§2.1）---------- */
-/* 底图的地盘，不放任何 UI。唯一例外：没有底图时这里没有画面可保护（§2.8）。 */
+/* 底图的地盘，不放任何 UI —— 无底图态也不放。原「选择背景图」引导块已于
+   2026-09-12 评估移除：「不设背景图」是正当稳态，常驻推广位违背本区原则，
+   且外观屏已有完整入口；发现性由外观屏承担，这里不再重复推销。 */
 
 .stage { position: relative; }
 
-/* 无底图态（§2.8，也是「留白区不放 UI」唯一的例外）。
+/* 无底图态。
    这一态过去是纯 --bg 上摆一句灰字加一个次要按钮：四块岛屿浮在一片死黑上，
    浮岛构图的前提（岛下面有东西）直接没了，中间那片留白也就从「给底图的地盘」
    变成了「没做完的地方」。所以无底图时窗口自己画一层底：同色系的暗场，
@@ -495,33 +480,6 @@ body:not(.has-bg) .backdrop {
   background-size: auto;
 }
 
-.stage-empty {
-  display: none;
-  height: 100%;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  text-align: center;
-  padding: 0 24px;
-}
-body:not(.has-bg) .stage-empty { display: flex; }
-
-/* 这一句是邀请，不是故障播报：主文字色、17px，和检查栏应用名同一档（§3.3），
-   下面一行才用次要色补「不设也能用」。原来整块都是 13px 次要灰，读起来像报错。 */
-.stage-empty-title {
-  color: var(--text);
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-.stage-empty-note {
-  max-width: 34ch;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
-  text-wrap: pretty;
-}
 
 /* ---------- 检查栏岛（§2.4）---------- */
 
@@ -535,6 +493,9 @@ body:not(.has-bg) .stage-empty { display: flex; }
 .insp-sec { padding: 8px 0; }
 .insp-sec + .insp-sec { border-top: 1px solid var(--line); }
 .insp-sec:first-child { padding-top: 0; }
+/* 吃掉检查栏剩余高度的那一段（历史屏的应用排行）。min-height:0 是必需的：
+   不给它，内部 overflow-y 的排行榜会被自己的内容顶高，把整段推出岛外。 */
+.insp-sec.is-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 .insp-head { display: flex; gap: 12px; align-items: flex-start; }
 .insp-icon {
@@ -567,10 +528,12 @@ body:not(.has-bg) .stage-empty { display: flex; }
 }
 .insp-meta { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
-/* 累计段必须是两行：下载和上传各自多少，这才是累计存在的理由（§2.4）。 */
+/* 累计段必须是两行：下载和上传各自多少，这才是累计存在的理由（§2.4）。
+   数字 16px/600 撑主体，单位降到 11px 灰 —— 单位同大同时两个量级值长得一样重。 */
 .insp-totals { display: flex; flex-direction: column; gap: 6px; }
 .insp-total-row { display: flex; align-items: baseline; gap: 8px; }
-.insp-total-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15px; }
+.insp-total-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+.insp-total-value .u { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 2px; }
 .insp-total-label { font-size: 11px; color: var(--text-muted); }
 
 /* 图表段：标题行 + 图。380px 宽的检查栏里两段图 + 头部 + 合计要挤在 356px 内，
@@ -667,6 +630,8 @@ body:not(.has-bg) .stage-empty { display: flex; }
 .vrule { background: var(--line); }
 
 .bandwidth { display: flex; flex-direction: column; min-width: 0; }
+/* 进程列（原是 HTML 内联样式，收进令牌体系）：min-width:0 是表格能收缩的前提 */
+.proc { display: flex; flex-direction: column; min-width: 0; }
 .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i {
@@ -711,11 +676,34 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 .proc-table thead th.is-num { text-align: right; }
 .proc-table thead th:hover { color: var(--text); }
 .proc-table thead th.is-sorted { color: var(--down); }
-.sort-mark { font-size: 9px; margin-left: 3px; }
+.sort-mark { font-size: 9px; margin-left: 3px; display: inline-flex; align-items: center; }
 
+/* 统一图标组件（common.js icon() 生成的 .ic）在各落点的尺寸基线。
+   24 基准的线性图标缩到所在文字档，vertical-align 手调到视觉居中；
+   颜色一律 currentColor，主题切换自动跟随。 */
+.proc-table thead th .ic { width: 12px; height: 12px; vertical-align: -2px; }
+.legend .ic { width: 10px; height: 10px; }
+.sec-aside .ic { width: 11px; height: 11px; vertical-align: -1px; margin-right: 2px; }
+.sort-mark .ic { width: 10px; height: 10px; }
+.swatch .ic { width: 11px; height: 11px; vertical-align: -1px; color: var(--text-muted); }
+
+/* 列宽。原来写在 colgroup 的内联 style 里，窄窗口断点降不了档 —— 940px 下
+   四个固定列吃掉 494px，表格区只剩 ~500px，「应用」列被压到几十像素读不出名字。
+   类化后窄断点把对端/下载/上传各让一档，应用列保住三位数宽度。 */
+.col-peer { width: 170px; }
+.col-pid { width: 80px; }
+.col-down, .col-up { width: 122px; }
+
+/* 占比不占列宽：整行背景一条从左起的极淡渐变（§2.5）。渐变写在这里而不是由 JS
+   拼字符串，颜色才跟着主题的 --down 走 —— 原来 main.js 里拼的是写死的琥珀
+   rgba(240,145,63,...)，换成浅色或高对比主题后这条占比条还是旧的橙。
+   JS 只写 --share 一个百分比。--share 缺省 0% 时两个色标重合在 0，整条不可见。 */
 .proc-table tbody tr {
   height: 36px;
   background-color: transparent;
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--down) var(--share-tint), transparent),
+    transparent var(--share, 0%));
   background-repeat: no-repeat;
   transition: background-color var(--t-fast) var(--ease);
   cursor: pointer;
@@ -751,6 +739,7 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--stroke);
 }
 .cell-name > span { overflow: hidden; text-overflow: ellipsis; }
 .count-suffix { color: var(--text-muted); font-family: var(--font-num); font-size: 12px; }
@@ -924,9 +913,10 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   height: 32px;
   padding: 0 8px;
   border-radius: var(--r-ctl);
+  /* 与进程表行同一条占比条，共用 --share / --share-tint */
   background-image: linear-gradient(90deg,
-    color-mix(in srgb, var(--down) 9%, transparent),
-    transparent var(--rank-share, 0%));
+    color-mix(in srgb, var(--down) var(--share-tint), transparent),
+    transparent var(--share, 0%));
   background-repeat: no-repeat;
   font-size: 13px;
 }
@@ -941,9 +931,11 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--stroke);
 }
 .rank-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rank-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--down); }
+.rank-value { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--down); }
+.rank-value .u { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 1px; }
 
 /* 区间合计：三个 20px 数字并排一行（§2.6）。竖排三行要多花 50px，
    排行榜就只剩 3 行的位置了 —— 检查栏 324px 的净高放不下「三行合计 + 8×32 排行」。
@@ -966,6 +958,8 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   padding: 16px;
+  /* 设置屏的保存回执绝对定位在右上角 */
+  position: relative;
 }
 .col {
   min-width: 0;
@@ -977,11 +971,19 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .col-title { font-size: 14px; }
 
+/* AI 提供方表单（原是 HTML 内联样式，收进令牌体系；与 .form 同一节奏） */
+.ai-fields { display: flex; flex-direction: column; gap: 10px; }
+
 .form { display: flex; flex-direction: column; gap: 10px; padding: 16px; height: 100%; overflow-y: auto; }
 .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-muted); }
+
+/* 文本输入与下拉是同一族控件。.text-input 给不带文字标签、直接躺在 flex 行里的
+   那一类（主题命名框）：外观必须和 .field 里的输入一致，所以并进同一条规则，
+   只多一句 flex 让它吃掉行内剩余宽度。 */
 .field > input[type="text"],
 .field > input[type="password"],
-.field > select {
+.field > select,
+.text-input {
   height: 30px;
   padding: 0 10px;
   border-radius: var(--r-ctl);
@@ -993,8 +995,9 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   -webkit-user-select: text;
   user-select: text;
 }
-.field > input:hover, .field > select:hover { border-color: rgba(255, 255, 255, 0.26); }
-.field > input:focus, .field > select:focus { border-color: var(--down); outline: none; }
+.text-input { flex: 1; min-width: 0; }
+.field > input:hover, .field > select:hover, .text-input:hover { border-color: rgba(255, 255, 255, 0.26); }
+.field > input:focus, .field > select:focus, .text-input:focus { border-color: var(--down); outline: none; }
 .field > select option { background: var(--surface); color: var(--text); }
 
 .check { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; }
@@ -1026,6 +1029,7 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   transition: transform var(--t-fast) var(--ease);
 }
 .slider input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.1); }
+.slider input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.18); }
 
 /* 背景图缩略图 */
 .bg-thumb {
@@ -1090,10 +1094,30 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 }
 .theme-item.is-active .tag { background: color-mix(in srgb, var(--surface-hi) 80%, #000); }
 .row-actions { display: flex; gap: 8px; }
+/* 行内操作钮用全局 .icon-btn 的交互态，但尺寸收到行高档：
+   32px 的窗口钮缩进 32px 高的主题行里会把行撑爆 */
+.row-actions .icon-btn { width: 22px; height: 22px; }
+.row-actions .icon-btn svg { width: 13px; height: 13px; }
 
 /* 破坏性动作原地二次确认，不弹模态框（§2.7 / §3.7 #8） */
 .confirm-inline { display: flex; gap: 8px; align-items: center; }
 .confirm-inline .btn.is-danger { border-color: var(--error); color: var(--error); }
+
+/* 自动保存回执（设置屏右上角，2 秒淡出）。只认 status 角色，不抢焦点。 */
+.save-hint {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  z-index: var(--z-grip);
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--t-mid) var(--ease), transform var(--t-mid) var(--ease);
+  pointer-events: none;
+}
+.save-hint.is-show { opacity: 1; transform: none; }
+.save-hint .ic { width: 11px; height: 11px; vertical-align: -1px; color: var(--ok); margin-right: 2px; }
 
 /* ---------- 无边框窗口的自绘拖动与缩放 ---------- */
 
@@ -1124,19 +1148,34 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
     animation-duration: 0ms !important;
     animation-iteration-count: 1 !important;
   }
-  .island.is-waking { animation: none; }
 }
 
 /* ---------- 窄窗口降级：结构性折叠，不做流体字号（product register）---------- */
 
+/* 顶栏左组是 nowrap 的，总宽超出窗口时会被岛沿直接裁掉。按信息优先级降档：
+   搜索先让位（≤1120），今日合计其次 —— 它有替代路径（点导航去历史屏 / 密集模式），
+   窗口按钮和状态胶囊任何宽度都保留。 */
+@media (max-width: 1120px) {
+  .topbar-sep, .today { display: none; }
+  .topbar-left { gap: 14px; }
+  .search { flex-basis: 150px; }
+}
+
 @media (max-width: 1080px) {
   .shell { grid-template-columns: 64px minmax(0, 1fr) 340px; }
   .data-live { grid-template-columns: 340px 1px minmax(0, 1fr); }
+  .col-peer { width: 130px; }
+  .col-down, .col-up { width: 104px; }
 }
 @media (max-width: 980px) {
   .shell { grid-template-columns: 64px 0 minmax(0, 1fr); }
   .stage { display: none; }
   .data-live { grid-template-columns: 300px 1px minmax(0, 1fr); }
   .topbar-left { gap: 12px; }
-  .search { width: 180px; }
+  /* flex-basis 决定主轴尺寸，width 会被 flex:0 1 240px 的 basis 压掉 ——
+     原来这条写的是 width:180px，实际从未生效过。132 是占位符可读的下限。 */
+  .search { flex-basis: 132px; }
+  .col-peer { width: 118px; }
+  .col-pid { width: 64px; }
+  .col-down, .col-up { width: 96px; }
 }

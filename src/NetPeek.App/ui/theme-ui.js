@@ -227,6 +227,8 @@
 
   function renderThemeList() {
     const frag = document.createDocumentFragment();
+    // 操作钮图标走统一组件（原先是 ✓ ✎ 🗑 三个 emoji，跨主题观感不可控）
+    const { icon } = window.NetPeekCommon;
     for (const name of Object.keys(state.themes || {})) {
       const th = state.themes[name];
       const item = document.createElement('div');
@@ -235,9 +237,9 @@
         <span class="name">${escapeHtml(name)}</span>
         <span class="tag">${TAGS[th.source] || '定制'}</span>
         <span class="row-actions">
-          <button type="button" class="icon-btn" data-act="use" title="应用">✓</button>
-          <button type="button" class="icon-btn" data-act="rename" title="重命名">✎</button>
-          <button type="button" class="icon-btn" data-act="delete" title="删除">🗑</button>
+          <button type="button" class="icon-btn" data-act="use" title="应用" aria-label="应用主题">${icon('check')}</button>
+          <button type="button" class="icon-btn" data-act="rename" title="重命名" aria-label="重命名主题">${icon('pencil')}</button>
+          <button type="button" class="icon-btn" data-act="delete" title="删除" aria-label="删除主题">${icon('trash')}</button>
         </span>`;
       item.querySelector('[data-act="use"]').addEventListener('click', () => useTheme(name));
       item.querySelector('[data-act="rename"]').addEventListener('click', () => renameTheme(name));
@@ -422,9 +424,6 @@
   // ---------- 启动 ----------
 
   window.NetPeekThemeUI = {
-    // 留白区的「选择背景图」按钮直接借这条路径，不重复实现一遍取图
-    pickBackground() { els.bgFile.click(); },
-
     async init() {
       const boot = await T.initTheme();
       state = boot.state;

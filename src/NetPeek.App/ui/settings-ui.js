@@ -75,9 +75,22 @@
   async function save() {
     try {
       await invoke('save_settings', { json: JSON.stringify(state) });
+      flashSaved();
     } catch {
       localStorage.setItem(LS_KEY, JSON.stringify(state));
     }
+  }
+
+  // 保存回执：设置全是防抖自动写盘、没有「保存」按钮，用户改完唯一的问题就是
+  // 「存住了吗」。一个 2 秒淡出的 status（aria-live=polite，不抢焦点）回答它。
+  let saveHintTimer = null;
+  function flashSaved() {
+    const el = $('saveHint');
+    if (!el) return;
+    el.innerHTML = window.NetPeekCommon.icon('check') + '已自动保存';
+    el.classList.add('is-show');
+    clearTimeout(saveHintTimer);
+    saveHintTimer = setTimeout(() => el.classList.remove('is-show'), 2000);
   }
 
   // 写盘防抖：save_settings 每次都要重写 settings.json，并按 autostart 起一次 reg 子进程。

@@ -4,23 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPeek 小窗</title>
+  <!-- 令牌先加载：mini.css 里的规则全部读它，顺序反了首帧就是一片无色。 -->
+  <link rel="stylesheet" href="tokens.css" />
   <link rel="stylesheet" href="mini.css" />
 </head>
 <body>
   <!-- 能量球形态（默认，窗口 108×108，球 92×92，四周 8px 留给外发光） -->
   <!-- 不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
        球点不开。拖动由 mini.js 的位移阈值 + startDragging() 自己处理。 -->
-  <div id="orb" class="orb" title="NetPeek">
-    <!-- 能量光效三层（都在环形规和数字下面）：halo = 贴球缘的光环 + 随负载增强的
-         外发光，core = 球心的径向光斑，sheen = 缓慢旋转的高光叶。
-         强度统一由 JS 设在 .orb 上的 --e（0..1，当前速率 ÷ 60 秒峰值）驱动，
-         CSS 只负责「这个强度长什么样」，过渡全走 opacity/transform 保合成器。 -->
-    <div class="orb-halo" aria-hidden="true"></div>
-    <div class="orb-core" aria-hidden="true"></div>
-    <div class="orb-sheen" aria-hidden="true"></div>
-    <!-- 粒子层：canvas 轨道粒子（移植自 MIT 的 santscoder-labs/project-13-energy-ball，
-         按 92px 球与能量强度 --e 重新参数化）。放在光效层之上、环形规之下。 -->
-    <canvas id="orbFx" class="orb-fx" aria-hidden="true"></canvas>
+  <div id="orb" class="orb" title="NetPeek" role="button" tabindex="0"
+       aria-label="NetPeek：点击展开迷你窗">
     <!-- 环形规：外圈 4px 琥珀 = 下载速率 ÷ 近 60 秒峰值，内圈 2px 钢蓝 = 上传（§2.9）。
          轨道垫在下面，没有轨道就只剩一段孤立弧线，读不出「相对水位」。 -->
     <svg class="orb-gauge" viewBox="0 0 92 92" aria-hidden="true">
@@ -36,7 +29,7 @@
     </svg>
     <div class="orb-nums">
       <div class="orb-down"><span class="v" id="orbDownV">--</span><span class="u" id="orbDownU"></span></div>
-      <div class="orb-up"><span class="a">↑</span><span class="v" id="orbUpV">--</span><span class="u" id="orbUpU"></span></div>
+      <div class="orb-up"><svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg><span class="v" id="orbUpV">--</span><span class="u" id="orbUpU"></span></div>
     </div>
   </div>
 
@@ -65,8 +58,8 @@
     </div>
 
     <div class="panel-total">
-      <span class="pt is-down"><i class="a">↓</i><b class="v" id="ptDownV">--</b><i class="u" id="ptDownU"></i></span>
-      <span class="pt is-up"><i class="a">↑</i><b class="v" id="ptUpV">--</b><i class="u" id="ptUpU"></i></span>
+      <span class="pt is-down"><svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg><b class="v" id="ptDownV">--</b><i class="u" id="ptDownU"></i></span>
+      <span class="pt is-up"><svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg><b class="v" id="ptUpV">--</b><i class="u" id="ptUpU"></i></span>
     </div>
 
     <div class="panel-list" id="panelList"></div>

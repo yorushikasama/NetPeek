@@ -184,6 +184,9 @@
       xLabels: [buckets[0].label, buckets[buckets.length - 1].label],
       tickLabels: tickLabels(),
       selectedIndex: selected,
+      // 悬停小卡：两个系列的名称；周聚合时标题标「当周」，周合计不被读成单日
+      seriesNames: ['下载', '上传'],
+      tipTitle: (b) => (b.days.length > 1 ? `${b.label} 当周` : b.label),
     });
   }
 
@@ -246,6 +249,15 @@
     );
   }
 
+  // 排行数值：数字主体 + 小一号灰单位，与进程表速率列同一规则 ——
+  // 整串同大同色时，一列「830.9 MB / 130.0 MB」读起来是八段等重的字符串。
+  function valueHtml(bytes) {
+    const s = fmt(bytes);
+    const i = s.lastIndexOf(' ');
+    if (i < 0) return escapeHtml(s);
+    return `${escapeHtml(s.slice(0, i))}<span class="u">${escapeHtml(s.slice(i + 1))}</span>`;
+  }
+
   function renderRank(list, peak) {
     if (!list.length) {
       els.rank.replaceChildren(Object.assign(document.createElement('div'), {
@@ -261,7 +273,7 @@
       const row = document.createElement('div');
       row.className = 'rank-row';
       const share = peak > 0 ? Math.round((app.down / peak) * 100) : 0;
-      row.style.setProperty('--rank-share', `${share}%`);
+      row.style.setProperty('--share', `${share}%`);
       const icon = iconFor(app.name);
       const name = app.name || unattrName();
       row.innerHTML = `
@@ -269,7 +281,7 @@
           ? `<img class="rank-icon" src="${icon}" alt="" />`
           : `<span class="rank-icon is-placeholder">${escapeHtml(initial(app.name))}</span>`}
         <span class="rank-name">${escapeHtml(name)}</span>
-        <span class="rank-value">${fmt(app.down)}</span>`;
+        <span class="rank-value">${valueHtml(app.down)}</span>`;
       frag.appendChild(row);
     }
     els.rank.replaceChildren(frag);

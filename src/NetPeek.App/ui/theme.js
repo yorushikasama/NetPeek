@@ -328,11 +328,10 @@ function applyTheme(theme, opts = {}) {
   root.style.setProperty('--line', `rgba(${tint},0.10)`);
   root.style.setProperty('--stroke', `rgba(${tint},0.18)`);
 
-  // 暖色亮边 + 同色外发光是这一版的核心材质，取语义下载色（§3.4）。
+  // 暖色亮边取语义下载色（§3.4）。同色外发光已去掉：那圈光没有光源可依，
+  // 在暗底上只是把边缘泛成一团橙雾，层次交给投影与这条亮边。
   const d = hexToRgb(t.down);
   root.style.setProperty('--edge', `rgba(${d.r},${d.g},${d.b},0.26)`);
-  root.style.setProperty('--glow-warm', `rgba(${d.r},${d.g},${d.b},0.10)`);
-  root.style.setProperty('--glow-pulse', `rgba(${d.r},${d.g},${d.b},0.18)`);
 
   // 三个范围由令牌算出来，不留不可读的余地：0.82 是上传蓝在底图最亮处仍过 4.5:1 的下限（§3.2）。
   root.style.setProperty('--island-op', String(clamp(panelOpacity ?? 0.88, 0.82, 1)));

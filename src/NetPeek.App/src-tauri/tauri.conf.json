@@ -17,7 +17,8 @@
         "minWidth": 940,
         "minHeight": 620,
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "shadow": false
       },
       {
         "label": "mini",

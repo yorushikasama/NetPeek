@@ -1,47 +1,22 @@
 /* NetPeek 小窗样式（§2.9）：能量球（窗口 108×108，球 92×92）与迷你窗
-   （窗口 344×324，面板本体 320×300，四周各 12px 留给外发光与投影）双形态。
+   （窗口 344×324，面板本体 320×300，四周各 12px 留给投影）双形态。
    窗口 transparent: true，body 无底色，只有形态元素有背景。
 
-   **透明窗口的第一条纪律：所有发光都必须收在窗口内。** 窗口边界是硬的，
-   超出它的光一律被裁成直线；而圆形的光被方形窗口裁出来，就是四个角什么
-   都没有、四条边中段各一条亮线 —— 那正是「球外面套了个方框」的观感。
-   球形态的预算：窗口半宽 54 = 球半径 46 + 8，所有光的最远半径必须 ≤ 54。
-   面板形态的预算：面板外沿到窗口边 12px，两层 box-shadow 的扩散之和要 ≤ 12。
+   **不用外发光。** 自发光在桌面上只会糊出一团橙雾，观感廉价；而且透明窗口的
+   边界是硬的，超出去的光一律被裁成直线，圆形的光被方窗裁完就是四条边各一道
+   亮线、四个角什么都没有。层次感一律交给投影（面板）和球面明暗（球）。
+   面板形态的预算：面板外沿到窗口边 12px，投影的偏移 + 扩散之和要 ≤ 12。
 
-   三条和主界面不同的规定：
+   令牌统一在 tokens.css 里声明，mini.html 在本文件之前加载它。小窗是独立 webview，
+   主界面写在自己 documentElement 上的变量不会继承过来，所以 tokens.css 的默认值
+   在这里既是首帧兜底、也是非主题项（字族、圆角、动效）的唯一来源；mini.js 启动时
+   再读一遍主题配置覆盖颜色，那一步是异步的，第一帧必须能看。
+
+   两条和主界面不同的规定：
    - 不做 backdrop-filter。透明窗口后面没有网页内容可采样，Windows 上这一项在透明窗口里
-     行为不一致（有时糊成灰块、有时完全无效），靠 0.88 的底色 + 外发光已经够。
-   - 令牌在这里自带一整套默认值。小窗是独立 webview，主界面 setTheme 设在
-     documentElement 上的变量不会继承过来；mini.js 启动时自己读一遍主题配置覆盖颜色，
-     但那是异步的，第一帧必须能看。
-   - 字体与圆角不是主题项（applyTheme 只改颜色和三个调节量），所以只在这里定义一次，
-     值与 styles.css 保持一致 —— 两个窗口的数字必须是同一套字身宽度。 */
-
-:root {
-  --surface: #1e1a16;
-  --surface-hi: #2f2924;
-  --text: #f6efe8;
-  --text-muted: #b4a99e;
-  --down: #f0913f;
-  --up: #7fa8c9;
-  --ok: #6fc884;
-  --warn: #ebbd57;
-  --error: #f97770;
-  --line: rgba(255, 255, 255, 0.10);
-  --stroke: rgba(255, 255, 255, 0.18);
-  --edge: rgba(240, 145, 63, 0.26);
-  --glow-warm: rgba(240, 145, 63, 0.10);
-  --island-op: 0.88;
-
-  --r-island: 16px;
-  --r-ctl: 8px;
-
-  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
-  --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
-
-  --t-fast: 150ms;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-}
+     行为不一致（有时糊成灰块、有时完全无效），靠 0.88 的底色已经够。
+   - 按钮与滚动条比主界面小一档（.btn 28/12 对 30/13、.icon-btn 28 对 32、滚动条 6 对 8）：
+     这里的头部只有 40px、脚只有 44px，主界面那一档塞不下。是适配，不是重复声明。 */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -63,10 +38,8 @@ html, body {
 
 .orb {
   position: absolute;
-  /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口半宽 54 = 球半径 46 + 8，
-     凡是半径超过 54 的光都会被窗口边缘硬裁成直线 —— 实测原来 halo 的光
-     一直扩散到 70px，于是在窗口四边中段留下一条琥珀直边、四角却什么都没有，
-     读起来就是「球外面套了个方框」。这里所有光都必须收在 54 以内。 */
+  /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口 108×108 由 mini.rs 的 ORB_W/H
+     写定，改球径要连那两个常量一起改，否则球不再居中。 */
   width: 92px;
   height: 92px;
   left: 50%;
@@ -75,12 +48,19 @@ html, body {
   border-radius: 50%;
   background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   border: 1px solid var(--edge);
-  /* 外发光从 20px 收到 6px：46 + 6 = 52 < 54，留在窗口内。大范围光晕交给
-     .orb-halo 的径向渐变（最远 51px），球自己只补一圈贴边辉光。 */
-  box-shadow: 0 0 6px var(--glow-warm);
+  /* 不加外发光。球是一颗有体积的实体，体积感由下面 ::before 的球面明暗负责；
+     再往外撒一圈同色辉光只会在桌面上糊出一团橙雾，而且透明窗口的边界是硬的，
+     圆形的光被方窗裁完就是四边各一条亮线。 */
   cursor: grab;
+  /* hover 微抬：cursor:grab 只说得出「可拖」，说不出「可点开」。
+     1.04 够感知、不越界（95.7 < 108 窗口，发光预算不受影响）。
+     只动 transform，reduced-motion 由全局媒体查询关掉。 */
+  transition: transform var(--t-fast) var(--ease);
 }
-.orb:active { cursor: grabbing; }
+.orb:hover { transform: translate(-50%, -50%) scale(1.04); }
+.orb:active { transform: translate(-50%, -50%) scale(0.98); cursor: grabbing; }
+/* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪 */
+.orb:focus-visible { outline: 2px solid var(--down); outline-offset: 3px; }
 
 /* ---------- 球面光照（3D 材质，与流量无关） ----------
    原来球是「一块纯色圆盘 + 向外的光」，没有任何球面明暗，所以读作平面。
@@ -112,11 +92,9 @@ html, body {
   opacity: var(--island-op);
 }
 
-/* 镜面高光：受光方向上一个锐利的小亮点。和 .orb-sheen 分工不同 ——
-   sheen 是绕球转的高光叶（装饰性运动，能量语言），这个是球面反射，
-   位置固定不动（材质语言）；静默时 sheen 熄了它还在，球才不是一块死盘。
-   刻意做小做陡（核心 66% 白、28% 处就衰减到 26%、62% 归零）：
-   大面积柔光会读成「塑料按钮」，球面反射本来就是一个小而亮的点。 */
+/* 镜面高光：受光方向上一个锐利的小亮点，位置固定不动 —— 它是球面反射，
+   属于材质，不随流量变化。刻意做小做陡（核心 66% 白、28% 处就衰减到 26%、
+   62% 归零）：大面积柔光会读成「塑料按钮」，球面反射本来就是一个小而亮的点。 */
 .orb::after {
   content: '';
   position: absolute;
@@ -133,107 +111,14 @@ html, body {
   opacity: calc(var(--island-op) * 0.85);
 }
 
-/* ---------- 能量光效（强度全部由 --e 驱动，0 = 静默，1 = 满载） ----------
-   JS 每帧把「当前速率 ÷ 近 60 秒峰值」写进 .orb 的 --e；这里用 calc(var(--e))
-   换算各层透明度，1Hz 的阶跃输入经 700ms 过渡变成连续的呼吸。颜色一律
-   color-mix 出自 --down / --up，主题换色时光效跟着走，不写死琥珀。
-
-   分层（DOM 顺序 = 叠放顺序，全部 pointer-events:none）：
-   halo  球缘光环 + 随负载增强的外发光 —— 能量「盛在球里」的轮廓感
-   core  球心光斑 —— 有流量时核心亮起来，像里面真的有东西在烧
-   sheen 旋转高光叶 —— 静默时唯一的动的东西，球永远是活的 */
-.orb-halo {
-  position: absolute;
-  /* 球 92 居中，窗口半宽 54；halo 外扩 5px → 半径 51，是球形态里唯一
-     能把光铺开的一层（离窗口边还留 3px），大范围光晕由它承担。 */
-  inset: -5px;
-  border-radius: 50%;
-  pointer-events: none;
-  /* 最外一档必须归零：原来 100% 处还留着 10% 琥珀，halo 在 51px 半径上
-     戛然而止，本身就是一圈硬边（再叠加窗口裁切就是双层硬边）。现在峰值挪到
-     88%、100% 平滑收到 0，光晕在窗口内自然淡出，边缘看不出截断。 */
-  background: radial-gradient(circle,
-    transparent 54%,
-    color-mix(in srgb, var(--down) 6%, transparent) 70%,
-    color-mix(in srgb, var(--down) 34%, transparent) 88%,
-    color-mix(in srgb, var(--down) 14%, transparent) 95%,
-    transparent 100%);
-  opacity: calc(0.30 + var(--e, 0) * 0.70);
-  transition: opacity 700ms var(--ease);
-  /* 静默呼吸：scale 动画不占用 opacity（opacity 归强度管），合成器直出，零重绘 */
-  animation: orb-breathe 3.6s ease-in-out infinite;
-}
-/* 满载时球缘的亮环。原来是向外的 box-shadow(0 0 16px 3px)：半径扩散到
-   halo 的 51 + spread 3 + blur 16 = 70，比窗口半宽 54 还大 16px —— 正是
-   「球周围那圈方框」的主犯。改成 inset 之后光往球内走，最大半径就是 halo
-   自己的 51，永远在窗口内；观感从「往外冒的光」变成「球缘内侧的亮环」，
-   和「能量盛在球里」的语义也更贴。 */
-.orb-halo::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  box-shadow: inset 0 0 12px 1px color-mix(in srgb, var(--down) 60%, transparent);
-  opacity: calc(var(--e, 0) * 0.8);
-  transition: opacity 700ms var(--ease);
-}
-.orb-core {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  pointer-events: none;
-  background: radial-gradient(circle at 50% 38%,
-    color-mix(in srgb, var(--down) 46%, transparent) 0%,
-    color-mix(in srgb, var(--down) 16%, transparent) 32%,
-    color-mix(in srgb, var(--down) 5%, transparent) 54%,
-    transparent 68%);
-  opacity: calc(0.16 + var(--e, 0) * 0.70);
-  transition: opacity 700ms var(--ease);
-}
-.orb-sheen {
-  position: absolute;
-  /* 缩进 2px：不盖住球的 1px 边框 */
-  inset: 2px;
-  border-radius: 50%;
-  pointer-events: none;
-  /* 一叶 30° 的高光绕球转，其余全透明 —— background 被 border-radius 裁进圆里 */
-  background: conic-gradient(from 0deg,
-    transparent 0deg,
-    color-mix(in srgb, var(--down) 26%, transparent) 30deg,
-    transparent 62deg);
-  opacity: calc(0.12 + var(--e, 0) * 0.26);
-  transition: opacity 700ms var(--ease);
-  animation: orb-spin 7s linear infinite;
-}
-@keyframes orb-breathe {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.045); }
-}
-@keyframes orb-spin { to { transform: rotate(360deg); } }
-
-/* 粒子层（canvas）：绕核流转的光点，透明底只露粒子本身 */
-.orb-fx {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-/* 暂停（§2.8 画面定格）：强度停在最后一帧（JS 不再更新 --e），动效放慢一档，
-   读作「能量还在、被按住了」，而不是死机。 */
-.orb.is-paused .orb-halo { animation-duration: 6.5s; }
-.orb.is-paused .orb-sheen { animation-duration: 13s; }
-
-/* 断连：没有数据就没有能量 —— 光叶和呼吸全停，只留一圈暗淡的轮廓 */
-.orb.is-offline .orb-halo { animation: none; opacity: 0.22; }
-.orb.is-offline .orb-halo::after { opacity: 0; }
-.orb.is-offline .orb-sheen { animation: none; opacity: 0; }
-
-/* 系统级减动效：光叶和呼吸都算装饰性运动，直接停掉，强度照常跟随流量 */
-@media (prefers-reduced-motion: reduce) {
-  .orb-halo, .orb-sheen { animation: none; }
-}
+/* 原来这里有一整套「能量光效」：绕球外扩的 halo 光晕、球心随负载点亮的 core
+   光斑、绕球旋转的 sheen 高光叶，外加一层 canvas 发光粒子，强度统一由 --e
+   （当前速率 ÷ 近 60 秒峰值）驱动。全部删掉了 —— 那套东西是在一个 92px 的球上
+   叠四层半透明橙光，实际观感是一团糊在桌面上的橙雾，廉价且盖住了球上唯一真正
+   要读的东西（速率数字和两圈环形规）。
+   现在球的层次只由三样东西给：::before 的球面明暗（材质，与流量无关）、
+   ::after 的镜面高光（固定不动）、以及环形规本身。速率高低看环的水位和数字，
+   不靠亮度猜 —— 那本来也是环形规存在的理由。 */
 
 /* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开） */
 .orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -241,16 +126,11 @@ html, body {
    只有约 1.1:1，零流量时整个球读作一块空黑饼，「相对水位」的表盘感全靠轨道垫出来。
    18% 在暗底上是「看得见但不抢」的一档，与控制件描边同一档。 */
 .orb-gauge .track { stroke: var(--stroke); }
-/* 弧线带一圈同色 drop-shadow：数据弧从「画上去的线」变成「发出来的光」，
-   和下面的核/晕同一套能量语言。SVG filter 走合成器，92px 的画布开销可忽略。 */
-.orb-gauge .arc-down {
-  stroke: var(--down);
-  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--down) 75%, transparent));
-}
-.orb-gauge .arc-up {
-  stroke: var(--up);
-  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--up) 75%, transparent));
-}
+/* 弧线是实线，不带 drop-shadow 辉光。原来两条弧各挂一圈同色发光，和已删掉的
+   核/晕是同一套「能量语言」；光一去掉，剩下这两圈反而成了糊边 —— 2.5px 的辉光
+   在 4px 宽的弧上就是把线的边缘晕开，读作没对焦，而不是在发光。 */
+.orb-gauge .arc-down { stroke: var(--down); }
+.orb-gauge .arc-up { stroke: var(--up); }
 
 /* 92px 的球扣掉两圈环，中心可写字的圆直径只剩约 76px，最上面那行更窄（约 66px）。
    所以球上的下载只排「数值 + 单位」，方向靠琥珀色和下面那行的 ↑ 区分；
@@ -272,9 +152,8 @@ html, body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   line-height: 1.1;
-  /* 数值压在核心光斑上：一圈同色微光把字从光里托出来，避免亮核吃掉笔画 */
-  text-shadow: 0 0 9px color-mix(in srgb, var(--surface) 80%, transparent),
-    0 0 4px color-mix(in srgb, var(--surface) 60%, transparent);
+  /* 不再需要那两圈 --surface 微光：它是为了把数字从球心光斑里托出来才加的，
+     光斑已经删掉，球心现在就是纯底色，字直接压上去反而更利。 */
 }
 .orb-down .v { font-size: 20px; font-weight: 600; }
 .orb-down .u { font-size: 10px; font-weight: 500; margin-left: 2px; }
@@ -286,7 +165,7 @@ html, body {
   white-space: nowrap;
   line-height: 1.1;
 }
-.orb-up .a { font-family: var(--font-ui); margin-right: 2px; }
+.orb-up .a { width: 9px; height: 9px; margin-right: 2px; flex: none; }
 .orb-up .u { margin-left: 2px; }
 
 /* 暂停：环变虚线（虚线段由 mini.js 算进 stroke-dasharray）+ 数字降到 60%。
@@ -307,10 +186,9 @@ html, body {
   border: 1px solid var(--edge);
   border-radius: var(--r-island);
   overflow: hidden;
-  /* 两层扩散都收在 12px 内：外发光 12px 无偏移（正好够到窗口边），
-     投影向下 3 + blur 9 = 12（正好够到窗口下边）。窗口边缘处的强度已接近 0，
-     看不出裁断。 */
-  box-shadow: 0 0 12px var(--glow-warm), 0 3px 9px rgba(0, 0, 0, 0.30);
+  /* 只留投影：向下 3 + blur 9 = 12，正好够到窗口下边，强度在边缘已接近 0。
+     原来还叠了一层 12px 的同色外发光，那圈橙雾没有光源依据，观感廉价。 */
+  box-shadow: 0 3px 9px rgba(0, 0, 0, 0.30);
 }
 
 /* 头 40 / 总量 52 / 脚 44 定高（§2.9 分段表），列表吃掉剩下的 162。
@@ -388,7 +266,7 @@ html, body {
 /* 上传靠右：两个数都左对齐时，右边会空出 60 多像素，而下面每行的速率列都顶到右沿，
    总量带就成了一条没写完的行。下载贴左、上传贴右，和列表的两个边正好对齐。 */
 .pt.is-up { justify-content: flex-end; }
-.pt .a { font-family: var(--font-ui); font-size: 12px; font-style: normal; }
+.pt .a { width: 11px; height: 11px; flex: none; align-self: center; }
 .pt .v { font-size: 20px; font-weight: 600; }
 .pt .u { font-size: 12px; font-weight: 500; font-style: normal; }
 .pt.is-down { color: var(--down); }
@@ -414,6 +292,12 @@ html, body {
   height: 32px;
   padding: 0 6px;
   border-radius: var(--r-ctl);
+  /* 占比条：和主界面进程表 / 历史排行同一条（§2.5），渐变写在这里，
+     只有百分比由 mini.js 按数据写进 --share。原来整条渐变在 JS 里拼字符串，
+     琥珀是写死的字面量，换主题后这条一直是旧的橙色。 */
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--down) var(--share-tint), transparent),
+    transparent var(--share, 0%));
   background-repeat: no-repeat;
 }
 .pitem img { width: 18px; height: 18px; border-radius: 4px; flex: none; object-fit: contain; }
@@ -439,6 +323,7 @@ html, body {
 }
 .pitem .prate.is-down { color: var(--down); }
 .pitem .prate.is-up { color: var(--up); }
+.pitem .prate .ic { width: 10px; height: 10px; vertical-align: -1px; margin-right: 1px; }
 .panel-empty { padding: 10px 6px; font-size: 12px; color: var(--text-muted); }
 
 /* 脚 44：只剩「暂停 / 主界面」两个键。「退出」搬去托盘右键菜单 ——

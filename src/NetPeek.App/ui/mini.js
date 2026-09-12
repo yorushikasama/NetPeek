@@ -76,6 +76,7 @@
 
   // 转义统一走 common.js（U4 收敛），小窗也先加载那一份。
   const esc = window.NetPeekCommon.escapeHtml;
+  const ic = window.NetPeekCommon.icon;
 
   // 图标取不到时的首字母占位。跳过开头的非字母数字：未归因流量那类以半角括号
   // 开头的名字直接切首字符，会在徽标里画一个孤零零的括号。小窗只加载 theme.js，
@@ -144,7 +145,6 @@
     await applyShapeSize();
     els.orb.hidden = next !== 'orb';
     els.panel.hidden = next !== 'panel';
-    if (next === 'orb') Fx.wake();
   }
 
   // 首次显示时窗口尺寸会被系统的阴影 inset 撑大（实测逻辑宽 135 而非 108，
@@ -208,112 +208,6 @@
   // 最后一帧的速率与环比例。暂停后不再更新，画面停在这一帧（§2.8）。
   let last = { down: 0, up: 0, rd: 0, ru: 0 };
 
-  // 能量强度（0..1）：环形规比例的加权和，下载为主、上传添彩。
-  // 写进 .orb 的 --e，CSS 据此点亮核/晕/光叶；1Hz 的阶跃由 700ms 过渡抹平。
-  // 暂停时不更新 —— 画面定格含光效（§2.8），读作「能量被按住」而不是归零。
-  function paintEnergy() {
-    const e = Math.max(0, Math.min(1, last.rd * 0.75 + last.ru * 0.35));
-    els.orb.style.setProperty('--e', e.toFixed(3));
-    Fx.energy(e);
-  }
-
-  // ---------- 能量球粒子层 ----------
-  // 技法移植自 MIT 协议的 santscoder-labs/project-13-energy-ball（canvas 轨道粒子 +
-  // shadowBlur 发光），按 92px 球重新参数化，并接入能量强度：粒子转速、亮度、
-  // 光晕、游动幅度全部随 eSmooth 走。粒子双向旋转（正反各半），比单向公转
-  // 更像等离子体。状态机与 §2.8 对齐：live 全速动，paused 定格画布，
-  // offline 清空 —— CSS 那三层光效（halo/core/sheen）管「光」，这层管「火」。
-
-  const Fx = (() => {
-    const canvas = document.getElementById('orbFx');
-    const ctx = canvas.getContext('2d');
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-    const parts = [];
-    for (let i = 0; i < 14; i++) {
-      parts.push({
-        a: Math.random() * Math.PI * 2,
-        r: 27 + Math.random() * 12,                       // 游走在内外环之间的带里
-        sp: (0.004 + Math.random() * 0.009) * (Math.random() < 0.5 ? -1 : 1),
-        size: 0.9 + Math.random() * 1.4,
-        glow: 4 + Math.random() * 6,
-        ph: Math.random() * Math.PI * 2,
-        wob: 0.5 + Math.random() * 1.2,
-      });
-    }
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = 92 * dpr;
-    canvas.height = 92 * dpr;
-    ctx.scale(dpr, dpr);
-
-    let raf = 0;
-    let state = 'offline';      // 'live' | 'paused' | 'offline'
-    let eTarget = 0;
-    let eSmooth = 0;            // 1Hz 目标值的逐帧插值，粒子运动不跟着数据一跳一跳
-    let color = '#f0913f';
-
-    // 主题令牌 --down 是纯色串（hex），canvas 的 shadowColor/fillStyle 直接吃
-    function refreshColor() {
-      const v = getComputedStyle(document.documentElement).getPropertyValue('--down').trim();
-      if (v) color = v;
-    }
-
-    function frame(tms) {
-      raf = 0;
-      // 面板展开时球是 hidden 的，画了也看不见：空转退出，收球时 set('live') 再踢一脚
-      if (state !== 'live' || els.orb.hidden) return;
-      eSmooth += (eTarget - eSmooth) * 0.06;
-      ctx.clearRect(0, 0, 92, 92);
-      const t = tms / 1000;
-      const speedK = 0.35 + eSmooth * 2.4;
-      for (const p of parts) {
-        p.a += p.sp * speedK;
-        const r = p.r + Math.sin(t * p.wob + p.ph) * (1.5 + eSmooth * 2);
-        const x = 46 + Math.cos(p.a) * r;
-        const y = 46 + Math.sin(p.a) * r;
-        ctx.globalAlpha = 0.22 + eSmooth * 0.62;
-        ctx.shadowBlur = p.glow * (0.6 + eSmooth * 1.4);
-        ctx.shadowColor = color;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(x, y, p.size * (0.8 + eSmooth * 0.5), 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-      ctx.shadowBlur = 0;
-      if (!reduced) raf = requestAnimationFrame(frame); // reduce 时只画当前这一帧
-    }
-
-    function schedule() {
-      if (!raf) raf = requestAnimationFrame(frame);
-    }
-
-    function set(next) {
-      if (next === state) { if (next === 'live') schedule(); return; }
-      state = next;
-      if (next === 'offline') {
-        if (raf) cancelAnimationFrame(raf);
-        raf = 0;
-        eTarget = 0;
-        eSmooth = 0;
-        ctx.clearRect(0, 0, 92, 92);
-      } else if (next === 'paused') {
-        // 定格：不取消画布内容，只停循环 —— 光点冻在最后一帧
-        if (raf) cancelAnimationFrame(raf);
-        raf = 0;
-      } else {
-        schedule();
-      }
-    }
-
-    function energy(v) { eTarget = Math.max(0, Math.min(1, v)); }
-
-    // 从面板收回球时踢一脚循环（hidden 期间 frame 空转退出了，循环已断）
-    function wake() { if (state === 'live' && !els.orb.hidden) schedule(); }
-
-    return { set, energy, wake, refreshColor };
-  })();
-
   function paintNumbers() {
     setNum(els.orbDownV, els.orbDownU, fmtOrb(last.down));
     setNum(els.orbUpV, els.orbUpU, fmtOrb(last.up));
@@ -335,11 +229,10 @@
     for (const a of apps) {
       const row = document.createElement('div');
       row.className = 'pitem';
-      // 占比不占列宽：整行背景一条从左起的极淡琥珀渐变，和主界面进程表同一条（§2.5）
+      // 占比不占列宽：整行背景一条从左起的极淡渐变，和主界面进程表同一条（§2.5）。
+      // 渐变写在 mini.css 的 .pitem 里，这里只写百分比 —— 颜色要跟着主题的下载色走。
       const share = peak > 0 ? Math.min(100, Math.round((a.DownBytes / peak) * 100)) : 0;
-      row.style.backgroundImage = share > 0
-        ? `linear-gradient(90deg, rgba(240,145,63,0.09), rgba(240,145,63,0) ${share}%)`
-        : 'none';
+      row.style.setProperty('--share', `${share}%`);
       const d = splitRate(a.DownBytes);
       const u = splitRate(a.UpBytes);
       row.innerHTML = `
@@ -347,8 +240,8 @@
           ? `<img src="${a.IconBase64}" alt="" />`
           : `<span class="pico">${esc(initialOf(a.Name))}</span>`}
         <span class="pname" title="${esc(a.Name)}">${esc(a.Name)}</span>
-        <span class="prate is-down">↓${d.v} ${d.u}</span>
-        <span class="prate is-up">↑${u.v} ${u.u}</span>`;
+        <span class="prate is-down">${ic('arrow-down')}${d.v} ${d.u}</span>
+        <span class="prate is-up">${ic('arrow-up')}${u.v} ${u.u}</span>`;
       frag.appendChild(row);
     }
     els.list.replaceChildren(frag);
@@ -358,12 +251,18 @@
   // 措辞和顶栏胶囊、设置屏共用一套（监控中 / 已暂停 / 异常）。
   function paintStatus(snap) {
     const lost = snap.EventsLost || 0;
+    // starting 单独一支：ETW 会话在后台起（含残留会话清理，实测 0.3–2.4s），
+    // 这几秒管道已在推帧但还没有事件。并到 error 那支就是每次启动的头几秒
+    // 都亮红点、报「需管理员权限」，与事实相反。
+    const starting = snap.Status === 'starting';
+    const failed = !paused && !starting && snap.Status !== 'ok';
     const text = paused ? '已暂停'
-      : snap.Status !== 'ok' ? '服务异常 · 需管理员权限'
+      : starting ? '正在启动采集'
+      : failed ? '服务异常 · 需管理员权限'
       : lost > 0 ? `监控中 · ETW 丢事件 ${lost} 条`
       : '监控中';
-    const cls = snap.Status !== 'ok' && !paused ? 'is-error'
-      : paused || lost > 0 ? 'is-warn'
+    const cls = failed ? 'is-error'
+      : paused || starting || lost > 0 ? 'is-warn'
       : 'is-ok';
     els.dot.className = `panel-dot ${cls}`;
     els.dot.title = text;
@@ -394,9 +293,6 @@
       paintList(snap);
     }
     els.orb.classList.toggle('is-paused', paused);
-    els.orb.classList.remove('is-offline');
-    if (!paused) paintEnergy();
-    Fx.set(paused ? 'paused' : 'live');
     setArc(els.arcDown, last.rd, paused);
     setArc(els.arcUp, last.ru, paused);
     paintStatus(snap);
@@ -411,7 +307,6 @@
     try {
       T.applyTheme({ ...theme, background: '' }, { silent: true });
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }
-    Fx.refreshColor(); // 粒子颜色取的是 --down 的计算值，换主题后要重读
   }
 
   async function initTokens() {
@@ -454,6 +349,14 @@
   bindDrag(els.panel.querySelector('.panel-head'));
 
   els.orb.addEventListener('click', () => setShape('panel'));
+  // 键盘入口：orb 是 role=button，Enter/Space 等价点击。没有它，小窗对键盘用户
+  // 是一扇完全打不开的门（展开、暂停全都只能鼠标）。
+  els.orb.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setShape('panel');
+    }
+  });
   els.btnCollapse.addEventListener('click', () => setShape('orb'));
 
   els.btnClose.addEventListener('click', async () => {
@@ -484,10 +387,6 @@
 
   setArc(els.arcDown, 0, false);
   setArc(els.arcUp, 0, false);
-  // 首帧快照到达前按断连处理：不亮光效，等数据来了再「通电」
-  els.orb.classList.add('is-offline');
-  Fx.refreshColor();
-  Fx.set('offline');
   initTokens();
 
   listen('snapshot', (e) => {
@@ -506,9 +405,6 @@
     els.dot.setAttribute('aria-label', '未连接采集服务');
     els.orb.title = 'NetPeek · 未连接采集服务';
     els.orb.classList.remove('is-paused');
-    els.orb.classList.add('is-offline'); // 断连 = 没有能量：光叶/呼吸全停（mini.css）
-    els.orb.style.setProperty('--e', '0');
-    Fx.set('offline');
     els.btnPause.disabled = true;
     setNum(els.orbDownV, els.orbDownU, { v: '--', u: '' });
     setNum(els.orbUpV, els.orbUpU, { v: '--', u: '' });
