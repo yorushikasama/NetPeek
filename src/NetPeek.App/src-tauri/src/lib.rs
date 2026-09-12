@@ -2,6 +2,7 @@
 // - 后台线程接入命名管道客户端，把采集服务推来的 TrafficSnapshot 经 Tauri event 转发给前端。
 // - 系统托盘：左键唤出主窗，右键菜单含「打开主界面 / 退出」；关闭主窗时隐藏到托盘常驻。
 
+mod geo;
 mod history;
 mod mini;
 mod pipe;
@@ -9,17 +10,41 @@ mod settings;
 mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Manager, WindowEvent, Wry,
 };
+
+/// 托盘「暂停监控」菜单项的共享状态。文案跟随采集服务的真实暂停状态（快照
+/// `Status` 字段），而不是只由托盘菜单自己记忆 —— 迷你窗、设置界面的暂停入口
+/// 都走同一条控制管道，快照回来时在这里收敛，任何入口改状态托盘都跟得上。
+pub struct TrayPause {
+    paused: AtomicBool,
+    item: Mutex<Option<MenuItem<Wry>>>,
+}
+
+/// 同步托盘暂停文案。快照每秒一帧，状态没翻转时是纯原子读，零开销。
+pub fn sync_tray_pause(app: &tauri::AppHandle, paused: bool) {
+    let state = app.state::<TrayPause>();
+    if state.paused.swap(paused, Ordering::SeqCst) != paused {
+        if let Some(item) = state.item.lock().unwrap().as_ref() {
+            let _ = item.set_text(if paused {
+                "恢复监控"
+            } else {
+                "暂停监控"
+            });
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             theme::load_theme_config,
             theme::save_theme_config,
@@ -30,12 +55,18 @@ pub fn run() {
             settings::get_autostart,
             settings::set_autostart,
             settings::data_dir_path,
-            history::query_history,
+            settings::collector_log_path,
+            settings::open_collector_log,
+            settings::country_db_info,
+            settings::set_country_db,
+            settings::pick_country_db,
             history::history_daily,
+            history::history_range,
             history::history_stats,
             history::clear_history,
             history::set_retention,
             mini::toggle_mini,
+            mini::place_mini_default,
             mini::set_mini_shape,
             mini::send_control_command,
             mini::show_main_window,
@@ -58,6 +89,13 @@ pub fn run() {
             });
             app.manage(settings_state);
 
+            // 托盘暂停状态先于 pipe 线程注册：pipe.rs 每帧快照都会来同步。
+            app.manage(TrayPause {
+                paused: AtomicBool::new(false),
+                item: Mutex::new(None),
+            });
+            // 网速提醒的冷却状态（pipe.rs 每帧按设置判断是否弹系统通知）。
+            app.manage(pipe::AlertState::default());
             pipe::spawn(app.handle().clone());
 
             let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
@@ -66,10 +104,25 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &mini, &pause, &quit])?;
 
-            // 本地跟踪暂停状态以切换菜单文案；真实状态以采集服务快照为准（前端据此显示）。
-            let paused = Arc::new(AtomicBool::new(false));
-            let pause_item = pause.clone();
-            let paused_flag = Arc::clone(&paused);
+            // 菜单项交给共享状态，pipe.rs 的快照同步才能改到文案。
+            *app.state::<TrayPause>().item.lock().unwrap() = Some(pause);
+
+            // 任务栏/Alt-Tab 图标：tauri-codegen 生成 default_window_icon 时只取
+            // icon.ico 的**第一个** entry（见 tauri-codegen 的 `CachedIcon::new_ico`），
+            // 我们的 ico 按 16→256 升序排列，于是窗口图标一直是那张 16×16，
+            // 再被 Windows 拉伸到 32/48/64 显示，糊得很明显（托盘不糊是因为它
+            // 单独喂了 icon-32.png）。这里按实际缩放比挑对应的原生层重设一次。
+            if let Some(window) = app.get_webview_window("main") {
+                let px = window.scale_factor().unwrap_or(1.0) * 32.0;
+                let bytes: &[u8] = if px > 48.5 {
+                    include_bytes!("../icons/icon-64.png")
+                } else if px > 32.5 {
+                    include_bytes!("../icons/icon-48.png")
+                } else {
+                    include_bytes!("../icons/icon-32.png")
+                };
+                window.set_icon(tauri::image::Image::from_bytes(bytes)?)?;
+            }
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon-32.png"))?;
 
@@ -84,11 +137,14 @@ pub fn run() {
                         let _ = mini::toggle_mini((*app).clone());
                     }
                     "pause" => {
-                        let new_paused = !paused_flag.load(Ordering::SeqCst);
-                        paused_flag.store(new_paused, Ordering::SeqCst);
-                        pipe::send_control(if new_paused { "pause" } else { "resume" });
-                        let _ = pause_item
-                            .set_text(if new_paused { "恢复监控" } else { "暂停监控" });
+                        // 乐观翻转 + 立即发命令；采集服务不在线时快照不来，
+                        // 文案保持乐观值（服务恢复后第一帧快照会再校正）。
+                        let state = app.state::<TrayPause>();
+                        let new_paused = !state.paused.load(Ordering::SeqCst);
+                        drop(state);
+                        // 失败（服务未运行 / 管道不可用）时保持乐观文案，下一帧快照会校正。
+                        let _ = pipe::send_control(if new_paused { "pause" } else { "resume" });
+                        sync_tray_pause(app, new_paused);
                     }
                     "quit" => app.exit(0),
                     _ => {}

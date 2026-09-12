@@ -757,6 +757,32 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 .td-pid { font-size: 13px; color: var(--text-muted); }
 .td-rate { font-size: 15px; font-weight: 500; }
 
+/* 对端列：旗帜 + IP + 服务名，次要信息降一档 */
+.td-peer {
+  font-size: 12px;
+  font-family: var(--font-num);
+  color: var(--text-muted);
+}
+.td-peer:not(.has-peer) { opacity: 0.55; }
+
+/* 对端图标：国旗是 flags.png 雪碧图的定位方块（尺寸/位置由 JS 按生成器给的网格算），
+   语义图标是内联 SVG，走 currentColor 跟随主题。两者共用同一个占位与间距。 */
+.peer-flag,
+.peer-icon {
+  display: inline-block;
+  vertical-align: -1px;
+  margin-right: 5px;
+  flex: none;
+}
+.peer-flag {
+  border-radius: 1.5px;
+  /* 浅色底纹的旗帜（JP/PL 这类）在浅色主题下会和背景糊在一起，用一圈极淡描边分开 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-muted) 30%, transparent);
+}
+.peer-icon { color: var(--text-muted); }
+.peer-icon svg { width: 100%; height: 100%; display: block; }
+.td-peer .peer-icon { color: color-mix(in srgb, var(--text-muted) 85%, transparent); }
+
 /* 暂停时数字停在最后一帧并降到 60%（§2.8） */
 .is-paused .total-value,
 .is-paused .td-rate,
@@ -821,6 +847,65 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
 .hist-toolbar .spacer { flex: 1; }
 .hist-note { font-size: 11px; color: var(--text-muted); }
 
+/* 自定义日期区间是浮层，不是一行。数据岛总共 250px，§2.6 把「胶囊 34 + 柱图 172」
+   写死了，让这张表单占一行会把柱图压掉 50px —— 而柱图是这一屏唯一的数据表达。 */
+.hist-data { position: relative; }
+
+.hist-custom-range {
+  position: absolute;
+  /* 34 的工具栏 + 16 的上内边距 + 4 的间隙 */
+  top: 54px;
+  left: 16px;
+  z-index: var(--z-grip);
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-island);
+  /* 底必须不透明：它压着柱图和网格线，半透明的字缝里会透出一道道横线。 */
+  background: var(--surface);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.hist-date-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-muted); }
+.hist-date-field input {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  /* 原生日期控件不声明 color-scheme 就是浅色底 + 深色日历图标，在深色岛屿上
+     是一块突兀的白。主题里没有这一项，跟着岛屿默认的深色口径声明。 */
+  color-scheme: dark;
+}
+.hist-date-field input:hover { border-color: rgba(255, 255, 255, 0.26); }
+.hist-date-field input:focus { border-color: var(--down); outline: none; }
+
+.hist-custom-actions { display: flex; gap: 8px; }
+
+/* 校验错误独占一行：它比两个日期框加按钮长得多，塞在同一行会把日期框挤窄，
+   而宽度一跳日期框里的字就会被省略号吃掉。 */
+.hist-range-error {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--error);
+}
+
+/* 柱图高度下限。数据岛是定高的，多出来的东西只会从柱图身上挤 —— 给它一条底线，
+   布局出问题时先坏别的，别坏这一屏唯一的数据表达。 */
+.hist-chart { min-height: 140px; transition: opacity 0.15s ease; }
+/* 换档加载态（U2）：查询期间柱图降透明并挡住点击，沿用旧图好过闪一帧空图 */
+.hist-chart.is-loading { opacity: 0.45; pointer-events: none; }
+
 .rank-list {
   display: flex;
   flex-direction: column;
@@ -839,6 +924,9 @@ body:not(.has-bg) .proc-table thead th { background: var(--surface); backdrop-fi
   height: 32px;
   padding: 0 8px;
   border-radius: var(--r-ctl);
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--down) 9%, transparent),
+    transparent var(--rank-share, 0%));
   background-repeat: no-repeat;
   font-size: 13px;
 }

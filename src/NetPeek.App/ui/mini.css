@@ -1,5 +1,12 @@
-/* NetPeek 小窗样式（§2.9）：能量球（窗口 108×108，球 92×92）与迷你窗（320×300）双形态。
+/* NetPeek 小窗样式（§2.9）：能量球（窗口 108×108，球 92×92）与迷你窗
+   （窗口 344×324，面板本体 320×300，四周各 12px 留给外发光与投影）双形态。
    窗口 transparent: true，body 无底色，只有形态元素有背景。
+
+   **透明窗口的第一条纪律：所有发光都必须收在窗口内。** 窗口边界是硬的，
+   超出它的光一律被裁成直线；而圆形的光被方形窗口裁出来，就是四个角什么
+   都没有、四条边中段各一条亮线 —— 那正是「球外面套了个方框」的观感。
+   球形态的预算：窗口半宽 54 = 球半径 46 + 8，所有光的最远半径必须 ≤ 54。
+   面板形态的预算：面板外沿到窗口边 12px，两层 box-shadow 的扩散之和要 ≤ 12。
 
    三条和主界面不同的规定：
    - 不做 backdrop-filter。透明窗口后面没有网页内容可采样，Windows 上这一项在透明窗口里
@@ -56,8 +63,10 @@ html, body {
 
 .orb {
   position: absolute;
-  /* 92 的球放在 108 的窗口里居中，四周各 8px —— 外发光是 20px 半径，
-     窗口再小一点就被边缘裁成一圈硬边。 */
+  /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口半宽 54 = 球半径 46 + 8，
+     凡是半径超过 54 的光都会被窗口边缘硬裁成直线 —— 实测原来 halo 的光
+     一直扩散到 70px，于是在窗口四边中段留下一条琥珀直边、四角却什么都没有，
+     读起来就是「球外面套了个方框」。这里所有光都必须收在 54 以内。 */
   width: 92px;
   height: 92px;
   left: 50%;
@@ -66,16 +75,182 @@ html, body {
   border-radius: 50%;
   background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   border: 1px solid var(--edge);
-  box-shadow: 0 0 20px var(--glow-warm);
+  /* 外发光从 20px 收到 6px：46 + 6 = 52 < 54，留在窗口内。大范围光晕交给
+     .orb-halo 的径向渐变（最远 51px），球自己只补一圈贴边辉光。 */
+  box-shadow: 0 0 6px var(--glow-warm);
   cursor: grab;
 }
 .orb:active { cursor: grabbing; }
 
+/* ---------- 球面光照（3D 材质，与流量无关） ----------
+   原来球是「一块纯色圆盘 + 向外的光」，没有任何球面明暗，所以读作平面。
+   这两层补的是材质本身：左上受光、右下背光、球缘内侧压暗、底部一道环境反弹光，
+   外加受光方向上一个固定的镜面高光。
+   为什么用伪元素而不是并进 .orb 的 background：底色那条带 --island-op 半透明
+   （§2.9 要求球和桌面融合，渐变叠上去必须沿用同一透明度），
+   并进去会让球变成不透明的塑料块 —— §2.9 已经明确否掉了那种质感。
+   ::before 是第一个子节点，落在 halo/core/sheen/粒子之下；::after 只占左上角
+   一小块，不压中心数字。 */
+.orb::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    /* 底部环境反弹：桌面把光打回球底，暖色、很淡 */
+    radial-gradient(circle at 50% 98%,
+      color-mix(in srgb, var(--down) 20%, transparent) 0%,
+      transparent 44%),
+    /* 球面明暗：高光在 34%/28%，右下压到 34% 黑 —— 球体的体积感 */
+    radial-gradient(circle at 34% 28%,
+      color-mix(in srgb, white 17%, transparent) 0%,
+      color-mix(in srgb, white 7%, transparent) 20%,
+      transparent 46%,
+      color-mix(in srgb, black 13%, transparent) 76%,
+      color-mix(in srgb, black 34%, transparent) 100%);
+  opacity: var(--island-op);
+}
+
+/* 镜面高光：受光方向上一个锐利的小亮点。和 .orb-sheen 分工不同 ——
+   sheen 是绕球转的高光叶（装饰性运动，能量语言），这个是球面反射，
+   位置固定不动（材质语言）；静默时 sheen 熄了它还在，球才不是一块死盘。
+   刻意做小做陡（核心 66% 白、28% 处就衰减到 26%、62% 归零）：
+   大面积柔光会读成「塑料按钮」，球面反射本来就是一个小而亮的点。 */
+.orb::after {
+  content: '';
+  position: absolute;
+  left: 23%;
+  top: 16%;
+  width: 24%;
+  height: 16%;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%,
+    color-mix(in srgb, white 66%, transparent) 0%,
+    color-mix(in srgb, white 26%, transparent) 28%,
+    transparent 62%);
+  opacity: calc(var(--island-op) * 0.85);
+}
+
+/* ---------- 能量光效（强度全部由 --e 驱动，0 = 静默，1 = 满载） ----------
+   JS 每帧把「当前速率 ÷ 近 60 秒峰值」写进 .orb 的 --e；这里用 calc(var(--e))
+   换算各层透明度，1Hz 的阶跃输入经 700ms 过渡变成连续的呼吸。颜色一律
+   color-mix 出自 --down / --up，主题换色时光效跟着走，不写死琥珀。
+
+   分层（DOM 顺序 = 叠放顺序，全部 pointer-events:none）：
+   halo  球缘光环 + 随负载增强的外发光 —— 能量「盛在球里」的轮廓感
+   core  球心光斑 —— 有流量时核心亮起来，像里面真的有东西在烧
+   sheen 旋转高光叶 —— 静默时唯一的动的东西，球永远是活的 */
+.orb-halo {
+  position: absolute;
+  /* 球 92 居中，窗口半宽 54；halo 外扩 5px → 半径 51，是球形态里唯一
+     能把光铺开的一层（离窗口边还留 3px），大范围光晕由它承担。 */
+  inset: -5px;
+  border-radius: 50%;
+  pointer-events: none;
+  /* 最外一档必须归零：原来 100% 处还留着 10% 琥珀，halo 在 51px 半径上
+     戛然而止，本身就是一圈硬边（再叠加窗口裁切就是双层硬边）。现在峰值挪到
+     88%、100% 平滑收到 0，光晕在窗口内自然淡出，边缘看不出截断。 */
+  background: radial-gradient(circle,
+    transparent 54%,
+    color-mix(in srgb, var(--down) 6%, transparent) 70%,
+    color-mix(in srgb, var(--down) 34%, transparent) 88%,
+    color-mix(in srgb, var(--down) 14%, transparent) 95%,
+    transparent 100%);
+  opacity: calc(0.30 + var(--e, 0) * 0.70);
+  transition: opacity 700ms var(--ease);
+  /* 静默呼吸：scale 动画不占用 opacity（opacity 归强度管），合成器直出，零重绘 */
+  animation: orb-breathe 3.6s ease-in-out infinite;
+}
+/* 满载时球缘的亮环。原来是向外的 box-shadow(0 0 16px 3px)：半径扩散到
+   halo 的 51 + spread 3 + blur 16 = 70，比窗口半宽 54 还大 16px —— 正是
+   「球周围那圈方框」的主犯。改成 inset 之后光往球内走，最大半径就是 halo
+   自己的 51，永远在窗口内；观感从「往外冒的光」变成「球缘内侧的亮环」，
+   和「能量盛在球里」的语义也更贴。 */
+.orb-halo::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 12px 1px color-mix(in srgb, var(--down) 60%, transparent);
+  opacity: calc(var(--e, 0) * 0.8);
+  transition: opacity 700ms var(--ease);
+}
+.orb-core {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 38%,
+    color-mix(in srgb, var(--down) 46%, transparent) 0%,
+    color-mix(in srgb, var(--down) 16%, transparent) 32%,
+    color-mix(in srgb, var(--down) 5%, transparent) 54%,
+    transparent 68%);
+  opacity: calc(0.16 + var(--e, 0) * 0.70);
+  transition: opacity 700ms var(--ease);
+}
+.orb-sheen {
+  position: absolute;
+  /* 缩进 2px：不盖住球的 1px 边框 */
+  inset: 2px;
+  border-radius: 50%;
+  pointer-events: none;
+  /* 一叶 30° 的高光绕球转，其余全透明 —— background 被 border-radius 裁进圆里 */
+  background: conic-gradient(from 0deg,
+    transparent 0deg,
+    color-mix(in srgb, var(--down) 26%, transparent) 30deg,
+    transparent 62deg);
+  opacity: calc(0.12 + var(--e, 0) * 0.26);
+  transition: opacity 700ms var(--ease);
+  animation: orb-spin 7s linear infinite;
+}
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.045); }
+}
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+
+/* 粒子层（canvas）：绕核流转的光点，透明底只露粒子本身 */
+.orb-fx {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 暂停（§2.8 画面定格）：强度停在最后一帧（JS 不再更新 --e），动效放慢一档，
+   读作「能量还在、被按住了」，而不是死机。 */
+.orb.is-paused .orb-halo { animation-duration: 6.5s; }
+.orb.is-paused .orb-sheen { animation-duration: 13s; }
+
+/* 断连：没有数据就没有能量 —— 光叶和呼吸全停，只留一圈暗淡的轮廓 */
+.orb.is-offline .orb-halo { animation: none; opacity: 0.22; }
+.orb.is-offline .orb-halo::after { opacity: 0; }
+.orb.is-offline .orb-sheen { animation: none; opacity: 0; }
+
+/* 系统级减动效：光叶和呼吸都算装饰性运动，直接停掉，强度照常跟随流量 */
+@media (prefers-reduced-motion: reduce) {
+  .orb-halo, .orb-sheen { animation: none; }
+}
+
 /* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开） */
 .orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.orb-gauge .track { stroke: var(--line); }
-.orb-gauge .arc-down { stroke: var(--down); }
-.orb-gauge .arc-up { stroke: var(--up); }
+/* 轨道用 --stroke（18% 白）而不是 --line（10%）：球底 #1e1a16 上 10% 白的对比
+   只有约 1.1:1，零流量时整个球读作一块空黑饼，「相对水位」的表盘感全靠轨道垫出来。
+   18% 在暗底上是「看得见但不抢」的一档，与控制件描边同一档。 */
+.orb-gauge .track { stroke: var(--stroke); }
+/* 弧线带一圈同色 drop-shadow：数据弧从「画上去的线」变成「发出来的光」，
+   和下面的核/晕同一套能量语言。SVG filter 走合成器，92px 的画布开销可忽略。 */
+.orb-gauge .arc-down {
+  stroke: var(--down);
+  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--down) 75%, transparent));
+}
+.orb-gauge .arc-up {
+  stroke: var(--up);
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--up) 75%, transparent));
+}
 
 /* 92px 的球扣掉两圈环，中心可写字的圆直径只剩约 76px，最上面那行更窄（约 66px）。
    所以球上的下载只排「数值 + 单位」，方向靠琥珀色和下面那行的 ↑ 区分；
@@ -97,6 +272,9 @@ html, body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   line-height: 1.1;
+  /* 数值压在核心光斑上：一圈同色微光把字从光里托出来，避免亮核吃掉笔画 */
+  text-shadow: 0 0 9px color-mix(in srgb, var(--surface) 80%, transparent),
+    0 0 4px color-mix(in srgb, var(--surface) 60%, transparent);
 }
 .orb-down .v { font-size: 20px; font-weight: 600; }
 .orb-down .u { font-size: 10px; font-weight: 500; margin-left: 2px; }
@@ -119,14 +297,20 @@ html, body {
 
 .panel {
   position: absolute;
-  inset: 0;
+  /* 四周退 12px 给投影让位（窗口 344×324 = 面板 320×300 + 12×2）。
+     原来 inset:0，box-shadow 整个落在窗口外一点都看不见，圆角外的四个角
+     反而被自己的投影填上了色 —— 面板既没有浮起的层次，又像被一层方框框住。 */
+  inset: 12px;
   display: flex;
   flex-direction: column;
   background: color-mix(in srgb, var(--surface) calc(var(--island-op) * 100%), transparent);
   border: 1px solid var(--edge);
   border-radius: var(--r-island);
   overflow: hidden;
-  box-shadow: 0 0 24px var(--glow-warm), 0 6px 20px rgba(0, 0, 0, 0.28);
+  /* 两层扩散都收在 12px 内：外发光 12px 无偏移（正好够到窗口边），
+     投影向下 3 + blur 9 = 12（正好够到窗口下边）。窗口边缘处的强度已接近 0，
+     看不出裁断。 */
+  box-shadow: 0 0 12px var(--glow-warm), 0 3px 9px rgba(0, 0, 0, 0.30);
 }
 
 /* 头 40 / 总量 52 / 脚 44 定高（§2.9 分段表），列表吃掉剩下的 162。
@@ -157,20 +341,31 @@ html, body {
 .panel-dot.is-warn { background: var(--warn); }
 .panel-dot.is-error { background: var(--error); }
 
-.pbtn {
-  width: 24px;
-  height: 24px;
-  flex: none;
-  border: none;
+/* 头部右侧的两枚操作钮。与主界面顶栏的窗口按钮同名同形（.icon-btn +
+   24 viewBox 的线性图标 + --r-ctl 圆角 + hover 换 --surface-hi），只把边长从
+   32 收到 28 以适配 40px 高的头部。两枚按钮之间 2px：这是一个动作组，
+   不是两个独立控件；间距再大就会被读成两件不相干的事。 */
+.panel-actions { display: flex; flex: none; gap: 2px; }
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  appearance: none;
+  border: 0;
   border-radius: var(--r-ctl);
   background: transparent;
   color: var(--text-muted);
-  font-size: 15px;
-  line-height: 1;
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.pbtn:hover { background: var(--surface-hi); color: var(--text); }
-.pbtn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:hover { background: var(--surface-hi); color: var(--text); }
+.icon-btn:active { background: color-mix(in srgb, var(--surface-hi) 92%, #000); }
+/* 隐藏小窗 = 主界面「隐藏到托盘」的同义操作，用同一档危险色反馈 */
+.icon-btn.is-danger:hover { background: var(--error); color: #1a0f0e; }
+.icon-btn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
 
 .panel-total {
   display: flex;
@@ -247,19 +442,32 @@ html, body {
 .panel-empty { padding: 10px 6px; font-size: 12px; color: var(--text-muted); }
 
 /* 脚 44：只剩「暂停 / 主界面」两个键。「退出」搬去托盘右键菜单 ——
-   和「主界面」并排等宽时误点一下就把采集停了，那不该是随手可及的位置。 */
+   和「主界面」并排等宽时误点一下就把采集停了，那不该是随手可及的位置。
+
+   布局改为主次分层（原来是两枚 flex:1 的等宽描边钮）：状态切换是高频操作，
+   吃掉剩余宽度、好点；导航动作低频，按内容宽收在右侧。两枚 142px 的等宽按钮
+   会把「打开主界面」抬到和「暂停采集」同等的分量上 —— 这两件事的代价差着量级。 */
 .panel-foot {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   flex: none;
   height: 44px;
   padding: 0 14px;
   border-top: 1px solid var(--line);
 }
-.pact {
-  flex: 1;
+
+/* 与主界面 .btn 同一族（--stroke 描边、--r-ctl 圆角、hover 转 --down 描边、
+   :active 落回 --surface-hi），高度 30→28、字号 13→12 以适配 44px 的脚。 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
   height: 28px;
+  padding: 0 12px;
   border: 1px solid var(--stroke);
   border-radius: var(--r-ctl);
   background: transparent;
@@ -267,11 +475,27 @@ html, body {
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+  transition: border-color var(--t-fast) var(--ease),
+    background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.pact:hover { border-color: var(--edge); background: var(--surface-hi); }
-.pact:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
-.pact:disabled { opacity: 0.5; cursor: default; }
+.btn .ic { width: 14px; height: 14px; flex: none; }
+.btn:hover { border-color: color-mix(in srgb, var(--down) 60%, transparent); background: var(--surface-hi); }
+.btn:active { background: color-mix(in srgb, var(--surface-hi) 92%, #000); }
+.btn:focus-visible { outline: 2px solid var(--down); outline-offset: 1px; }
+.btn:disabled { opacity: 0.4; pointer-events: none; }
+
+/* 暂停/恢复：双态控件的两个态。状态挂在 aria-pressed 上，图标由它决定显隐
+   （常态 ⏸ / 暂停态 ▶），读屏拿到的是 press 语义而不是一句会变的文案。
+   暂停是「需要注意的状态」，用 --warn 一档把它从常态里拎出来 ——
+   和主界面「已暂停」是同一套颜色语言。 */
+#btnPause { flex: 1; }
+#btnPause[aria-pressed="false"] .ic-play { display: none; }
+#btnPause[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+#btnPause[aria-pressed="true"] .ic-pause { display: none; }
 
 /* 滚动条自绘：系统经典滚动条会在暗色面板里画出亮灰滑块和上下箭头按钮。
    注意不能同时设 scrollbar-width —— 一旦设了，Chromium 就忽略下面这些规则。 */

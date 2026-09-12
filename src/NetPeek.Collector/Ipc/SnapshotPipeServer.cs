@@ -25,12 +25,8 @@ public sealed class SnapshotPipeServer
     /// </summary>
     public async Task ServeAsync(Func<TrafficSnapshot> produceSnapshot, int intervalMs, CancellationToken ct)
     {
-        await using var server = new NamedPipeServerStream(
-            IpcConstants.PipeName,
-            PipeDirection.Out,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
+        // ACL 见 PipeAcl：SYSTEM 完全控制 + Users 只读，不让任意本机进程读流量快照。
+        await using var server = PipeAcl.CreateServer(IpcConstants.PipeName, PipeDirection.Out, _logger);
 
         _logger.LogInformation("等待 UI 连接命名管道 {Pipe}", IpcConstants.PipeName);
         await server.WaitForConnectionAsync(ct);

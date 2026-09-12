@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using Microsoft.Diagnostics.Tracing.Session;
@@ -31,6 +32,11 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private readonly ProcessIconCache _icons;
     private readonly long _sessionStartedUnixMs;
     private readonly ConcurrentDictionary<uint, ProcessCounter> _counters = new();
+
+    // 已随 IconUpdates 下发过图标的路径。图标按路径缓存后终生不变，一条路径只发一次；
+    // UI 重连时 CollectorService 调 ResetIconStream 清空，下一帧重发全量。
+    // 只在快照线程（GetSnapshot）与连接切换间隙访问，二者严格串行。
+    private readonly HashSet<string> _iconPathsSent = new(StringComparer.OrdinalIgnoreCase);
 
     private TraceEventSession? _session;
     private Thread? _processThread;
@@ -95,7 +101,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             // 刻意不订阅 TcpIpTCPCopy / TcpIpTCPCopyIPV6（Event ID 18），避免下载量翻倍。
 
             _session = session;
-            _processThread = new Thread(() => session.Source.Process())
+            _processThread = new Thread(() => ProcessEvents(session))
             {
                 IsBackground = true,
                 Name = "NetPeek.ETW",
@@ -114,19 +120,39 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         }
     }
 
-    private void OnTcpSend(TcpIpSendTraceData data) => Add(data.ProcessID, data.size, isUpload: true);
-    private void OnTcpRecv(TcpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false);
-    private void OnUdpSend(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: true);
-    private void OnUdpRecv(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false);
+    /// <summary>
+    /// ETW 事件分发线程入口。session.Source.Process() 是长驻阻塞调用，
+    /// 裸调时一旦抛异常就是线程级未捕获异常——直接崩掉整个服务进程，且日志无痕。
+    /// 这里兜住并留痕：事后能区分「采集停了」是权限/会话问题还是分发线程炸了。
+    /// </summary>
+    private void ProcessEvents(TraceEventSession session)
+    {
+        try
+        {
+            session.Source.Process();
+        }
+        catch (Exception ex)
+        {
+            _started = false;
+            _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止");
+        }
+    }
+
+    // 对端追踪：TCP 发送取目的端（daddr/dport）、接收取源端（saddr/sport）——
+    // 「远端」永远是对面的那台机器。IPv6 事件类同名字段同理。
+    private void OnTcpSend(TcpIpSendTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
+    private void OnTcpRecv(TcpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
+    private void OnUdpSend(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
+    private void OnUdpRecv(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
     // 注意：库把 IPv6 UDP 的类名拼成了 UpdIpV6TraceData（少了一个 d），这是 TraceEvent 3.2.6 的既有拼写。
-    private void OnUdpSendV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: true);
-    private void OnUdpRecvV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false);
-    private void OnTcpSendV6(TcpIpV6SendTraceData data) => Add(data.ProcessID, data.size, isUpload: true);
-    private void OnTcpRecvV6(TcpIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false);
+    private void OnUdpSendV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
+    private void OnUdpRecvV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
+    private void OnTcpSendV6(TcpIpV6SendTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
+    private void OnTcpRecvV6(TcpIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
     private void OnRetransmit(TcpIpTraceData data) => AddRetransmit(data.ProcessID, data.size);
     private void OnRetransmitV6(TcpIpV6TraceData data) => AddRetransmit(data.ProcessID, data.size);
 
-    private void Add(int pid, int size, bool isUpload)
+    private void Add(int pid, int size, bool isUpload, IPAddress remoteAddr, int remotePort)
     {
         if (_paused || pid <= 0 || size <= 0)
         {
@@ -141,6 +167,44 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         else
         {
             Interlocked.Add(ref counter.DownloadTotal, size);
+        }
+
+        TrackEndpoint(counter, remoteAddr, remotePort, size);
+    }
+
+    /// <summary>
+    /// 对端热度窗口：每个快照周期一个窗口，窗口内按 IP 累计字节，纪录保持者即「对端」。
+    /// 只在 ETW 回调线程执行（session.Source.Process() 单线程派发），字典不需要并发保护；
+    /// 快照线程只读 TopAddr/TopPort 两个 volatile 值，读完把 WindowId 推进一格，
+    /// 本线程下一次事件进来时发现窗口代数不一致就清表重计（读写双方各忍半帧偏差，显示用途可接受）。
+    /// IP 直接用 IPAddress 做字典键（避免每事件 ToString 分配），只在刷新纪录时转一次字符串。
+    /// </summary>
+    private void TrackEndpoint(ProcessCounter counter, IPAddress? remoteAddr, int remotePort, int size)
+    {
+        if (remoteAddr == null || remotePort <= 0)
+        {
+            return;
+        }
+
+        var windowId = Volatile.Read(ref counter.WindowId);
+        if (windowId != counter.LocalWindowId)
+        {
+            counter.EndpointWindow?.Clear();
+            counter.TopBytes = 0;
+            counter.TopPort = 0;
+            Volatile.Write(ref counter.TopAddr, null);
+            counter.LocalWindowId = windowId;
+        }
+
+        var window = counter.EndpointWindow ??= new Dictionary<IPAddress, long>();
+        window.TryGetValue(remoteAddr, out var bytes);
+        bytes += size;
+        window[remoteAddr] = bytes;
+        if (bytes > counter.TopBytes)
+        {
+            counter.TopBytes = bytes;
+            counter.TopPort = remotePort;
+            Volatile.Write(ref counter.TopAddr, remoteAddr);
         }
     }
 
@@ -173,6 +237,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         var processes = new List<ProcessTraffic>(_counters.Count);
         ulong totalDown = 0, totalUp = 0;
+        Dictionary<string, string>? iconUpdates = null;
 
         foreach (var (pid, counter) in _counters)
         {
@@ -234,12 +299,31 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 }
             }
 
+            // 图标增量下发：仅当路径首次出现时提取并放进 IconUpdates（提取较贵，
+            // 由 ProcessIconCache 内部缓存兜底）；未下发过的帧不带任何图标数据，
+            // 免得每秒把几十 KB 的 base64 沿管道搬四个来回。
+            if (!string.IsNullOrEmpty(counter.Path) && _iconPathsSent.Add(counter.Path))
+            {
+                var icon = _icons.GetDataUrl(counter.Path);
+                if (icon.Length > 0)
+                {
+                    iconUpdates ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    iconUpdates[counter.Path] = icon;
+                }
+            }
+
+            // 对端：读两个 volatile 值后把窗口推进一格，下一个事件周期自动重计。
+            // 只有真正有过事件的进程才有端点；纯空闲行保持为空，UI 显示「—」。
+            var topAddr = Volatile.Read(ref counter.TopAddr);
+            var topPort = counter.TopPort;
+            Interlocked.Increment(ref counter.WindowId);
+
             processes.Add(new ProcessTraffic
             {
                 Pid = pid,
                 Name = counter.Name,
                 Path = counter.Path,
-                IconBase64 = _icons.GetDataUrl(counter.Path),
+                IconBase64 = "", // 恒空：图标改由 IconUpdates 增量下发，见上
                 StartTimeUnixMs = counter.StartTimeUtcFileTime > 0
                     ? (counter.StartTimeUtcFileTime - 116444736000000000) / 10000
                     : 0,
@@ -248,6 +332,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 DownloadTotal = (ulong)down,
                 UploadTotal = (ulong)up,
                 RetransmitTotal = (ulong)Interlocked.Read(ref counter.RetransmitTotal),
+                TopRemoteIp = topAddr?.ToString() ?? "",
+                TopRemotePort = topPort > 0 ? (ushort)Math.Min(topPort, ushort.MaxValue) : (ushort)0,
             });
 
             totalDown += (ulong)Math.Max(0, downDelta);
@@ -260,9 +346,13 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         snapshot.TotalDownloadBytes = totalDown;
         snapshot.TotalUploadBytes = totalUp;
+        snapshot.IconUpdates = iconUpdates; // null = 本帧没有新图标，序列化时省略
         snapshot.Processes = processes;
         return snapshot;
     }
+
+    /// <summary>UI 重连后清空已发记录，让下一帧 IconUpdates 重发全量图标。</summary>
+    public void ResetIconStream() => _iconPathsSent.Clear();
 
     private int ReadEventsLost()
     {
@@ -351,5 +441,14 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         public string Name = "";
         public string Path = "";
         public int StaleFrames;
+
+        // 对端热度窗口（见 TrackEndpoint）：字典与 TopBytes/LocalWindowId 仅 ETW
+        // 回调线程访问；TopAddr/TopPort/WindowId 跨线程，走 Volatile / Interlocked。
+        public Dictionary<IPAddress, long>? EndpointWindow;
+        public long TopBytes;
+        public long LocalWindowId;
+        public int TopPort;
+        public IPAddress? TopAddr;
+        public long WindowId;
     }
 }

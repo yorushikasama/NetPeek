@@ -247,10 +247,7 @@
     els.themeList.replaceChildren(frag);
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
+  const escapeHtml = window.NetPeekCommon.escapeHtml; // 统一走 common.js（U4）
 
   async function useTheme(name) {
     const th = state.themes[name];

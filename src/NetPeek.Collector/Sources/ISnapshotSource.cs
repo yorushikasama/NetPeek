@@ -16,4 +16,10 @@ public interface ISnapshotSource
 
     /// <summary>当前是否处于暂停状态。</summary>
     bool IsPaused { get; }
+
+    /// <summary>
+    /// UI 重新连接时调用：让增量图标流从头重发（下一帧 IconUpdates 带全量）。
+    /// 默认空实现，无图标流的实现类不必理会。
+    /// </summary>
+    void ResetIconStream() { }
 }

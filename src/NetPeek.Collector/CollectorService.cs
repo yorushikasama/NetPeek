@@ -32,6 +32,9 @@ public sealed class CollectorService : BackgroundService
         {
             try
             {
+                // 每轮连接前重置图标增量流：UI（重新）连上的第一帧 IconUpdates 带全量，
+                // 之后只发新路径。在 ServeAsync 之前调用，与 GetSnapshot 严格串行。
+                _source.ResetIconStream();
                 await _pipeServer.ServeAsync(
                     _source.GetSnapshot,
                     IpcConstants.SnapshotIntervalMs,
@@ -44,6 +47,14 @@ public sealed class CollectorService : BackgroundService
             catch (IOException ex)
             {
                 _logger.LogWarning(ex, "管道通信异常，准备重新监听");
+                await Task.Delay(500, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                // 必须兜住：BackgroundService 逃出去的异常会命中 .NET 默认策略
+                // （BackgroundServiceExceptionBehavior.StopHost），整个 Host 连同服务一起
+                // 静默退出，界面侧只表现为「管道断开」，无从判断原因。
+                _logger.LogError(ex, "采集主循环异常，500ms 后重试");
                 await Task.Delay(500, stoppingToken);
             }
         }

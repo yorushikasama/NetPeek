@@ -11,14 +11,27 @@
   <!-- 不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
        球点不开。拖动由 mini.js 的位移阈值 + startDragging() 自己处理。 -->
   <div id="orb" class="orb" title="NetPeek">
+    <!-- 能量光效三层（都在环形规和数字下面）：halo = 贴球缘的光环 + 随负载增强的
+         外发光，core = 球心的径向光斑，sheen = 缓慢旋转的高光叶。
+         强度统一由 JS 设在 .orb 上的 --e（0..1，当前速率 ÷ 60 秒峰值）驱动，
+         CSS 只负责「这个强度长什么样」，过渡全走 opacity/transform 保合成器。 -->
+    <div class="orb-halo" aria-hidden="true"></div>
+    <div class="orb-core" aria-hidden="true"></div>
+    <div class="orb-sheen" aria-hidden="true"></div>
+    <!-- 粒子层：canvas 轨道粒子（移植自 MIT 的 santscoder-labs/project-13-energy-ball，
+         按 92px 球与能量强度 --e 重新参数化）。放在光效层之上、环形规之下。 -->
+    <canvas id="orbFx" class="orb-fx" aria-hidden="true"></canvas>
     <!-- 环形规：外圈 4px 琥珀 = 下载速率 ÷ 近 60 秒峰值，内圈 2px 钢蓝 = 上传（§2.9）。
          轨道垫在下面，没有轨道就只剩一段孤立弧线，读不出「相对水位」。 -->
     <svg class="orb-gauge" viewBox="0 0 92 92" aria-hidden="true">
+      <!-- 半径缩进球缘 3px（外环外缘 43 < 46）：原来外环外缘 = 46 正好压在球的
+           1px 边框上，边框线把环切了一道；内外环间隙也从 2px 拉到 3px，
+           小尺寸下两条环不再糊成一圈。 -->
       <g transform="rotate(-90 46 46)" fill="none" stroke-linecap="butt">
-        <circle class="track" cx="46" cy="46" r="44" stroke-width="4" />
-        <circle class="track" cx="46" cy="46" r="39" stroke-width="2" />
-        <circle id="orbArcDown" class="arc arc-down" cx="46" cy="46" r="44" stroke-width="4" />
-        <circle id="orbArcUp" class="arc arc-up" cx="46" cy="46" r="39" stroke-width="2" />
+        <circle class="track" cx="46" cy="46" r="41" stroke-width="4" />
+        <circle class="track" cx="46" cy="46" r="35" stroke-width="2" />
+        <circle id="orbArcDown" class="arc arc-down" cx="46" cy="46" r="41" stroke-width="4" />
+        <circle id="orbArcUp" class="arc arc-up" cx="46" cy="46" r="35" stroke-width="2" />
       </g>
     </svg>
     <div class="orb-nums">
@@ -27,13 +40,28 @@
     </div>
   </div>
 
-  <!-- 迷你窗形态（点击能量球展开，320×300） -->
+  <!-- 迷你窗形态（点击能量球展开，320×300 面板 / 窗口 344×324） -->
   <div id="panel" class="panel" hidden>
     <div class="panel-head">
       <span class="panel-title">NetPeek</span>
       <span class="panel-dot" id="panelDot" role="img" aria-label="未连接采集服务" title="未连接采集服务"></span>
-      <button id="btnCollapse" class="pbtn" title="收起为能量球" aria-label="收起为能量球">—</button>
-      <button id="btnClose" class="pbtn" title="隐藏小窗" aria-label="隐藏小窗">×</button>
+      <!-- 与主界面顶栏的窗口按钮同一族控件（.icon-btn + 24 viewBox 线性图标），
+           不再用「—」「×」文本符号：字符的字面宽与基线随字体走（面板字体栈含
+           Microsoft YaHei），两枚相邻按钮的视觉重量对不齐，垂直居中还得靠
+           line-height 硬凑。收起图标画的是「能量球」本身（实心点的圆环），
+           比一根抽象横线更能说明收起后会变成什么。 -->
+      <div class="panel-actions">
+        <button type="button" class="icon-btn" id="btnCollapse" title="收起为能量球" aria-label="收起为能量球">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+            <circle cx="12" cy="12" r="7" stroke-width="1.6" />
+            <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        <button type="button" class="icon-btn is-danger" id="btnClose" title="隐藏小窗" aria-label="隐藏小窗">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
     </div>
 
     <div class="panel-total">
@@ -43,13 +71,33 @@
 
     <div class="panel-list" id="panelList"></div>
 
+    <!-- 脚部两枚按钮语义不同，控件类型也就不该相同（原来两枚都是 .pact 等宽描边，
+         把导航动作抬到了与状态切换同等的视觉权重上）：
+         「暂停/恢复」是双态控件 → toggle（aria-pressed）驱动，图标与配色随状态切换；
+         「主界面」是导航动作 → 次级幽灵按钮，按内容宽靠右，不与主操作争注意力。 -->
     <div class="panel-foot">
-      <button id="btnPause" class="pact">暂停</button>
-      <button id="btnMain" class="pact">主界面</button>
+      <button type="button" class="btn" id="btnPause" aria-pressed="false" title="暂停监控">
+        <svg class="ic ic-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <rect x="7.2" y="5.5" width="3.6" height="13" rx="1.2" />
+          <rect x="13.2" y="5.5" width="3.6" height="13" rx="1.2" />
+        </svg>
+        <svg class="ic ic-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M8.4 5.7v12.6c0 .8.9 1.3 1.6.9l9.4-6.3c.6-.4.6-1.3 0-1.7L10 4.8c-.7-.4-1.6.1-1.6.9z" />
+        </svg>
+        <span class="lbl" id="pauseLbl">暂停</span>
+      </button>
+      <button type="button" class="btn" id="btnMain" title="打开主界面">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <rect x="4" y="5" width="16" height="14" rx="2.5" />
+          <path d="M4 9.5h16" />
+        </svg>
+        <span class="lbl">主界面</span>
+      </button>
     </div>
   </div>
 
   <!-- theme.js 只为拿 applyTheme / initTheme：小窗是独立 webview，CSS 变量不跨窗口共享 -->
+  <script src="common.js"></script>
   <script src="theme.js"></script>
   <script src="mini.js"></script>
 </body>

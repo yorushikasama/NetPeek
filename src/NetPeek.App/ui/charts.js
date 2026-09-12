@@ -118,7 +118,11 @@
     }
     const yMax = niceMax(opt.yMax || dataMax || 1);
     const r = drawFrame(ctx, w, h, yMax, opt);
-    if (opt.axesOnly) return;
+    if (opt.axesOnly) {
+      // 没数据的坐标框不缓存悬停入参：鼠标扫过时不能拿上一份数据重画。
+      canvas._lineOpt = null;
+      return;
+    }
 
     const step = r.plotW / (slots - 1);
     // 非零值不许压在绘图区底边上。上传常比下载小一到两个数量级（1.3M/s 对 10M/s 的量程），
@@ -165,6 +169,18 @@
       }
       ctx.restore();
     }
+
+    // 悬停读数层画在曲线之上（在 clip 之外，圆点允许压到边缘 1-2px）。
+    // 缓存本次入参供 mousemove 重画；mousemove 里再调 line() 会重新走这里，入参一致。
+    if (series.length && series[0].values.length) {
+      const idx = hoverIndexAt(canvas, r, series[0].values.length, slots);
+      canvas._hoverIdx = idx; // 记录在画布上，测试脚手架可以直接断言
+      if (idx >= 0) drawHover(ctx, canvas, r, series, idx, opt, slots, yMax);
+    } else {
+      canvas._hoverIdx = -1;
+    }
+    canvas._lineOpt = opt;
+    attachLineHover(canvas);
   }
 
   function strokeSegment(ctx, values, xFor, yFor, from, to, dash) {
@@ -268,6 +284,126 @@
 
   const axisBytes = (v) => axisNum(v, '');
   const axisRate = (v) => axisNum(v, '/s');
+
+  // 悬停小卡用的全精度格式。y 轴为了塞进 52px 用紧凑格式，读数里要能看出
+  // 「2.35 MB/s」这种两位小数 —— 两处格式化有意不同。
+  function fmtFull(v, suffix) {
+    if (!(v > 0)) return `0${suffix}`;
+    const units = [[1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
+    for (const [scale, tag] of units) {
+      if (v >= scale) {
+        const n = v / scale;
+        return `${n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2)} ${tag}${suffix}`;
+      }
+    }
+    return `${Math.round(v)}${suffix}`;
+  }
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+  }
+
+  // 悬停读数：竖向参考线 + 各系列数据点圆点 + 深色小卡（相对现在的秒数与精确速率）。
+  // 卡片靠近右缘时翻到参考线左侧，不会被裁。yFor 与 line() 的主绘制共用同一套
+  // 抬升规则（非零值抬 2px），圆点必须落在曲线上而不是坐标框底边。
+  function drawHover(ctx, canvas, r, series, idx, opt, slots, yMax) {
+    const n = series[0].values.length;
+    const step = r.plotW / (slots - 1);
+    const x = r.right - (n - 1 - idx) * step;
+    const suffix = opt.tipSuffix || '';
+    const LIFT = 2;
+    const yFor = (v) => {
+      const y = r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
+      return v > 0 ? Math.min(y, r.bottom - LIFT) : y;
+    };
+
+    ctx.save();
+    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, r.top);
+    ctx.lineTo(Math.round(x) + 0.5, r.bottom);
+    ctx.stroke();
+
+    for (const s of series) {
+      const v = s.values[idx] || 0;
+      ctx.beginPath();
+      ctx.arc(x, yFor(v), 3, 0, Math.PI * 2);
+      ctx.fillStyle = s.color;
+      ctx.fill();
+      ctx.strokeStyle = cssVar('--bg') || '#111418';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    const ago = n - 1 - idx;
+    const title = ago === 0 ? '现在' : `-${ago}s`;
+    const rows = series.map((s) => ({
+      color: s.color,
+      label: s.label || '数值',
+      text: fmtFull(s.values[idx] || 0, suffix),
+    }));
+    ctx.font = FONT_NUM;
+    let textW = ctx.measureText(title).width;
+    for (const row of rows) {
+      textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
+    }
+    const boxW = textW + 22;
+    const boxH = 20 + rows.length * 14;
+    let bx = x + 8;
+    if (bx + boxW > r.right + PAD_R) bx = x - 8 - boxW;
+    const by = r.top + 4;
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--surface-hi') || '#2f2924';
+    ctx.strokeStyle = cssVar('--stroke') || 'rgba(255,255,255,0.18)';
+    roundRectPath(ctx, bx, by, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+    ctx.fillText(title, bx + 10, by + 11);
+    rows.forEach((row, i) => {
+      const ry = by + 26 + i * 14;
+      ctx.fillStyle = row.color;
+      ctx.fillRect(bx + 10, ry - 3, 6, 6);
+      ctx.fillStyle = cssVar('--text') || '#f6efe8';
+      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
+    });
+    ctx.restore();
+  }
+
+  // 光标 x -> 最近数据点下标。超出绘图区 6px 视为没悬停（比如在 y 轴标注上）。
+  function hoverIndexAt(canvas, r, n, slots) {
+    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
+    const x = canvas._hoverX;
+    if (x < r.left - 6 || x > r.right + 6) return -1;
+    const step = r.plotW / (slots - 1);
+    const idx = Math.round(n - 1 - (r.right - x) / step);
+    return Math.max(0, Math.min(n - 1, idx));
+  }
+
+  // 每张画布只绑一次。mousemove 记下光标 x 后用缓存的上一次 line() 入参整帧重画
+  // （60 槽重画成本可忽略，不必另起合成层）；数据每秒才变一次，悬停期间读数是稳的。
+  function attachLineHover(canvas) {
+    if (canvas._lineHoverBound) return;
+    canvas._lineHoverBound = true;
+    canvas.addEventListener('mousemove', (e) => {
+      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
+      canvas.style.cursor = canvas._lineOpt ? 'crosshair' : '';
+      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
+    });
+    canvas.addEventListener('mouseleave', () => {
+      canvas._hoverX = -1;
+      canvas.style.cursor = '';
+      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
+    });
+  }
 
   window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };
 })();

@@ -44,9 +44,7 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
     let body = data_url
         .strip_prefix("data:image/")
         .ok_or("背景图格式必须是 data URL")?;
-    let ext = body
-        .split([';', ',']).next().unwrap_or("png")
-        .to_string();
+    let ext = body.split([';', ',']).next().unwrap_or("png").to_string();
     let b64 = body.split(',').nth(1).ok_or("data URL 缺少 base64 内容")?;
     let bytes = base64_decode(b64)?;
 
@@ -55,14 +53,19 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
     hasher.update(&bytes);
     let digest = hasher.finalize();
     // 取 SHA-256 前 8 字节（16 位十六进制）做文件名，跨 Rust 版本稳定，保证同图去重。
-    let name = format!("{:016x}.{}", u64::from_be_bytes(digest[..8].try_into().unwrap()), ext);
+    let name = format!(
+        "{:016x}.{}",
+        u64::from_be_bytes(digest[..8].try_into().unwrap()),
+        ext
+    );
 
     let bg_dir = data_dir(&app)?.join(BG_DIR);
     fs::create_dir_all(&bg_dir).map_err(|e| format!("创建背景目录失败: {e}"))?;
     let path = bg_dir.join(&name);
     if !path.exists() {
         let mut f = fs::File::create(&path).map_err(|e| format!("创建背景文件失败: {e}"))?;
-        f.write_all(&bytes).map_err(|e| format!("写入背景文件失败: {e}"))?;
+        f.write_all(&bytes)
+            .map_err(|e| format!("写入背景文件失败: {e}"))?;
     }
     Ok(path.to_string_lossy().into_owned())
 }

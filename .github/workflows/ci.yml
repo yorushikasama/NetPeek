@@ -1,0 +1,81 @@
+name: CI
+
+# 每次推到 main 和每个 PR 都跑。verification 是硬门禁：任何一步红了就别合。
+#
+# 只跑 windows-latest：这个产品是 Windows 专用的（ETW 内核会话、命名管道 ACL、
+# WiX MSI 打包、注册表自启），别的平台连编译都过不去。跑三平台矩阵纯属白烧机器时间。
+# 参考 Sniffnet 的 rust.yml（它连 Windows 的 Npcap 依赖都跳过 PR 构建），
+# 但我们没有外部驱动依赖，所以全量跑得起。
+#
+# 没抄 Sniffnet 的一点：它没有配 cargo 缓存。这里用 Swatinem/rust-cache，
+# Tauri 全量构建十分钟起，缓存能压到一两分钟。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify:
+    name: 构建与测试
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # setup-dotnet 自带的 cache 要求 packages.lock.json，本仓库没有，因此直接
+      # 按 csproj 指纹缓存全局包目录。
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.sln') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/NetPeek.App/src-tauri -> target
+
+      # 采集服务（.NET 8）：LocalSystem 下的 ETW 采集端 + 共享协议库
+      - name: 构建 .NET 侧
+        run: dotnet build NetPeek.sln --nologo
+
+      # 前端单测：纯 Node，不需要浏览器。这条链路原来是 headless Chrome 驱动的，
+      # 本机 Chrome 升到 152 之后 headless 起不来（GPU 进程 0xC0000005），
+      # 于是改成了从 IIFE 里抽纯函数直接跑——顺带跑得比浏览器快得多。
+      - name: 前端单测
+        run: node scripts/ui-tests/run-all.mjs
+
+      - name: rustfmt
+        working-directory: src/NetPeek.App/src-tauri
+        run: cargo fmt --all --check
+
+      - name: cargo test
+        working-directory: src/NetPeek.App/src-tauri
+        run: cargo test --all-targets
+
+      # clippy 暂时只报告不拦门：存量还有近百条告警（多为 pedantic 细项），
+      # 一上来就 -D warnings 会让 CI 从第一天起永远红，反而没人看。
+      # 告警数进 step summary，等清零了再改成硬门禁。
+      - name: clippy（仅报告）
+        working-directory: src/NetPeek.App/src-tauri
+        shell: pwsh
+        run: |
+          cargo clippy --all-targets 2>&1 | Tee-Object -FilePath clippy.log
+          $n = (Select-String -Path clippy.log -Pattern '^warning').Count
+          "clippy 告警数：$n" | Out-File -Append $env:GITHUB_STEP_SUMMARY

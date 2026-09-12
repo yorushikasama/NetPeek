@@ -23,3 +23,6 @@ Desktop.ini
 # 安装包构建产物（服务发布目录 / WiX 中间产物）
 src/NetPeek.App/src-tauri/installer/collector/
 *.wixobj
+
+# 工作区临时资料（图标包下载缓存、解包中间物等，单个数 MB，不入库）
+.workbuddy/tmp/

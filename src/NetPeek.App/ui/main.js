@@ -82,28 +82,53 @@ const samples = [];            // { t, down, up }
 // 只按 PID 存会把新进程接到上一个进程的曲线尾巴上（后端历史聚合同样按这两项）。
 const procHist = new Map();    // "pid:startMs" -> { t: [], down: [], up: [] }
 
+// 图标缓存：path -> dataURL。图标不再逐帧随进程下发（32px base64 每个 2–5KB，
+// 每秒全量搬一遍是白扔的开销），采集端只在路径首次出现时发 IconUpdates，
+// 这里收下并按路径解析 —— 进程数据里只带 Path，不再带图标本体。
+const iconCache = new Map();
+
+function mergeIcons(snap) {
+  const updates = snap.IconUpdates;
+  if (updates) for (const k of Object.keys(updates)) iconCache.set(k, updates[k]);
+}
+
+// 进程行图标解析：兼容旧协议（IconBase64 内联），新协议按 Path 查缓存。
+function iconOf(p) {
+  if (p.IconBase64) return p.IconBase64;
+  return p.Path ? (iconCache.get(p.Path) || '') : '';
+}
+
 function histKey(p) {
   return `${p.Pid}:${p.StartTimeUnixMs || 0}`;
 }
 
 // ===== 格式化 =====
 
+// 单位非 B 时把数值压到 999 上限。起因：999_999 字节 / 1000 = 999.999，
+// 四舍五入成 "1000.0 KB" —— 数字跨出了自己的单位，读起来像计算错误。
+// 压到 999 比进位换单位简单，且在显示层面与真实量级的偏差可忽略。
+function clampUnit(n) {
+  return n > 999 ? 999 : n;
+}
+
 function fmtRate(bps) {
-  if (rateUnit === 'kb') return `${(bps / 1e3).toFixed(1)} KB/s`;
-  if (rateUnit === 'mb') return `${(bps / 1e6).toFixed(1)} MB/s`;
-  if (rateUnit === 'gb') return `${(bps / 1e9).toFixed(2)} GB/s`;
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} MB/s`;
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} KB/s`;
+  if (rateUnit === 'kb') return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
+  if (rateUnit === 'mb') return `${clampUnit(bps / 1e6).toFixed(1)} MB/s`;
+  if (rateUnit === 'gb') return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
+  // GB 档此前缺失：万兆链路（1.25 GB/s）会被压在 "999.00 MB/s"，与 fmtBytes 的档位也不一致。
+  if (bps >= 1e9) return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
+  if (bps >= 1e6) return `${clampUnit(bps / 1e6).toFixed(2)} MB/s`;
+  if (bps >= 1e3) return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
   return `${Math.round(bps)} B/s`;
 }
 
 function fmtBytes(bytes) {
-  if (rateUnit === 'kb') return `${(bytes / 1e3).toFixed(1)} KB`;
-  if (rateUnit === 'mb') return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (rateUnit === 'gb') return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`;
+  if (rateUnit === 'kb') return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
+  if (rateUnit === 'mb') return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
+  if (rateUnit === 'gb') return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e9) return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e6) return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
   return `${Math.round(bytes)} B`;
 }
 
@@ -128,10 +153,8 @@ function fmtDuration(sec) {
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+// 本界面不用 innerHTML 拼外部字符串（表格行走 DOM API），无需转义器；
+// 其余脚本统一从 common.js 取 escapeHtml。
 
 // ===== 采样缓冲 =====
 
@@ -230,6 +253,54 @@ function pulseIfWaking(snap) {
   wasIdle = !busy;
 }
 
+// ===== 搜索 =====
+
+// 统一前缀语义（照 Sniffnet 的 FilterInputType 做法）：=x 精确、!=x 不等于、!x 不含、x 含。
+// 大小写一律不敏感。加维度只改这张表，不改判断逻辑——这是把「搜索」从
+// 一串 includes 变成可扩展机制的关键。
+function parseQuery(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  let op = 'has';
+  let body = text;
+  if (text.startsWith('!=')) { op = 'ne'; body = text.slice(2); }
+  else if (text.startsWith('=')) { op = 'eq'; body = text.slice(1); }
+  else if (text.startsWith('!')) { op = 'not'; body = text.slice(1); }
+  // 只认最前面那一个操作符，后面出现的一律当普通字符——`!a=b` 是「不含 'a=b'」，
+  // 不做嵌套解析（搜索框不是查询语言，多一层规则就多一层要记的东西）。
+  body = body.trim().toLowerCase();
+  if (!body) return null;
+  return { op, body };
+}
+
+// 参与搜索的维度。名字用英文键是为了让用户能 `=chrome.exe` 这种写法保持直觉：
+// 这里比的是「值」，不引入字段名语法，避免多一层要记的规则。
+function searchFields(p) {
+  const S = window.NetPeekServices || {};
+  const port = Number(p.TopRemotePort) || 0;
+  return [
+    p.Name || '',
+    p.Path || '',
+    String(p.Pid),
+    p.TopRemoteIp || '',
+    port > 0 ? String(port) : '',
+    S.serviceName ? S.serviceName(port) : '',
+    p.TopRemoteCountry || '',
+    S.bogonLabel ? S.bogonLabel(p.TopRemoteIp || '') : '',
+  ];
+}
+
+function matchesQuery(p, q) {
+  if (!q) return true;
+  const fields = searchFields(p).map((v) => String(v).toLowerCase());
+  switch (q.op) {
+    case 'eq': return fields.some((v) => v === q.body);
+    case 'ne': return fields.every((v) => v !== q.body);
+    case 'not': return fields.every((v) => !v.includes(q.body));
+    default: return fields.some((v) => v.includes(q.body));
+  }
+}
+
 // ===== 进程表 =====
 
 const sortAccessors = {
@@ -241,11 +312,8 @@ const sortAccessors = {
 
 function visibleProcesses(snap) {
   let procs = (snap.Processes || []).slice();
-  if (query) {
-    const q = query.trim().toLowerCase();
-    procs = procs.filter((p) =>
-      (p.Name || '').toLowerCase().includes(q) || String(p.Pid).includes(q));
-  }
+  const q = parseQuery(query);
+  if (q) procs = procs.filter((p) => matchesQuery(p, q));
 
   if (viewMode === 'app') {
     const map = new Map();
@@ -257,6 +325,7 @@ function visibleProcesses(snap) {
         agg = {
           Name: name, IconBase64: '', Pid: 0, Path: p.Path || '', StartTimeUnixMs: 0,
           DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0, RetransmitTotal: 0,
+          TopRemoteIp: '', TopRemotePort: 0, TopRemoteCountry: '', _memberBytes: -1,
           Members: [],
         };
         map.set(key, agg);
@@ -272,7 +341,15 @@ function visibleProcesses(snap) {
       agg.DownloadTotal += p.DownloadTotal || 0;
       agg.UploadTotal += p.UploadTotal || 0;
       agg.RetransmitTotal += p.RetransmitTotal || 0;
-      if (!agg.IconBase64 && p.IconBase64) agg.IconBase64 = p.IconBase64;
+      if (!agg.IconBase64) agg.IconBase64 = iconOf(p);
+      // 聚合行显示流量最大成员的对端（每秒都在变，取最热的一个有代表性）
+      const memberBytes = (p.DownloadBytes || 0) + (p.UploadBytes || 0);
+      if (memberBytes > agg._memberBytes) {
+        agg._memberBytes = memberBytes;
+        agg.TopRemoteIp = p.TopRemoteIp || '';
+        agg.TopRemotePort = p.TopRemotePort || 0;
+        agg.TopRemoteCountry = p.TopRemoteCountry || '';
+      }
     }
     procs = Array.from(map.values());
   }
@@ -306,6 +383,7 @@ function buildRow(key) {
       <img class="proc-icon" alt="" hidden /><span class="proc-icon is-placeholder"></span>
       <span class="row-name"></span><span class="count-suffix"></span>
     </span></td>
+    <td class="td-peer"></td>
     <td class="is-num td-pid"></td>
     <td class="is-num td-rate down"></td>
     <td class="is-num td-rate up"></td>`;
@@ -314,18 +392,77 @@ function buildRow(key) {
     ph: tr.querySelector('.proc-icon.is-placeholder'),
     name: tr.querySelector('.row-name'),
     suffix: tr.querySelector('.count-suffix'),
-    pid: tr.children[1],
-    down: tr.children[2],
-    up: tr.children[3],
+    peer: tr.querySelector('.td-peer'),
+    pid: tr.children[2],
+    down: tr.children[3],
+    up: tr.children[4],
   };
   return tr;
+}
+
+// 对端图标节点。key 形如 '' | 'sem:lan' | 'jp'。
+// 国家码走 flags.png 雪碧图（就近取位，无网络、无解码开销）；
+// 语义图标走内联 SVG，stroke 用 currentColor 以便跟随主题。
+// 两者内容都来自自有常量、不含任何网络数据，所以这里的 innerHTML 是安全的。
+function peerIconNode(key) {
+  const F = window.NetPeekFlags;
+  if (!key || !F) return null;
+  // 形状合法但雪碧图里没有的码（DB-IP 的 ZZ、或库里新增而我们没重新生成图）必须退回
+  // 语义图标——否则这个格子会既没有旗也没有图标，看着像渲染失败。
+  const sem = key.startsWith('sem:') ? key.slice(4) : F.pos(key) ? '' : 'unknown';
+  const el = document.createElement('span');
+  if (sem) {
+    const html = F.semantic(sem);
+    if (!html) return null;
+    el.className = 'peer-icon';
+    el.innerHTML = html;
+  } else {
+    el.className = 'peer-flag';
+    el.style.backgroundImage = 'url(flags.png)';
+    el.style.backgroundPosition = F.pos(key);
+    el.style.backgroundSize = `${F.size.sheetW}px ${F.size.sheetH}px`;
+  }
+  el.style.width = `${F.size.w}px`;
+  el.style.height = `${F.size.h}px`;
+  return el;
+}
+
+// 对端单元格：图标 + IP + 服务名。
+// 图标只在 key 变化时重建——1 Hz 刷新下每秒重设一次 innerHTML 是白扔的开销，
+// 也会把正在显示的悬浮提示打断。文本走独立文本节点，其余全程 textContent 语义。
+function updatePeerCell(cell, p) {
+  const S = window.NetPeekServices || {};
+  const parts = S.peerParts
+    ? S.peerParts(p.TopRemoteIp || '', Number(p.TopRemotePort) || 0, p.TopRemoteCountry || '')
+    : { icon: '', text: '', title: '' };
+
+  if (!parts.text) {
+    if (cell.textContent !== '—') cell.textContent = '—';
+    cell.title = '';
+    cell._peerIcon = undefined;
+    cell._peerText = null;
+    cell.classList.remove('has-peer');
+    return;
+  }
+
+  if (cell._peerIcon !== parts.icon) {
+    cell._peerIcon = parts.icon;
+    const icon = peerIconNode(parts.icon);
+    const text = document.createTextNode('');
+    cell.replaceChildren(...(icon ? [icon] : []), text);
+    cell._peerText = text;
+  }
+  if (cell._peerText.nodeValue !== parts.text) cell._peerText.nodeValue = parts.text;
+  if (cell.title !== parts.title) cell.title = parts.title;
+  cell.classList.add('has-peer');
 }
 
 function updateRow(tr, p, peakDown) {
   const r = tr.refs;
   const name = p.Name || '(系统/未归因)';
-  if (p.IconBase64) {
-    if (r.img.getAttribute('src') !== p.IconBase64) r.img.src = p.IconBase64;
+  const icon = iconOf(p);
+  if (icon) {
+    if (r.img.getAttribute('src') !== icon) r.img.src = icon;
     r.img.hidden = false;
     r.ph.hidden = true;
   } else {
@@ -335,6 +472,7 @@ function updateRow(tr, p, peakDown) {
   }
   if (r.name.textContent !== name) r.name.textContent = name;
   r.suffix.textContent = viewMode === 'app' ? `×${p.Pid}` : '';
+  updatePeerCell(r.peer, p);
   r.pid.textContent = viewMode === 'app' ? `${p.Pid} 个进程` : p.Pid;
   r.down.textContent = fmtRate(p.DownloadBytes || 0);
   r.up.textContent = fmtRate(p.UploadBytes || 0);
@@ -462,10 +600,29 @@ function renderOverview(snap, procs) {
 }
 
 // 详情态。会话时长按进程创建时间算，不是「选中以来」。
+// 详情行是「字符串 / 图标块」混排：国旗是图片节点，没法塞进 join 出来的字符串，
+// 所以按节点拼。分隔符统一在这里生成，调用方只关心片段顺序。
+function setInspMeta(parts) {
+  const frag = document.createDocumentFragment();
+  parts.forEach((part, i) => {
+    if (i > 0) frag.appendChild(document.createTextNode(' · '));
+    if (typeof part === 'string') {
+      frag.appendChild(document.createTextNode(part));
+      return;
+    }
+    if (part.lead) frag.appendChild(document.createTextNode(part.lead));
+    const icon = peerIconNode(part.icon);
+    if (icon) frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(part.text || ''));
+  });
+  els.inspMeta.replaceChildren(frag);
+}
+
 function renderDetail(snap, p) {
   const name = p.Name || '(系统/未归因)';
-  if (p.IconBase64) {
-    if (els.inspIcon.getAttribute('src') !== p.IconBase64) els.inspIcon.src = p.IconBase64;
+  const icon = iconOf(p);
+  if (icon) {
+    if (els.inspIcon.getAttribute('src') !== icon) els.inspIcon.src = icon;
     els.inspIcon.hidden = false;
     els.inspIconPh.hidden = true;
   } else {
@@ -486,7 +643,16 @@ function renderDetail(snap, p) {
     parts.push(`会话 ${fmtDuration(((snap.TimestampUnixMs || Date.now()) - p.StartTimeUnixMs) / 1000)}`);
   }
   if (p.RetransmitTotal > 0) parts.push(`重传 ${fmtBytes(p.RetransmitTotal)}`);
-  els.inspMeta.textContent = parts.join(' · ');
+  // 本秒最热的对端也上详情行：检查栏是看「这个应用在和谁说话」最顺眼的地方。
+  // 这一项带图标，所以是对象而不是字符串（国旗是节点，塞不进一个串里）。
+  if (p.TopRemoteIp) {
+    const S = window.NetPeekServices || {};
+    const d = S.peerParts
+      ? S.peerParts(p.TopRemoteIp, Number(p.TopRemotePort) || 0, p.TopRemoteCountry || '')
+      : null;
+    if (d) parts.push({ lead: '对端 ', icon: d.icon, text: d.detail });
+  }
+  setInspMeta(parts);
 
   els.inspDownTotal.textContent = fmtBytes(p.DownloadTotal || 0);
   els.inspUpTotal.textContent = fmtBytes(p.UploadTotal || 0);
@@ -545,6 +711,7 @@ function chartOpts(extra) {
     window: WINDOW_SECS,
     xLabels: [`-${WINDOW_SECS}s`, '现在'],
     formatY: C.axisRate,
+    tipSuffix: '/s',   // 悬停读数的单位后缀（y 轴走紧凑 formatY，读数走全精度）
   }, extra);
 }
 
@@ -559,8 +726,8 @@ function drawBandwidth() {
   }
   C.line(els.bandwidthChart, chartOpts({
     series: [
-      { values: samples.map((s) => s.down), color: C.cssVar('--down') },
-      { values: samples.map((s) => s.up), color: C.cssVar('--up') },
+      { values: samples.map((s) => s.down), color: C.cssVar('--down'), label: '下载' },
+      { values: samples.map((s) => s.up), color: C.cssVar('--up'), label: '上传' },
     ],
     dashFrom: pausedIndex,
   }));
@@ -597,8 +764,8 @@ function drawProcChart(p) {
   }
   C.line(els.inspLiveChart, chartOpts({
     series: [
-      { values: s.down, color: C.cssVar('--down') },
-      { values: s.up, color: C.cssVar('--up') },
+      { values: s.down, color: C.cssVar('--down'), label: '下载' },
+      { values: s.up, color: C.cssVar('--up'), label: '上传' },
     ],
     dashFrom: pausedIndex,
   }));
@@ -636,7 +803,7 @@ function renderAll(snap) {
   const procs = renderTable(snap);
 
   if (snap.Status !== 'ok' && snap.Status !== 'paused') setProcState('error');
-  else if (procs.length === 0) setProcState(query ? 'empty' : 'idle');
+  else if (procs.length === 0) setProcState(parseQuery(query) ? 'empty' : 'idle');
   else setProcState(null);
 
   renderInspector(snap, procs);
@@ -646,6 +813,7 @@ function renderAll(snap) {
 
 function onSnapshot(snap) {
   lastSnapshot = snap;
+  mergeIcons(snap);
   pushSamples(snap);
   accumulateToday(snap);
   // 暂停是从当前这一帧起虚线；恢复后回到全实线
@@ -653,6 +821,9 @@ function onSnapshot(snap) {
     ? (pausedIndex >= 0 ? pausedIndex : samples.length - 1)
     : -1;
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateService(snap);
+  // 窗口隐藏到托盘后不做任何渲染：记账照跑（今日合计、采样缓冲），省掉每秒
+  // 一轮的 DOM 更新和 canvas 重画。恢复可见时补一帧，不等下一秒。
+  if (document.hidden) return;
   if (screen !== 'live') return;         // 别的屏不用重画实时件
   renderAll(snap);
 }
@@ -867,6 +1038,12 @@ function bindControls() {
       if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
     }, 120);
   });
+
+  // 从托盘恢复可见：onSnapshot 在隐藏期间提前返回了，这里立即补一帧，
+  // 否则界面要干等到下一秒的快照才更新。
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
+  });
 }
 
 // ===== 启动 =====
@@ -877,6 +1054,7 @@ window.NetPeekLive = {
   fmtBytes,
   fmtRate,
   initialOf,
+  iconOf,
   UNATTR,
 };
 

@@ -33,12 +33,8 @@ public sealed class SnapshotControlServer : BackgroundService
         {
             try
             {
-                await using var server = new NamedPipeServerStream(
-                    IpcConstants.ControlPipeName,
-                    PipeDirection.In,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                // ACL 见 PipeAcl：SYSTEM 完全控制 + Users 只写，暂停/恢复命令不接受匿名连接。
+                await using var server = PipeAcl.CreateServer(IpcConstants.ControlPipeName, PipeDirection.In, _logger);
 
                 await server.WaitForConnectionAsync(stoppingToken);
                 await HandleClientAsync(server, stoppingToken);

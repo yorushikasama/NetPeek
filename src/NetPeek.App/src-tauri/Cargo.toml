@@ -13,8 +13,41 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+maxminddb = "0.24"
+
+# 发布档瘦身（Tauri 官方推荐组合）：二进制更小、启动内存略降。
+# 与 Sniffnet 的差异：它用 opt-level=3 求吞吐；NetPeek 的 Rust 侧只做帧转发与查询，
+# 计算热点在 .NET 采集端，opt-level="s" 换体积更划算。
+# 实测（2026-09-11）："s" 档 13,348,864 字节（12.7 MB，含 8.3 MB 国家库）；
+# opt-level=3 的对照构建被中止，未取得数据，故维持 "s"。若日后要重测，
+# 注意需清掉并发 cargo 对同一 target/ 的争抢。
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# 工程约束取自 Sniffnet 的 workspace lints：禁止 unsafe，panic 通道全部告警，
+# stdout/stderr 打印告警（GUI 程序不认控制台，日志走 tauri-plugin-log 或 eprintln 之外的通道）。
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"

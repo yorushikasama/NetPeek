@@ -267,60 +267,27 @@ fn prune(state: &HistoryState) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM minute_stats WHERE ts < ?1", params![cutoff])
 }
 
-/// 查询历史：返回按分钟 x 进程的原始行（前端自行聚合展示）。
-#[tauri::command]
-pub fn query_history(app: AppHandle, hours: i64) -> Result<String, String> {
-    let path = data_dir(&app)?.join(DB_FILE);
+// ---------- 查询侧 ----------
+
+/// 打开历史库并设好忙等上限。读取命令统一走这里：聚合线程在整分钟提交时，
+/// 新连接默认 `busy_timeout = 0` 会立刻拿不到锁，而调用侧常把错误吞成 0 行 ——
+/// 界面上看起来就是「历史库是空的」。库文件路径一并返回，`history_stats` 要它的字节数。
+fn open_db(app: &AppHandle) -> Result<(Connection, std::path::PathBuf), String> {
+    let path = data_dir(app)?.join(DB_FILE);
     let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-    let cutoff = now_secs() - hours * 3600;
-    let mut stmt = conn
-        .prepare(
-            "SELECT ts, pid, start_ts, name, down, up FROM minute_stats
-             WHERE ts >= ?1 ORDER BY ts ASC, pid ASC",
-        )
-        .map_err(|e| format!("查询历史失败: {e}"))?;
-    let rows = stmt
-        .query_map(params![cutoff], |r| {
-            Ok(serde_json::json!({
-                "ts": r.get::<_, i64>(0)?,
-                "pid": r.get::<_, i64>(1)?,
-                "startTs": r.get::<_, i64>(2)?,
-                "name": r.get::<_, String>(3)?,
-                "down": r.get::<_, i64>(4)?,
-                "up": r.get::<_, i64>(5)?,
-            }))
-        })
-        .map_err(|e| format!("读取历史失败: {e}"))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| format!("历史行解析失败: {e}"))?);
-    }
-    serde_json::to_string(&out).map_err(|e| format!("历史序列化失败: {e}"))
+    Ok((conn, path))
 }
 
-/// 按天聚合（本地时区）：返回 `[{day:"2026-05-18", name, down, up}]`。
-/// 检查栏「30 天下载」按 name 过滤，历史屏日柱图按 day 求和，两处共用这一次查询。
-/// 不返回分钟级原始行 —— 30 天 × 1440 分钟 × N 进程的 JSON 前端解析不动。
-#[tauri::command]
-pub fn history_daily(app: AppHandle, days: i64) -> Result<String, String> {
-    let path = data_dir(&app)?.join(DB_FILE);
-    let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(3))
-        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-    let cutoff = now_secs() - days.max(1) * 86_400;
-    let mut stmt = conn
-        .prepare(
-            "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,
-                    SUM(down) AS down, SUM(up) AS up
-             FROM minute_stats WHERE ts >= ?1
-             GROUP BY day, name
-             ORDER BY day ASC, down DESC",
-        )
-        .map_err(|e| format!("查询日聚合失败: {e}"))?;
+/// 把一条日聚合查询的游标收成 JSON 数组。两个日聚合命令共用，
+/// 免得同一份行映射写两遍再各自漂移。
+fn collect_daily(
+    stmt: &mut rusqlite::Statement<'_>,
+    bindings: impl rusqlite::Params,
+) -> Result<String, String> {
     let rows = stmt
-        .query_map(params![cutoff], |r| {
+        .query_map(bindings, |r| {
             Ok(serde_json::json!({
                 "day": r.get::<_, String>(0)?,
                 "name": r.get::<_, String>(1)?,
@@ -336,13 +303,73 @@ pub fn history_daily(app: AppHandle, days: i64) -> Result<String, String> {
     serde_json::to_string(&out).map_err(|e| format!("日聚合序列化失败: {e}"))
 }
 
+/// `YYYY-MM-DD` 形状检查。合法性交给 SQLite 的 strftime 判，
+/// 这里只挡住明显不是日期的输入 —— strftime 拿到坏输入会返回 NULL，
+/// 而 NULL 比较不成立，查询会静默变空，界面读起来像「那几天没有流量」。
+fn is_iso_day(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
+/// 按天聚合（本地时区），最近 `days` 天：返回 `[{day:"2026-05-18", name, down, up}]`。
+/// 检查栏「30 天下载」按 name 过滤，历史屏日柱图按 day 求和，两处共用这一次查询。
+/// 不返回分钟级原始行 —— 30 天 × 1440 分钟 × N 进程的 JSON 前端解析不动。
+#[tauri::command]
+pub fn history_daily(app: AppHandle, days: i64) -> Result<String, String> {
+    let (conn, _) = open_db(&app)?;
+    let cutoff = now_secs() - days.max(1) * 86_400;
+    let mut stmt = conn
+        .prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,
+                    SUM(down) AS down, SUM(up) AS up
+             FROM minute_stats WHERE ts >= ?1
+             GROUP BY day, name
+             ORDER BY day ASC, down DESC",
+        )
+        .map_err(|e| format!("查询日聚合失败: {e}"))?;
+    collect_daily(&mut stmt, params![cutoff])
+}
+
+/// 按任意起止本地日期（含两端）聚合，历史屏的「自定义…」档走这条。
+///
+/// 不能拿 `history_daily(days)` 顶替：`days` 只能表达「从今天往前数 N 天」，
+/// 选一个已经过去的区间（8 月 1 日到 8 月 10 日）会取回与所选窗口零重叠的数据，
+/// 柱图整片是空的 —— 而这种空和「那几天确实没上网」在界面上长得一模一样。
+#[tauri::command]
+pub fn history_range(app: AppHandle, start: String, end: String) -> Result<String, String> {
+    if !is_iso_day(&start) || !is_iso_day(&end) {
+        return Err("日期格式应为 YYYY-MM-DD".into());
+    }
+    if start > end {
+        return Err("开始日期不能晚于结束日期".into());
+    }
+    let (conn, _) = open_db(&app)?;
+    // 边界交给 strftime：'utc' 修饰符把「本地墙上时间」换算成 unix 秒，
+    // 与 SELECT 里的 'localtime' 正好互逆，时区口径和 ts 的写入端一致，
+    // 也省掉为了算本地零点再引一个日期库。下界取当天零点，上界取次日零点的开区间。
+    let mut stmt = conn
+        .prepare(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,
+                    SUM(down) AS down, SUM(up) AS up
+             FROM minute_stats
+             WHERE ts >= CAST(strftime('%s', ?1 || ' 00:00:00', 'utc') AS INTEGER)
+               AND ts <  CAST(strftime('%s', ?2 || ' 00:00:00', 'utc') AS INTEGER) + 86400
+             GROUP BY day, name
+             ORDER BY day ASC, down DESC",
+        )
+        .map_err(|e| format!("查询日聚合失败: {e}"))?;
+    collect_daily(&mut stmt, params![start, end])
+}
+
 /// 历史概览：行数、最早/最晚时间、库文件字节数。用于设置屏展示与清空确认。
 #[tauri::command]
 pub fn history_stats(app: AppHandle) -> Result<String, String> {
-    let path = data_dir(&app)?.join(DB_FILE);
-    let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(3))
-        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+    let (conn, path) = open_db(&app)?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM minute_stats", [], |r| r.get(0))
         .map_err(|e| format!("历史行数查询失败: {e}"))?;
@@ -365,10 +392,7 @@ pub fn history_stats(app: AppHandle) -> Result<String, String> {
 /// 清空全部历史并 VACUUM 回收空间。
 #[tauri::command]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
-    let path = data_dir(&app)?.join(DB_FILE);
-    let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(3))
-        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+    let (conn, _) = open_db(&app)?;
     conn.execute_batch("DELETE FROM minute_stats; VACUUM;")
         .map_err(|e| format!("清空历史失败: {e}"))
 }
