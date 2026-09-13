@@ -1,7 +1,7 @@
 // 历史屏（§2.6，功能清单屏 3）。这一屏不放折线图：历史要回答的是「哪天用得多」，
 // 柱状图直接可比、可点；折线只是把同一份日聚合数据画得更含糊。
 //
-// 数据来自后端：预设档走 history_daily(days)，「自定义…」档走 history_range(start, end)，
+// 数据来自后端：预设档走 history_daily(days)，「自定义…」档走 history_range_days(start, end)，
 // 两者都返回按「本地日期 × 应用」聚合的行（自定义档过去只能靠天数近似，取回的数据
 // 和所选窗口零重叠，柱图整片是空的 —— 所以后端加了真正的起止边界）。
 // 不拉分钟级原始行 —— 30 天 × 1440 分钟 × N 进程的 JSON 前端解析不动，
@@ -10,7 +10,7 @@
 // 和这一屏当前的档位不是一回事，见 dailyFor。
 
 (function () {
-  const $ = (id) => document.getElementById(id);
+  const $ = (id) => window.NetPeekCommon.byId(id, 'history-ui');
   const C = window.NetPeekCharts;
   const TOP_N = 8;
   const WEEK_AGG_THRESHOLD = 60; // 超过这个天数按周聚合：90 根 3px 宽的柱读不出也点不中
@@ -39,7 +39,7 @@
   };
 
   let days = 30;
-  let customRange = null; // { start, end }；生效时 rows 由 history_range 查回，不再是「最近 N 天」
+  let customRange = null; // { start, end }；生效时 rows 由 history_range_days 查回，不再是「最近 N 天」
   let rows = [];          // [{ day, name, down, up }]
   let windowDays = 0;     // rows 覆盖的「最近 N 天」天数；自定义区间时为 0
   let inspectorRows = null; // 检查栏 30 天曲线的独立缓存，理由见 dailyFor
@@ -179,7 +179,11 @@
   function drawChart() {
     if (!buckets.length) return;
     hit = C.bars(els.canvas, {
-      groups: buckets.map((b) => ({ label: b.label, values: [b.down, b.up] })),
+      // days 跟着 group 走：tipTitle 要用它区分「单日」和「周聚合」。
+      // 这里曾经是悬浮读数的一个静默炸弹 —— tipTitle 读 b.days，而 group
+      // 只有 {label, values}，TypeError 发生在 mousemove 处理器里，
+      // 悬浮小卡从来弹不出来，界面上却没有任何报错痕迹。
+      groups: buckets.map((b) => ({ label: b.label, values: [b.down, b.up], days: b.days })),
       formatY: C.axisBytes,
       xLabels: [buckets[0].label, buckets[buckets.length - 1].label],
       tickLabels: tickLabels(),
@@ -320,11 +324,11 @@
     loading = true;
     els.canvas.classList.add('is-loading');
     if (!els.rank.querySelector('.rank-row')) renderRank([], 0);
-    // 自定义区间必须走 history_range：history_daily 只认「从今天往前数 N 天」，
+    // 自定义区间必须走 history_range_days：history_daily 只认「从今天往前数 N 天」，
     // 拿它查一个过去的区间只会取回与所选窗口零重叠的数据，柱图整片是空的。
     try {
       const raw = customRange
-        ? await window.__TAURI__.core.invoke('history_range', {
+        ? await window.__TAURI__.core.invoke('history_range_days', {
             start: customRange.start,
             end: customRange.end,
           })

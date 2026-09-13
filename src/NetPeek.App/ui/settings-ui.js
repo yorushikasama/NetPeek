@@ -5,7 +5,7 @@
 // { rateUnit: 'auto'|'kb'|'mb'|'gb', retentionDays: 7|30|90|365|0, autostart: bool, recordUnattributed: bool }
 
 (function () {
-  const $ = (id) => document.getElementById(id);
+  const $ = (id) => window.NetPeekCommon.byId(id, 'settings-ui');
   const LS_KEY = 'netpeek-settings';
   const CONFIRM_TIMEOUT = 5000;
 

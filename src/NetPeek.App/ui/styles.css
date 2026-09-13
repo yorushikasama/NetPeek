@@ -40,7 +40,13 @@ button { font-family: inherit; }
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);
   grid-template-rows: 48px minmax(0, 1fr);
-  background: var(--bg);
+  /* 全局界面不透明度（外观屏滑杆 → theme.applyUiOpacity）：只淡「漆」不淡字。
+     原来把 opacity 挂在 .frame 上，整个内容层（文字在内）一起半透——50% 档实测
+     4.5:1 的正文字只剩 2.8-3.8，弱字阶掉到 1.6-2.2，「50% 为可读下限」不成立。
+     现在透明度走两条路：窗口底色与底图按 --ui-opacity 淡出（桌面透上来），
+     各表面漆层按 --paint-op 淡出（见下方各 surface 规则），
+     文字、边线、图标保持不透明，可读性与滑杆位置无关。 */
+  background: color-mix(in srgb, var(--bg) calc(var(--ui-opacity) * 100%), transparent);
   color: var(--text);
   border: 1px solid var(--line-soft);
   border-radius: 10px;
@@ -48,34 +54,143 @@ button { font-family: inherit; }
 }
 .frame.is-maximized { border-radius: 0; }
 
-/* 背景图（跟随背景图皮肤）铺在整个窗口底层；无背景时保持纯底色 */
+/* 背景图（跟随背景图皮肤）铺在整个窗口底层；无背景时保持纯底色。
+   底图随 --ui-opacity 一起淡出：桌面从图后透上来，这是滑杆的主要观感。
+   窗口骨架三层抬到底图之上：.backdrop 是 absolute z:0 的定位元素，绘制顺序压过
+   所有 static 内容——topbar/snav 一度整片被底图+压暗纱埋住（真机有图才显现，
+   预览无图透明所以看不出）。grid 项目的 z-index 无需 position 即生效，
+   且不会变成后代绝对定位的包含块，行为零副作用。
+   .main 只要 z:0（同值按 DOM 序压过后面的 backdrop）；topbar/rail 给到 shell 层，
+   压在 main 之上——rail 的 data-tip 气泡（z:30）向右弹进主区上空，
+   若 main 也是 shell 层，DOM 序靠后的 main 会把气泡整个盖没。 */
+.main { z-index: 0; }
+.topbar, .rail { z-index: var(--z-shell); }
+
+/* 材质三层（全由伪元素承担，不加 DOM）：
+   ::before 底图本体 —— blur + saturate。饱和度提升是玻璃「透亮感」的来源
+     （macOS vibrancy / Win11 Mica 的同名步骤），成本几乎为零。旧版用
+     transform:scale(1.04) 盖模糊软边，但外扩量按宽度 4% 算，40px 模糊的可见
+     扩散（σ=20px，约 3σ）在长窗上会超过它、边缘露虚——改为负 inset 外扩、
+     量随 --bg-blur 走，任何模糊档位都盖得住。
+   ::after 压暗材质（仅 body.has-bg 渲染）—— 底层是从壁纸主色派生的深色 tint
+     纱（Mica 质感的一半来自「有颜色的暗」而不是灰黑），顶栏区叠一条更深的
+     渐变帮文字落地；最上面铺单色噪点，压掉大半径模糊必然出现的色带（banding），
+     也是 Acrylic 的标配。噪点约 4% 的盐椒颗粒、正常混合。 */
 .backdrop {
   position: absolute;
   inset: 0;
   z-index: var(--z-backdrop);
+  opacity: var(--ui-opacity);
+  pointer-events: none;
+}
+.backdrop::before {
+  content: '';
+  position: absolute;
+  inset: calc(var(--bg-blur) * -1.5 - 6px);
   background-image: var(--theme-bg-image);
   background-size: cover;
   background-position: center;
-  filter: blur(var(--bg-blur));
-  transform: scale(1.04);             /* 模糊边缘发虚，外扩一点盖住 */
-  pointer-events: none;
+  filter: blur(var(--bg-blur)) saturate(var(--bg-sat, 1.35)) brightness(var(--bg-brightness, 1));
 }
-.backdrop::after {                    /* 压暗纱，强度由皮肤给 */
+/* 噪点强度直接烘进 SVG（rect opacity）——background 栈的单层挂不了 CSS opacity。
+   fractalNoise 去饱和后经 discrete 传递推成黑白盐椒，避免 50% 灰平涂发闷。
+   栈序（上→下）：噪点 → 顶栏渐变（用户压暗）→ tint 纱（用户压暗）→ 自动压暗
+   （守卫的纯黑补偿，垫在最底下只压底图本身）。 */
+.backdrop::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgb(0 0 0 / var(--backdrop-dim));
+  background:
+    var(--noise-url) repeat,
+    linear-gradient(to bottom, rgb(0 0 0 / calc(var(--backdrop-dim) * 0.55)), rgb(0 0 0 / 0) 96px),
+    color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
+    rgb(0 0 0 / var(--backdrop-auto, 0));
 }
-/* 有背景图时面板半透出底图（--panel-op 下限 0.82，由 theme.js 夹取） */
-body.has-bg .topbar,
-body.has-bg .rail,
+body:not(.has-bg) .backdrop::after { content: none; }
+
+/* 换壁纸的交叉淡入：theme.applyBackdrop 在「图 → 另一张图」时临时插一个同款
+   .backdrop 层放新图，淡入完成后把根变量切到新图再移除临时层。320ms 与换肤的
+   220ms token 过渡在同一时间带里，颜色和底图一起滑过去；首次设置与撤图直切。 */
+.backdrop.is-fade-in { opacity: 0; transition: opacity 320ms var(--ease); }
+.backdrop.is-fade-in.is-visible { opacity: var(--ui-opacity); }
+
+/* 各表面漆层（顶栏 / rail / 卡片 / 设置列等）统一按 --paint-op 淡出：
+   无背景图时 --paint-op = --ui-opacity（tokens.css 缺省），全局滑杆直接生效——
+   原来淡出只挂在 .frame 底色上，而这些不透明表面把它整个盖住，非背景图皮肤下
+   滑杆等于空调；有背景图时这里把 --paint-op 覆写为
+   max(面板滑杆, 可读下限) × 界面不透明度：floor（--panel-op-floor，由
+   theme-ui.syncOpacityFloor 按底图亮度算出）只钳面板滑杆与底图的关系；
+   全局界面不透明度作用于整体、不被 floor 钳住——否则亮图皮肤下全局滑杆
+   会被顶回近不透明，等于失效。 */
+body.has-bg {
+  --paint-op: max(var(--panel-op), var(--panel-op-floor)) * var(--ui-opacity);
+}
+
+/* 玻璃的边缘语义：有背景图时给主要浮岛一条 1px 顶部内高光——半透面板的上缘
+   接住一点底图的光，玻璃才「读得懂」；无背景图皮肤不加，保持朴素基底
+   「分层只靠底色差 + 1px 边线」的语言。 */
 body.has-bg .card,
-body.has-bg .rc,
-body.has-bg .snav,
-body.has-bg .skin-card,
-body.has-bg .swatch,
-body.has-bg .sbody {
-  background: color-mix(in srgb, var(--panel) calc(var(--panel-op) * 100%), transparent);
+body.has-bg .rc {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+/* 贴膜显示模式（body.wrap-mode）：壁纸作为一张平面的膜按「窗口坐标」对齐铺下，
+   每块可贴表面用 background-attachment: fixed 从窗口位置「剪」下落在自己身上
+   的那一块——整张图在所有面板上是连续的，拼起来还是原图；卡片缝隙、
+   窗口底是不可贴区，不留图案、露出素底（.frame 的 --bg）。
+   膜 = 面板底色与壁纸按 --wrap-op 调和（线性渐变平铺做纯色层），
+   再乘 --ui-opacity 让全局不透明度滑杆继续只淡「漆」不淡字。
+   fixed 附加在滚动时会触发重绘，WebView2 下中等表面数量可接受；
+   若日后出现滚动掉帧，可换各表面内层 ::before + position:fixed 的等价方案。
+   底图层 .backdrop 在此模式整个退场。 */
+body.wrap-mode .backdrop { display: none; }
+body.wrap-mode .card,
+body.wrap-mode .rc,
+body.wrap-mode .topbar,
+body.wrap-mode .rail,
+body.wrap-mode .snav,
+body.wrap-mode .sbody {
+  background-color: transparent;
+  /* 栈序（上→下）：贴膜调和层 → 亮度补偿层 → 壁纸。亮度在贴膜里没有元素滤镜
+     可挂（filter 会连文字一起亮/暗），用白/黑纯色层逼近：>1 叠白、<1 叠黑，
+     alpha 由 --bg-brightness 线性导出并钳位。 */
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--panel) calc(var(--wrap-op) * var(--ui-opacity) * 100%), transparent),
+      color-mix(in srgb, var(--panel) calc(var(--wrap-op) * var(--ui-opacity) * 100%), transparent)),
+    linear-gradient(
+      rgb(255 255 255 / clamp(0, (var(--bg-brightness, 1) - 1) * 0.55, 0.5)),
+      rgb(255 255 255 / clamp(0, (var(--bg-brightness, 1) - 1) * 0.55, 0.5))),
+    linear-gradient(
+      rgb(0 0 0 / clamp(0, (1 - var(--bg-brightness, 1)) * 0.6, 0.5)),
+      rgb(0 0 0 / clamp(0, (1 - var(--bg-brightness, 1)) * 0.6, 0.5))),
+    var(--theme-bg-image);
+  background-size: auto, auto, auto, cover;
+  background-position: 0 0, 0 0, 0 0, center;
+  background-attachment: scroll, fixed, fixed, fixed;
+  /* 文字影子：图上文字的通用可读手段（overlay 类界面的标配）。影子取 --bg 的
+     半透明版——深色底配暗影、浅色底配亮晕，方向永远正确；text-shadow 可继承,
+     在容器上设一次,面板里所有文字层级都拿到。 */
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+/* 贴膜模式下,嵌套在已贴膜表面里的次级面板不再自己垫板：贴膜时 paint-op 恒为
+   1,这些「panel 系」次级板（子分组框/皮肤卡/色板/输入框/状态胶囊）全是实底,
+   会把连续的膜盖成一块块不透图的死区（用户实测:设置页背景图区块是块暗板）。
+   膜是连续的——次级层级交给边线/圆角/标题分区;浮层 .sel-pop 悬在任意内容
+   之上,保持 paint-op=1 的不透明底以保可读,不在此列。表头/图标位等小件
+   因功能需要（表头要盖住滚动内容）也保留实底。 */
+body.wrap-mode .image-skin-block,
+body.wrap-mode .custom-skin-block,
+body.wrap-mode .skin-card,
+body.wrap-mode .swatch,
+body.wrap-mode .top-status,
+body.wrap-mode select,
+body.wrap-mode input[type='text'],
+body.wrap-mode input[type='password'],
+body.wrap-mode input[type='number'],
+body.wrap-mode input[type='date'] {
+  background: transparent;
 }
 
 /* ---------- 顶栏（48px） ---------- */
@@ -88,7 +203,7 @@ body.has-bg .sbody {
   min-width: 0;
   height: 48px;
   padding-right: 0;
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) calc(var(--paint-op) * 100%), transparent);
   border-bottom: 1px solid var(--line-soft);
   cursor: default;
 }
@@ -170,7 +285,10 @@ body.has-bg .sbody {
 
 .winbtns { display: flex; gap: 2px; margin: 0 6px 0 10px; flex: none; }
 .winbtns .icon-btn { width: 34px; height: 30px; border-radius: 6px; }
-.winbtns .icon-btn.is-danger:hover { background: #c42b1c; color: #fff; }
+/* 危险悬停统一走 --error 语义色（与 mini 窗同一条规则），文字用「混入误差色的
+   深墨」——在出厂两套 error（浅红/深红）上都可读，且跟随皮肤换色。
+   此前主窗写死 Windows 关闭钮红 #c42b1c + 白字，与 mini 的 var(--error) 是两套逻辑。 */
+.winbtns .icon-btn.is-danger:hover { background: var(--error); color: color-mix(in srgb, black 82%, var(--error)); }
 
 /* ---------- 导航 rail（52px） ---------- */
 
@@ -181,7 +299,7 @@ body.has-bg .sbody {
   align-items: center;
   gap: 4px;
   padding: 12px 0;
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) calc(var(--paint-op) * 100%), transparent);
   border-right: 1px solid var(--line-soft);
   min-height: 0;
 }
@@ -266,6 +384,9 @@ body.has-bg .sbody {
   min-height: 0;
 }
 
+/* overflow-y:auto 而不是 hidden：620 高（窗口下限）时详情卡的内容比卡高 18px，
+   hidden 会把 60 秒曲线的底边直接切掉，而且没有任何办法把它滚出来。
+   横向仍然 hidden —— 右栏是定宽的，横向溢出一律是布局出错，不该给条滚动条掩过去。 */
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -273,8 +394,20 @@ body.has-bg .sbody {
   padding: 12px;
   min-height: 0;
   border-left: 1px solid var(--line-soft);
-  background: var(--panel-2);
-  overflow: hidden;
+  /* 漆层化并接 --paint-op（此前是写死的实底 --panel-2,是「各表面按 --paint-op
+     淡出」统一时的漏网之鱼）：朴素皮肤下视觉不变（paint-op=1）,拖界面不透明度
+     滑杆时右栏跟其他表面一起淡。 */
+  background: color-mix(in srgb, var(--panel-2) calc(var(--paint-op) * 100%), transparent);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* 有背景图时右栏底框整个让位（置底/贴膜同理）：实底板会把壁纸整块挡住,
+   右栏变成一块「贴不上去也不透图」的死区。撤掉板与分界线后,右栏与左列
+   同语言——卡片自己定义边缘,壁纸从卡片间隙一直透到右栏。 */
+body.has-bg .sidebar {
+  background: transparent;
+  border-left-color: transparent;
 }
 
 /* ---------- 卡片 ---------- */
@@ -283,7 +416,7 @@ body.has-bg .sbody {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
   border: 1px solid var(--line-soft);
   border-radius: var(--r-l);
 }
@@ -311,14 +444,20 @@ body.has-bg .sbody {
 .legend .is-down i { background: var(--down); }
 .legend .is-up i { background: var(--up); }
 
-.plot { flex: 1; min-height: 0; padding: 2px 8px 6px; }
-.plot canvas,
-.rc-plot canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
+.plot { flex: 1; min-height: 0; padding: 2px 8px 6px; position: relative; }
+/* 图表宿主（ECharts 在里面自建 canvas）。absolute 而不是 height:100%：
+   .plot 是 flex 项，百分比高在部分 flex 上下文里解析不到确定值，
+   ECharts 量到 0 就把图画没了；inset 直接钉死内容盒。 */
+.plot > div,
+.rc-plot > div {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 2px;
+  bottom: 6px;
 }
-canvas.is-loading { opacity: 0.45; }
+.rc-plot > div { left: 0; right: 0; top: 0; bottom: 0; }
+.plot > .is-loading { opacity: 0.45; }
 
 /* 实时屏：带宽图主角（264px 起），进程表吃满剩余高度 */
 .chart-card { flex: 0 0 264px; }
@@ -564,7 +703,7 @@ span.proc-icon {
 select, input[type="text"], input[type="password"], input[type="number"], input[type="date"] {
   height: 30px;
   padding: 0 10px;
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) calc(var(--paint-op) * 100%), transparent);
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   color: var(--text);
@@ -580,8 +719,7 @@ input[type="number"] { font-family: var(--font-num); }
 select { cursor: pointer; }
 select option { background: var(--panel); color: var(--text); }
 
-.note { font-size: 12px; color: var(--text-2); margin: 6px 0; }
-.note.is-ok { color: var(--ok); }
+.note { font-size: 12px; color: var(--text-2); margin: 6px 0; }.note.is-ok { color: var(--ok); }
 .note.is-warn { color: var(--warn); }
 .note.is-error { color: var(--error); }
 .note.num {
@@ -599,12 +737,15 @@ select option { background: var(--panel); color: var(--text); }
 .rc {
   flex: none;
   padding: 12px 14px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
   border: 1px solid var(--line-soft);
   border-radius: var(--r-l);
 }
+/* flex-shrink:0 + basis:auto，不是 1 1 0：右栏现在能纵向滚，卡片就该按内容占高、
+   让右栏滚出来，而不是被压到比内容矮再让自己的 overflow:hidden 切掉底边。
+   grow 保留 —— 内容不足时这张卡仍然吃掉右栏剩下的空白，不在底部留一条空槽。 */
 .rc.is-fill {
-  flex: 1 1 0;
+  flex: 1 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -692,7 +833,25 @@ span.app-badge {
   overflow: hidden;
   margin: 2px 0 4px;
 }
-.rc-meta { font-size: 12px; color: var(--text-2); margin-bottom: 4px; }
+/* 允许折行（原来挂 .truncate 单行截断）：这一行是「PID · 会话 · 重传 · 对端」四段，
+   940 宽时右栏只有 201px 可写，而这行要 469px —— 单行截断的结果是对端整段连同它的
+   国旗一起消失，而对端恰恰是这里最值得看的一项。分隔符 · 两侧本来就能断行，
+   IPv6 字面量断不开，所以补 anywhere。3 行封顶是防跑飞的护栏，不是常态：
+   1280 宽时这行仍然只占一行。 */
+/* 这一行是「PID · 会话 · 重传 · 对端」四段，右栏收到 252 宽（1060 档）时单行要
+   469px、装得下 201px —— 原来挂 .truncate 单行截断，最后一段「对端 …」连同它的
+   国旗整个看不见，而对端恰好是这行里唯一读者会去找的东西。所以改成换行 + 3 行
+   夹断：IPv6 地址没有可断处，overflow-wrap:anywhere 才断得开。 */
+.rc-meta {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* 详情态的 60 秒曲线段 */
 .insp-live {
@@ -856,7 +1015,7 @@ span.rank-icon {
   flex-direction: column;
   gap: 2px;
   padding: 14px 10px;
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) calc(var(--paint-op) * 100%), transparent);
   border-right: 1px solid var(--line-soft);
   overflow-y: auto;
 }
@@ -879,11 +1038,68 @@ span.rank-icon {
   padding: 18px 22px 28px;
   overflow-y: auto;
   min-height: 0;
+  /* 默认等价于透出 .frame 的 --bg；漆层化是为了让全局不透明度在设置屏同样生效 */
+  background: color-mix(in srgb, var(--bg) calc(var(--paint-op) * 100%), transparent);
 }
-.sgroup { max-width: 680px; margin-bottom: 28px; }
+/* 内容列水平居中：设置屏每屏只有 2–4 行，680 列靠左顶格会把右侧留给一片
+   「没人设计过」的死空。居中之后留白对称，读作留白而不是没做完。 */
+.sgroup { max-width: 680px; margin: 0 auto 28px; }
 .sgroup h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+
+/* 深浅偏好三段开关（image 皮肤专属区） */
+.seg {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  padding: 5px 12px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line-soft); }
+.seg button:hover { color: var(--text); background: var(--panel-hi); }
+.seg button.is-on { background: var(--panel-hi); color: var(--text); font-weight: 500; }
+
+/* 强调色色板（image 皮肤）：取色候选圆点，点选换交互强调；
+   选中环用「面板色垫圈 + 强调条外圈」双层 shadow，在半透面板上也读得清 */
+.pal-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.pal-dot {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  padding: 0;
+  cursor: pointer;
+}
+.pal-dot:hover { border-color: var(--sel-bar); }
+.pal-dot.is-on { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--sel-bar); }
 .sgroup h4.is-spaced { margin-top: 24px; }
 .sgroup > p { font-size: 12px; color: var(--text-3); margin-bottom: 12px; }
+
+/* 关于屏的品牌行：全应用最素的一屏给一枚最小的品牌锚点 —— 导轨同源的脉搏
+   图标放进圆角方章，右侧版本信息两行排版，行距放宽一档。 */
+.about-brand { display: flex; align-items: center; gap: 12px; margin: 6px 0 16px; }
+.about-mark {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--panel-hi);
+  border: 1px solid var(--line-soft);
+}
+.about-mark svg { width: 20px; height: 20px; color: var(--text); }
+.about-id { display: flex; flex-direction: column; gap: 2px; }
+.about-id b { font-size: 13.5px; }
+.about-id .note { margin: 0; }
 
 .srow {
   display: flex;
@@ -899,7 +1115,102 @@ span.rank-icon {
 
 .field-inline { flex: none; }
 .field-inline select { min-width: 170px; }
-.num-input { width: 110px; font-family: var(--font-num); }
+/* 数字输入右对齐：阈值这类「量」视觉上贴着单位一侧收尾，比左对齐的空位数
+   更像仪表读数。悬停描边与下拉/按钮同一档，键盘焦点环走 sel-bar。 */
+.num-input { width: 110px; font-family: var(--font-num); text-align: right; }
+select:hover, input[type="text"]:hover, input[type="password"]:hover,
+input[type="number"]:hover, input[type="date"]:hover {
+  border-color: color-mix(in srgb, var(--sel-bar) 40%, var(--line));
+}
+
+/* ---------- 自定义下拉（select-menu.js 的呈现层） ----------
+   行为在 select-menu.js：原生 select 留在 DOM 当数据源，按钮 + 浮层全走令牌。
+   也评估过 Choices.js —— v11 的开合状态横跨 is-active/is-open/aria-expanded、
+   capture 阶段吞触发器点击，集成成本高于这 60 行皮肤，弃用（详见该文件头注）。 */
+.sel { position: relative; display: inline-flex; flex: none; }
+.sel-native { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.sel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  min-width: 170px;
+  padding: 0 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.sel-btn:hover { border-color: color-mix(in srgb, var(--sel-bar) 40%, var(--line)); }
+.sel-btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 2px; }
+.sel-btn .ic { width: 14px; height: 14px; margin-left: auto; color: var(--text-3); transition: transform var(--t-fast) var(--ease); }
+.sel-btn[aria-expanded="true"] .ic { transform: rotate(180deg); }
+.sel-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  /* 漆层与阴影都接入统一系统：面板色随 --paint-op 淡出（与全部表面一致），
+     阴影强度随 --ui-opacity 淡出（与 mini 窗的浮层阴影同一约定）。 */
+  background: color-mix(in srgb, var(--panel-hi) calc(var(--paint-op) * 100%), transparent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / calc(0.32 * var(--ui-opacity)));
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  animation: sel-pop-in var(--t-fast) var(--ease);
+}
+@keyframes sel-pop-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.sel-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-s);
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sel-opt .ic { width: 13px; height: 13px; flex: none; visibility: hidden; color: var(--sel-bar); }
+.sel-opt:hover, .sel-opt:focus-visible { background: color-mix(in srgb, var(--sel-bar) 12%, transparent); color: var(--text); outline: none; }
+.sel-opt.is-on { color: var(--text); }
+.sel-opt.is-on .ic { visibility: visible; }
+.choices__item--choice {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-s);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.choices__item--choice.is-highlighted,
+.choices__item--choice:hover {
+  background: color-mix(in srgb, var(--sel-bar) 12%, transparent);
+  color: var(--text);
+}
+.choices__item--choice.is-selected { color: var(--text); font-weight: 500; }
+.choices__item--choice.is-selected::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex: none;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--sel-bar);
+}
 
 /* 开关：开态用中性反白（--accent），不用品牌色 */
 .switch { position: relative; width: 36px; height: 20px; flex: none; display: inline-block; }
@@ -952,9 +1263,16 @@ span.rank-icon {
   margin-bottom: 8px;
 }
 .skin-card {
+  /* flex + justify-content:start，因为 <button> 默认把内容整块垂直居中：
+     四张卡等高（网格 stretch），但「琥珀暖意」的说明只有一行、比别人矮 16px，
+     居中就把它整块往下推 8px —— 一排预览图里有一张不齐。按顶对齐，
+     多出来的空白落到卡底，四张预览图的上边永远在同一条线上。 */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   text-align: left;
   padding: 10px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
   border: 1px solid var(--line);
   border-radius: var(--r-l);
   color: inherit;
@@ -984,7 +1302,17 @@ span.rank-icon {
   padding: 12px 14px;
   border: 1px solid var(--line-soft);
   border-radius: var(--r-l);
-  background: color-mix(in srgb, var(--panel-2) 55%, var(--panel));
+  /* 凹陷子面板 = panel-2 55% 混 panel；外层再包一层 paint-op 混透明，
+     让它与其他表面一样跟随全局不透明度/壁纸漆层淡出 —— 写死的实底
+     在壁纸模式下会变成一块游离于主题系统外的暗板（用户实测）。 */
+  background: color-mix(in srgb,
+    color-mix(in srgb, var(--panel-2) 55%, var(--panel)) calc(var(--paint-op) * 100%),
+    transparent);
+}
+/* 「编辑中」的亮框：四张内置卡都不亮时（自定义草稿 / 另存皮肤 / 跟随背景图），
+   当前所在的块用与皮肤卡同一套选中语言标出来 —— 「我在哪」不能没有着落。 */
+.image-skin-block.is-on, .custom-skin-block.is-on {
+  border-color: color-mix(in srgb, var(--sel-bar) 55%, var(--line));
 }
 .image-skin-block h5, .custom-skin-block h5, .ai-fields h5 {
   font-size: 12.5px;
@@ -1000,6 +1328,49 @@ span.rank-icon {
   background-size: cover;
   background-position: center;
   flex: none;
+}
+
+/* 内置壁纸网格。卡片本身就是缩略图 —— 壁纸的唯一选择依据是它长什么样，
+   所以图占满整张卡，名字压在底部的渐变带上（纯色底条会把图裁短一截）。
+   auto-fill + minmax：右侧表单宽度随窗口变，固定列数会在窄档挤成一条。 */
+.wall-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.wall-card {
+  position: relative;
+  height: 62px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background-size: cover;
+  background-position: center;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.wall-card:hover { border-color: color-mix(in srgb, var(--sel-bar) 60%, var(--line)); }
+/* 选中态与皮肤卡同一套语言（--sel-bar 描边 + 内阴影补一圈），
+   不用勾标：勾标压在缩略图上会盖掉正要看的那块画面。 */
+.wall-card.is-on {
+  border-color: var(--sel-bar);
+  box-shadow: 0 0 0 1px var(--sel-bar) inset;
+}
+.wall-card:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 2px; }
+.wall-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 6px 4px;
+  /* 壁纸底部亮暗未知，名字要在任何一张图上都读得出来，所以自带一条渐变垫底。
+     文字固定用浅色而不是 --text：垫的是黑色渐变，跟着皮肤翻成深色就看不见了。 */
+  background: linear-gradient(transparent, rgb(0 0 0 / 0.72));
+  color: #f2f3f5;
+  font-size: 11px;
+  text-align: left;
 }
 
 .bg-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
@@ -1019,7 +1390,7 @@ span.rank-icon {
   padding: 6px 8px;
   border: 1px solid var(--line-soft);
   border-radius: var(--r-m);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
   font-size: 11.5px;
   color: var(--text-2);
   cursor: pointer;
@@ -1196,4 +1567,79 @@ span.rank-icon {
   .sbody { padding: 14px 16px 24px; }
   .top-meta { display: none; }   /* 最窄档：元信息让位给速率 */
   .hist-sum { gap: 10px; }
+}
+
+/* 窗口高度下限档（tauri.conf minHeight 620）。右栏是一叠定高卡片：今日 + 30 天柱图
+   + 详情卡（路径 2 行、元信息最多 3 行、60 秒曲线 88）。这一叠在 800 高时正好排满，
+   到 620 就比槽高出去约 90px —— 而超出的部分正是详情态唯一的实时图。
+   .sidebar 现在能滚，所以这不是裁切，但「要看这一分钟的曲线得先滚一下」不成立：
+   实时曲线是这张卡的主体，不是补充内容。所以按高度档把两张图和字号各收一档，
+   把这 90px 收回来，让整叠在最小窗口里也能一眼看全。
+   用 max-height 而不是 max-width：这是高度不够，跟窗口多宽无关。 */
+@media (max-height: 720px) {
+  .rc-plot { height: 84px; }
+  .rc-plot.small { height: 64px; }
+  .big { font-size: 22px; }
+  .duorow { margin-top: 6px; }
+  /* 矮窗里元信息让一行给曲线：前两行是 PID / 会话 / 重传，对端读数排在第 3 行，
+     收到 2 行会把对端整个吃掉，所以这里不动 line-clamp，只压行高。 */
+  .rc-meta { line-height: 1.35; }
+  .insp-live, .insp-fields { margin-top: 8px; padding-top: 8px; }
+}
+
+/* ---------- 动效层（§3.7 动效预算的界面侧落法） ----------
+   数据更新不做补间（数字直接替换是纪律），动效只花在「状态迁移」上：
+   屏切换、换肤重着色、行进入、详情切换、开机入场。全部尊重 prefers-reduced-motion
+   （文件末尾的全局 0.01ms 覆盖会把这些一起归零）。 */
+
+/* 屏切换 / 设置分区切换：硬切改 160ms 淡入上移。display:none → block 会重放
+   动画，正好是「每次进入都演、静置不演」的语义。 */
+@keyframes screen-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.screen:not([hidden]) { animation: screen-in 160ms var(--ease); }
+.sgroup:not([hidden]) { animation: screen-in 160ms var(--ease); }
+.hist-custom-range:not([hidden]) { animation: sel-pop-in var(--t-fast) var(--ease); }
+/* 皮肤卡点选「跟随背景图」时，专属块就地淡入 —— 布局突现变滑入 */
+.image-skin-block:not([hidden]) { animation: screen-in 160ms var(--ease); }
+
+/* 开机入场：一次性的 260ms 上升淡入，导轨 → 顶栏 → 图表 → 表格 → 右栏三卡
+   依次 40ms 递进。backwards 让有延迟的元素在等待期保持隐藏，不闪中间态。
+   只在页面加载时播一次，之后靠各屏自己的 screen-in。 */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+nav.rail { animation: rise-in 260ms var(--ease) backwards; }
+.topbar { animation: rise-in 260ms var(--ease) 40ms backwards; }
+.screen-live .chart-card { animation: rise-in 260ms var(--ease) 80ms backwards; }
+.screen-live .table-card { animation: rise-in 260ms var(--ease) 120ms backwards; }
+.screen-live .sidebar > * { animation: rise-in 260ms var(--ease) 120ms backwards; }
+.screen-live .sidebar > :nth-child(2) { animation-delay: 160ms; }
+.screen-live .sidebar > :nth-child(3) { animation-delay: 200ms; }
+
+/* 进程行进入：animation 绑在 tr 的创建时刻 —— 首帧整表一起淡入（当入场），
+   之后只有新出现的进程才演；复用的行不会重放。 */
+@keyframes row-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.proc-table tbody tr { animation: row-in 180ms var(--ease); }
+
+/* 详情卡：换选中行（含切回总览）时 180ms 淡入上移，由 main.js 在 key 变化时
+   重挂 is-enter —— 每秒一帧的重绘不重放。 */
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+#detailCard.is-enter { animation: card-in 180ms var(--ease); }
+
+/* 换肤色彩过渡窗口：只在 html.theme-anim 挂着期间生效（theme.js 挂 260ms）。
+   !important 压过按钮等局部 transition，保证窗口内所有颜色类属性一致滑动；
+   stop-color 是给小窗环形规的渐变描边（defs 里的 linearGradient 用令牌调色）。 */
+html.theme-anim, html.theme-anim * {
+  transition: background-color 220ms var(--ease), color 220ms var(--ease),
+    border-color 220ms var(--ease), fill 220ms var(--ease), stroke 220ms var(--ease),
+    stop-color 220ms var(--ease) !important;
 }

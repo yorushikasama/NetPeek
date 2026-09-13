@@ -1,23 +1,34 @@
-// NetPeek 图表渲染（canvas）。规格见 docs/UI生成提示词.md §2.4 / §2.5 / §3.6：
-// y 轴三档标注（0 / 中位 / 上限）靠左占 52px，x 轴只标两端，横向虚线网格 2 条、不画纵向网格，
-// 线宽 2、无数据点圆点、线下方同色 12% 渐变到透明。
+// NetPeek 图表渲染 —— 基于 ECharts 5（vendor/echarts.min.js，Apache-2.0）。
+// 历史教训记在这里：这套图先手写 canvas（281ed8b），换 ECharts（64e8e8a），又回到
+// 手写，2026-09 最终定版为 ECharts —— 手写版悬停卡、虚线段、稀疏刻度加起来 500 行
+// bespoke 代码，每条视觉规则都要自己实现、自己圆；ECharts 把这些换成标准视觉语言
+//（十字准线、共享悬浮卡、优雅刻度），用户一眼就懂。
 //
-// 不用 uPlot：它自带图例、游标和一整套坐标轴渲染，要压成上面这套规格得逐项覆盖，
-// 比直接画省不下事。这里一次数据更新画一帧，不跑 rAF 循环 —— 数据每秒一帧，
-// 常驻的补间动画在 §3.7 里是明确禁止项。
+// 对外 API 与手写版完全一致：line(el, opt) / bars(el, opt) / axisBytes / axisRate，
+// 调用点（main.js / history-ui.js）不需要知道底下换了引擎。el 是容器 div
+//（ECharts 自己在里面建 canvas）。
+//
+// ===== 动效预算（§3.7 的「禁止常驻补间」在新引擎下的落法）=====
+// 数据每秒一帧，图不能永远在动。这里的纪律：
+//   - 每次数据更新只给 190ms 的收尾过渡（新点滑入、旧点左移、颜色渐变），
+//     占空比 19%，动完即停 —— 传达「数据来了」，不是不停表演；
+//   - 入场动画 320ms 只在实例首次建立时跑一次，柱图带每根 4ms 的递进延迟；
+//   - 结构变化（空态↔数据、暂停虚线段出现）走 notMerge 直接切换，不补间 ——
+//     数据语义变了，滑动画出来是误导；
+//   - prefers-reduced-motion 时全部时长归零，动效退化为瞬切。
 
 (function () {
-  const AXIS_W = 52;   // y 轴标注区宽
-  const PAD_R = 4;
-  const PAD_T = 6;
-  const XLAB_H = 16;   // x 轴标注行高
-  const FONT_NUM = '11px "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace';
+  // 绘图区几何（px）。固定值是有意的：hitTest（bars 返回的 indexAt）按这套
+  // 几何反推行下标，跟着 ECharts 内部布局走反而要翻私有 API。
+  const GRID = { left: 52, right: 8, top: 8, bottom: 20 };
+  const FONT_NUM = '"Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace';
+  const FONT_SIZE = 11;
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
 
-  // 把 #rrggbb 转 rgba()，用于曲线下的渐变填充与网格线。
+  // 把 #rrggbb 转 rgba()，用于渐变填充、悬浮卡、指针阴影。
   function rgba(hex, alpha) {
     const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
     if (!m) return hex;
@@ -25,263 +36,24 @@
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
   }
 
-  // 按设备像素比重设画布尺寸，返回逻辑宽高与已缩放的 2D 上下文。
-  function prepare(canvas) {
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    if (w <= 0 || h <= 0) return null;
-    const dpr = window.devicePixelRatio || 1;
-    const pw = Math.round(w * dpr);
-    const ph = Math.round(h * dpr);
-    if (canvas.width !== pw || canvas.height !== ph) {
-      canvas.width = pw;
-      canvas.height = ph;
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    return { ctx, w, h };
-  }
-
-  // 上限取整到 1/2/5 × 10^n，避免「23.7 MB/s」这种读不出的刻度。
+  // 上限取整到整数刻度，避免「23.7 MB/s」这种读不出的刻度。
+  // 只有 1/2/5 三档时 2.6 会被顶到 5（26G 的峰值配 50G 的量程），绘图区一半是空的；
+  // 加密中间档把最坏情况的留白从 100% 压到 33%。
+  const NICE_STEPS = [1, 1.5, 2, 3, 4, 5, 6, 8, 10];
   function niceMax(v) {
     if (!(v > 0)) return 1;
     const exp = Math.floor(Math.log10(v));
     const base = Math.pow(10, exp);
     const f = v / base;
-    const step = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
-    return step * base;
+    for (const step of NICE_STEPS) {
+      // 浮点余量：1e9 在 log10 上会算出 8.999…，f 得到 10.000000000000002，
+      // 不留余量就会掉出这张表、返回 undefined。
+      if (f <= step * (1 + 1e-9)) return step * base;
+    }
+    return 10 * base;
   }
 
-  // 画坐标框：y 三档标注 + 2 条横向虚线网格 + x 两端标注。返回绘图区矩形。
-  function drawFrame(ctx, w, h, yMax, opt) {
-    const muted = cssVar('--text-2') || '#9ba1a9';
-    const line = cssVar('--line-soft') || '#272a30';
-    const left = AXIS_W;
-    const right = w - PAD_R;
-    const top = PAD_T;
-    const bottom = h - XLAB_H;
-    const plotH = Math.max(1, bottom - top);
-
-    ctx.font = FONT_NUM;
-    ctx.fillStyle = muted;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-
-    // 量程塌到 1 时，三档会被 formatY 全格成同一个字符串（「1 / 1 / 0」这种读不出的轴）。
-    // 这时只标上限和 0，中位那一档连线也不画。
-    const midLabel = opt.formatY(yMax / 2);
-    const dupMid = midLabel === opt.formatY(yMax) || midLabel === opt.formatY(0);
-    const levels = dupMid ? [yMax, 0] : [yMax, yMax / 2, 0];
-    ctx.save();
-    ctx.strokeStyle = line;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    for (let i = 0; i < levels.length; i++) {
-      const y = Math.round(bottom - (levels[i] / yMax) * plotH) + 0.5;
-      ctx.fillText(opt.formatY(levels[i]), AXIS_W - 8, y);
-      if (levels[i] !== 0) {
-        ctx.beginPath();
-        ctx.moveTo(left, y);
-        ctx.lineTo(right, y);
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-
-    if (opt.xLabels && opt.xLabels.length) {
-      const y = h - XLAB_H / 2 + 1;
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      ctx.fillText(opt.xLabels[0], left, y);
-      if (opt.xLabels.length > 1) {
-        ctx.textAlign = 'right';
-        ctx.fillText(opt.xLabels[opt.xLabels.length - 1], right, y);
-      }
-    }
-
-    return { left, right, top, bottom, plotH, plotW: Math.max(1, right - left) };
-  }
-
-  // 双线图。series = [{ values, color }]；values 右对齐进 window 个槽位，
-  // 新点从右侧进入。dashFrom 让尾段转虚线（暂停态，§2.8）。
-  function line(canvas, opt) {
-    const p = prepare(canvas);
-    if (!p) return;
-    const { ctx, w, h } = p;
-    const series = opt.series || [];
-    const slots = Math.max(2, opt.window || 60);
-
-    let dataMax = 0;
-    for (const s of series) {
-      for (const v of s.values) if (v > dataMax) dataMax = v;
-    }
-    const yMax = niceMax(opt.yMax || dataMax || 1);
-    const r = drawFrame(ctx, w, h, yMax, opt);
-    if (opt.axesOnly) {
-      // 没数据的坐标框不缓存悬停入参：鼠标扫过时不能拿上一份数据重画。
-      canvas._lineOpt = null;
-      return;
-    }
-
-    const step = r.plotW / (slots - 1);
-    // 非零值不许压在绘图区底边上。上传常比下载小一到两个数量级（1.3M/s 对 10M/s 的量程），
-    // 按比例算出来的 y 会和底边差不到 1px，整条上传线就读成了坐标框的一部分。
-    // 抬起 2px 只影响「有流量但很小」这一档的可读性，真正的 0 仍然压在底边。
-    const LIFT = 2;
-    const yFor = (v) => {
-      const y = r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
-      return v > 0 ? Math.min(y, r.bottom - LIFT) : y;
-    };
-
-    for (const s of series) {
-      const n = s.values.length;
-      if (n === 0) continue;
-      const xFor = (i) => r.right - (n - 1 - i) * step;
-
-      // 线下方渐变填充：同色 12% 到透明
-      const grad = ctx.createLinearGradient(0, r.top, 0, r.bottom);
-      grad.addColorStop(0, rgba(s.color, 0.12));
-      grad.addColorStop(1, rgba(s.color, 0));
-      ctx.beginPath();
-      ctx.moveTo(Math.max(r.left, xFor(0)), r.bottom);
-      for (let i = 0; i < n; i++) ctx.lineTo(Math.max(r.left, xFor(i)), yFor(s.values[i]));
-      ctx.lineTo(r.right, r.bottom);
-      ctx.closePath();
-      ctx.fillStyle = grad;
-      ctx.fill();
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(r.left, r.top - PAD_T, r.plotW + PAD_R, r.plotH + PAD_T + 1);
-      ctx.clip();
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = opt.lineWidth || 2;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      // dashFrom < 0 表示没有暂停，整条实线。不加这个下限，-1 会让
-      // 实线段直接返回、虚线段从 -1 画到末尾 —— 整条曲线都成了虚线。
-      const dashFrom = typeof opt.dashFrom === 'number' && opt.dashFrom >= 0 ? opt.dashFrom : n;
-      // 实线段与虚线段分两次描边，避免一条 path 里切 dash
-      strokeSegment(ctx, s.values, xFor, yFor, 0, Math.min(dashFrom, n - 1), null);
-      if (dashFrom < n - 1) {
-        strokeSegment(ctx, s.values, xFor, yFor, dashFrom, n - 1, [4, 3]);
-      }
-      ctx.restore();
-    }
-
-    // 悬停读数层画在曲线之上（在 clip 之外，圆点允许压到边缘 1-2px）。
-    // 缓存本次入参供 mousemove 重画；mousemove 里再调 line() 会重新走这里，入参一致。
-    if (series.length && series[0].values.length) {
-      const idx = hoverIndexAt(canvas, r, series[0].values.length, slots);
-      canvas._hoverIdx = idx; // 记录在画布上，测试脚手架可以直接断言
-      if (idx >= 0) drawHover(ctx, canvas, r, series, idx, opt, slots, yMax);
-    } else {
-      canvas._hoverIdx = -1;
-    }
-    canvas._lineOpt = opt;
-    attachLineHover(canvas);
-  }
-
-  function strokeSegment(ctx, values, xFor, yFor, from, to, dash) {
-    if (to <= from) return;
-    ctx.save();
-    ctx.setLineDash(dash || []);
-    ctx.beginPath();
-    ctx.moveTo(xFor(from), yFor(values[from]));
-    for (let i = from + 1; i <= to; i++) ctx.lineTo(xFor(i), yFor(values[i]));
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // 柱状图。groups = [{ label, values: [down] 或 [down, up] }]。
-  // 检查栏 30 天图只画下载（296px 宽挤不开双色分组柱）；历史屏画双色分组。
-  // selectedIndex 那一组加 2px 顶帽标出（§2.6）。返回 hitTest 供点柱选中用。
-  function bars(canvas, opt) {
-    const p = prepare(canvas);
-    if (!p) return null;
-    const { ctx, w, h } = p;
-    const groups = opt.groups || [];
-    const colors = opt.colors || [cssVar('--down') || '#f0963f', cssVar('--up') || '#62a9e8'];
-
-    let dataMax = 0;
-    for (const g of groups) {
-      for (const v of g.values) if (v > dataMax) dataMax = v;
-    }
-    const yMax = niceMax(dataMax || 1);
-    const r = drawFrame(ctx, w, h, yMax, opt);
-    if (!groups.length) {
-      canvas._barOpt = null;
-      return null;
-    }
-
-    const seriesCount = Math.max(1, groups[0].values.length);
-    const innerGap = seriesCount > 1 ? 3 : 0;
-    // 组距由可用宽度均分，柱宽由组距反推，保证 30 组和 13 组都排得开
-    const pitch = r.plotW / groups.length;
-    const groupGap = Math.min(6, Math.max(2, pitch * 0.22));
-    const groupW = Math.max(2, pitch - groupGap);
-    const barW = Math.max(1.5, (groupW - innerGap * (seriesCount - 1)) / seriesCount);
-
-    const rects = [];
-    for (let gi = 0; gi < groups.length; gi++) {
-      const gx = r.left + gi * pitch + groupGap / 2;
-      rects.push({ x0: r.left + gi * pitch, x1: r.left + (gi + 1) * pitch, index: gi });
-      for (let si = 0; si < seriesCount; si++) {
-        const v = groups[gi].values[si] || 0;
-        const bh = Math.max(v > 0 ? 1 : 0, (Math.min(v, yMax) / yMax) * r.plotH);
-        const x = gx + si * (barW + innerGap);
-        ctx.fillStyle = colors[si] || colors[0];
-        ctx.fillRect(x, r.bottom - bh, barW, bh);
-      }
-      if (opt.selectedIndex === gi) {
-        // 顶帽是「选中」这件事的标记，走交互强调（sel-bar），不占数据色的语义
-        ctx.fillStyle = cssVar('--sel-bar') || '#c9cdd4';
-        ctx.fillRect(gx, r.top - 2, groupW, 2);
-      }
-    }
-
-    // 月初那一根另标日期（§2.6）。用实测文字宽度避让两端标注，
-    // 34px 的固定余量挡不住「9 月 1 日」这种 5 字标签，会和右端标注挤在一起。
-    if (opt.tickLabels) {
-      ctx.font = FONT_NUM;
-      ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'center';
-      const y = h - XLAB_H / 2 + 1;
-      const endW = (s) => (s ? ctx.measureText(s).width : 0);
-      const leftGuard = r.left + endW(opt.xLabels && opt.xLabels[0]) + 10;
-      const rightGuard = r.right - endW(opt.xLabels && opt.xLabels[opt.xLabels.length - 1]) - 10;
-      let lastRight = leftGuard;
-      for (const t of opt.tickLabels) {
-        const half = ctx.measureText(t.text).width / 2;
-        const cx = r.left + (t.index + 0.5) * pitch;
-        if (cx - half < lastRight || cx + half > rightGuard) continue;
-        ctx.fillText(t.text, cx, y);
-        lastRight = cx + half + 10;
-      }
-    }
-
-    // 悬停读数（opt.seriesNames 提供时启用）：竖参考线立在组中央 + 深色小卡，
-    // 卡片画法与折线图同一套。数据点圆点有意不画 —— 零值日的圆点会趴在底边上，
-    // 读成凭空多出来的一条横线（折线图没这个问题，圆点总在曲线上）。
-    const hoverIdx = opt.seriesNames ? barHoverIndexAt(canvas, r, groups.length) : -1;
-    if (hoverIdx >= 0) drawBarHover(ctx, r, groups, hoverIdx, opt, colors);
-    canvas._barOpt = opt;
-    attachBarHover(canvas);
-
-    return {
-      indexAt(clientX) {
-        const box = canvas.getBoundingClientRect();
-        const x = clientX - box.left;
-        for (const rect of rects) if (x >= rect.x0 && x < rect.x1) return rect.index;
-        return -1;
-      },
-    };
-  }
-
-  // 坐标标注专用的紧凑格式。52px 的 y 轴槽在 11px 等宽下只放得下约 6 个字符，
-  // 直接复用界面里的「10.00 MB/s」会从左侧被裁掉前几位数字，读成「00 MB/s」。
+  // 坐标标注专用的紧凑格式。52px 的 y 轴槽在 11px 等宽下只放得下约 6 个字符。
   function axisNum(v, suffix) {
     if (!(v > 0)) return '0';
     const units = [[1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'K']];
@@ -297,7 +69,7 @@
   const axisBytes = (v) => axisNum(v, '');
   const axisRate = (v) => axisNum(v, '/s');
 
-  // 悬停小卡用的全精度格式。y 轴为了塞进 52px 用紧凑格式，读数里要能看出
+  // 悬浮卡用的全精度格式。y 轴为了塞进 52px 用紧凑格式，读数里要能看出
   // 「2.35 MB/s」这种两位小数 —— 两处格式化有意不同。
   function fmtFull(v, suffix) {
     if (!(v > 0)) return `0${suffix}`;
@@ -311,188 +83,371 @@
     return `${Math.round(v)}${suffix}`;
   }
 
-  function roundRectPath(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
-    else ctx.rect(x, y, w, h);
+  // ---------- ECharts 实例管理 ----------
+
+  const registry = new Map();   // el -> { chart, key, played, ro }
+
+  const reduceMotion = () =>
+    window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 拿到（或建起）el 上的实例。容器不可见（宽 0）时不建 —— ECharts 在 0 尺寸上
+  // 初始化会留下一个布局坏掉的实例，等可见后的下一次调用自然补上。
+  function acquire(el) {
+    if (!window.echarts) return null;
+    let entry = registry.get(el);
+    if (!entry) { entry = {}; registry.set(el, entry); }
+    if (!entry.chart) {
+      if (el.clientWidth <= 0 || el.clientHeight <= 0) return null;
+      entry.chart = window.echarts.init(el);
+      // 尺寸跟随宿主，不靠「恰好再来一次重绘」：940×620 下首进历史屏时
+      // 排行栏还没稳，flex 分完高度 ECharts 已经按旧高度建好画布了 —— 实测
+      // 439 vs 稳定后 399，底部 40px 连同 x 轴标签被裁出窗口，且之后再没有
+      // 任何事件会触发重画。ResizeObserver 在宿主尺寸变化的那一帧补 resize。
+      entry.ro = new ResizeObserver(() => {
+        if (!entry.chart) return;
+        if (el.clientWidth <= 0 || el.clientHeight <= 0) return;
+        if (entry.chart.getWidth() !== el.clientWidth || entry.chart.getHeight() !== el.clientHeight) {
+          entry.chart.resize();
+        }
+      });
+      entry.ro.observe(el);
+    } else if (el.clientWidth > 0 && el.clientHeight > 0
+      && (entry.chart.getWidth() !== el.clientWidth || entry.chart.getHeight() !== el.clientHeight)) {
+      entry.chart.resize();
+    }
+    return entry;
   }
 
-  // 悬停读数：竖向参考线 + 各系列数据点圆点 + 深色小卡（相对现在的秒数与精确速率）。
-  // 卡片靠近右缘时翻到参考线左侧，不会被裁。yFor 与 line() 的主绘制共用同一套
-  // 抬升规则（非零值抬 2px），圆点必须落在曲线上而不是坐标框底边。
-  function drawHover(ctx, canvas, r, series, idx, opt, slots, yMax) {
-    const n = series[0].values.length;
-    const step = r.plotW / (slots - 1);
-    const x = r.right - (n - 1 - idx) * step;
-    const suffix = opt.tipSuffix || '';
-    const LIFT = 2;
-    const yFor = (v) => {
-      const y = r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
-      return v > 0 ? Math.min(y, r.bottom - LIFT) : y;
+  // 系列数量 / 虚线段 / 选中态这类「形状」变了就整个换 option（不补间）；
+  // 只是数据流过去（每秒一帧）就走 merge，悬浮卡在刷新期间保持稳定不掉。
+  function setShape(entry, key, option) {
+    const structural = entry.key !== key;
+    entry.key = key;
+    entry.chart.setOption(option, { notMerge: structural });
+  }
+
+  // ---------- 公共的坐标轴 / 悬浮卡片段 ----------
+
+  function axisLabelOpt() {
+    return {
+      color: cssVar('--text-2') || '#9ba1a9',
+      fontSize: FONT_SIZE,
+      fontFamily: FONT_NUM,
+      margin: 8,
     };
+  }
 
-    ctx.save();
-    ctx.strokeStyle = cssVar('--line') || '#32363e';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(Math.round(x) + 0.5, r.top);
-    ctx.lineTo(Math.round(x) + 0.5, r.bottom);
-    ctx.stroke();
+  // ECharts 的轴标签以刻度为中心，柱图末端的「9 月 12 日」有一半会画出绘图区
+  // 被容器裁掉（旧手写版是右端标注右对齐解决的）。这里按首末标签实测宽度
+  // 把 grid 边距撑开，标签刚好收在容器里。缓存一个离屏 ctx 专供测量。
+  let measureCtx = null;
+  function textW(s) {
+    if (!s) return 0;
+    if (!measureCtx) {
+      measureCtx = document.createElement('canvas').getContext('2d');
+      measureCtx.font = `${FONT_SIZE}px ${FONT_NUM}`;
+    }
+    return measureCtx.measureText(String(s)).width;
+  }
 
+  function gridFor(opt) {
+    const grid = { ...GRID };
+    if (!opt) return grid;
+    const first = opt.groups && opt.groups.length
+      ? opt.groups[0].label
+      : (opt.xLabels && opt.xLabels[0]);
+    const last = opt.groups && opt.groups.length
+      ? opt.groups[opt.groups.length - 1].label
+      : (opt.xLabels && opt.xLabels.length > 1 ? opt.xLabels[opt.xLabels.length - 1] : null);
+    const need = (s) => Math.ceil(textW(s) / 2) + 6;
+    if (first) grid.left = Math.max(grid.left, need(first));
+    if (last) grid.right = Math.max(grid.right, need(last));
+    return grid;
+  }
+
+  function yAxisOpt(yMax, formatY) {
+    return {
+      type: 'value',
+      min: 0,
+      max: yMax,
+      // 上限 / 中位 / 底，三档 —— 和旧手写版同一套三行刻度
+      interval: yMax / 2,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30', type: 'dashed' } },
+      axisLabel: { ...axisLabelOpt(), formatter: formatY },
+    };
+  }
+
+  function tooltipBase() {
+    return {
+      confine: true,
+      transitionDuration: reduceMotion() ? 0 : 0.12,
+      backgroundColor: cssVar('--panel-hi') || '#2c2f36',
+      borderColor: cssVar('--line') || '#32363e',
+      borderWidth: 1,
+      padding: [7, 10],
+      textStyle: { color: cssVar('--text') || '#e3e5e9', fontSize: 12, fontFamily: FONT_NUM },
+      extraCssText: 'border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.28);',
+    };
+  }
+
+  function animOpt() {
+    const reduce = reduceMotion();
+    return {
+      animation: !reduce,
+      animationDuration: reduce ? 0 : 320,
+      animationEasing: 'cubicOut',
+      animationDurationUpdate: reduce ? 0 : 190,
+      animationEasingUpdate: 'cubicOut',
+    };
+  }
+
+  // ---------- 折线图 ----------
+  // series = [{ values, color, label }]；values 右对齐进 window 个槽位，
+  // 新点从右侧进入。dashFrom ≥ 0 时从该下标起尾段转虚线（暂停态，§2.8）。
+
+  function line(el, opt) {
+    const entry = acquire(el);
+    if (!entry) return;
+    const slots = Math.max(2, opt.window || 60);
+    const series = opt.series || [];
+    const empty = opt.axesOnly || !series.length || !series.some((s) => s.values.length);
+
+    let dataMax = 0;
+    for (const s of series) for (const v of s.values) if (v > dataMax) dataMax = v;
+    // 量程加 6% 余量再取整：峰值正好落在 nice 刻度上时（6.0M 配 6.0M 上限），
+    // 曲线会整段贴着绘图区顶边走，看着像被裁掉。留一档呼吸空间。
+    const yMax = niceMax(opt.axesOnly ? (opt.yMax || 1) : dataMax * 1.06);
+
+    if (empty) {
+      setShape(entry, 'L|empty', {
+        animation: false,
+        grid: gridFor(opt),
+        tooltip: { show: false },
+        xAxis: emptyXAxis(slots, opt.xLabels),
+        yAxis: yAxisOpt(yMax, opt.formatY || axisRate),
+        series: [],
+      });
+      return;
+    }
+
+    const dash = typeof opt.dashFrom === 'number' && opt.dashFrom >= 0;
+    const tipSuffix = opt.tipSuffix || '';
+    const names = [];
+    const seriesOpt = [];
     for (const s of series) {
-      const v = s.values[idx] || 0;
-      ctx.beginPath();
-      ctx.arc(x, yFor(v), 3, 0, Math.PI * 2);
-      ctx.fillStyle = s.color;
-      ctx.fill();
-      ctx.strokeStyle = cssVar('--bg') || '#1b1d21';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      const pad = slots - s.values.length;
+      // 悬浮卡按 name 聚合去重：实线段和虚线段是两个 series，共用同一个名字
+      if (!names.includes(s.label || '')) names.push(s.label || '');
+      const base = {
+        name: s.label || '',
+        type: 'line',
+        smooth: 0.4,
+        symbol: 'circle',
+        showSymbol: false,
+        lineStyle: { width: 2, color: s.color },
+        itemStyle: { color: s.color },
+        areaStyle: {
+          color: {
+            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: rgba(s.color, 0.14) },
+              { offset: 1, color: rgba(s.color, 0) },
+            ],
+          },
+        },
+        connectNulls: false,
+        emphasis: { scale: 2 },
+      };
+      if (!dash) {
+        seriesOpt.push({ ...base, data: padData(s.values, pad, slots) });
+      } else {
+        // 实线段 0..dashFrom、虚线段 dashFrom..末尾，两个 series 拼一条曲线。
+        // 虚线段 z 高一档、不带面积填充，接缝处虚线压在实线上面。
+        const df = opt.dashFrom;
+        seriesOpt.push({
+          ...base, z: 3,
+          data: splitData(s.values, pad, slots, df, false),
+        });
+        seriesOpt.push({
+          ...base, z: 4, areaStyle: undefined,
+          lineStyle: { width: 2, color: s.color, type: [4, 3], opacity: 0.9 },
+          data: splitData(s.values, pad, slots, df, true),
+        });
+      }
     }
 
-    const ago = n - 1 - idx;
-    const title = ago === 0 ? '现在' : `-${ago}s`;
-    const rows = series.map((s) => ({
-      color: s.color,
-      label: s.label || '数值',
-      text: fmtFull(s.values[idx] || 0, suffix),
-    }));
-    ctx.font = FONT_NUM;
-    let textW = ctx.measureText(title).width;
-    for (const row of rows) {
-      textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
+    setShape(entry, `L|${seriesOpt.length}|${dash}|${slots}`, {
+      ...animOpt(),
+      grid: gridFor(opt),
+      tooltip: {
+        ...tooltipBase(),
+        trigger: 'axis',
+        axisPointer: { type: 'line', lineStyle: { color: cssVar('--line') || '#32363e', width: 1 } },
+        formatter: (params) => {
+          if (!params || !params.length) return '';
+          const idx = params[0].dataIndex;
+          const left = slots - 1 - idx;
+          const rows = [];
+          const seen = new Set();
+          for (const p of params) {
+            // trigger:'axis' 时 p.name 是类目值（这里多为空串），系列名在 p.seriesName
+            if (p.value == null || seen.has(p.seriesName) || !names.includes(p.seriesName)) continue;
+            seen.add(p.seriesName);
+            rows.push(`<div>${p.marker}${esc(p.seriesName)}&nbsp;&nbsp;<b>${fmtFull(p.value, tipSuffix)}</b></div>`);
+          }
+          return `<div style="color:${esc(cssVar('--text-2') || '#9ba1a9')};margin-bottom:2px">${left > 0 ? esc(`${left} 秒前`) : '现在'}</div>${rows.join('')}`;
+        },
+      },
+      xAxis: lineXAxis(slots, opt.xLabels),
+      yAxis: yAxisOpt(yMax, opt.formatY || axisRate),
+      series: seriesOpt,
+    });
+    entry.played = true;
+  }
+
+  function padData(values, pad, slots) {
+    const out = new Array(slots).fill(null);
+    for (let i = 0; i < values.length; i++) out[pad + i] = values[i];
+    return out;
+  }
+
+  function splitData(values, pad, slots, df, dashedHalf) {
+    const out = new Array(slots).fill(null);
+    for (let i = 0; i < values.length; i++) {
+      if ((i >= df) === dashedHalf) out[pad + i] = values[i];
     }
-    const boxW = textW + 22;
-    const boxH = 20 + rows.length * 14;
-    let bx = x + 8;
-    if (bx + boxW > r.right + PAD_R) bx = x - 8 - boxW;
-    const by = r.top + 4;
-
-    ctx.setLineDash([]);
-    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
-    ctx.strokeStyle = cssVar('--line') || '#32363e';
-    roundRectPath(ctx, bx, by, boxW, boxH, 6);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
-    ctx.fillText(title, bx + 10, by + 11);
-    rows.forEach((row, i) => {
-      const ry = by + 26 + i * 14;
-      ctx.fillStyle = row.color;
-      ctx.fillRect(bx + 10, ry - 3, 6, 6);
-      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
-      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
-    });
-    ctx.restore();
+    return out;
   }
 
-  // 光标 x -> 最近数据点下标。超出绘图区 6px 视为没悬停（比如在 y 轴标注上）。
-  function hoverIndexAt(canvas, r, n, slots) {
-    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
-    const x = canvas._hoverX;
-    if (x < r.left - 6 || x > r.right + 6) return -1;
-    const step = r.plotW / (slots - 1);
-    const idx = Math.round(n - 1 - (r.right - x) / step);
-    return Math.max(0, Math.min(n - 1, idx));
+  function lineXAxis(slots, xLabels) {
+    const labels = new Array(slots).fill('');
+    if (xLabels && xLabels.length) {
+      labels[0] = xLabels[0];
+      labels[slots - 1] = xLabels[xLabels.length - 1];
+    }
+    return {
+      type: 'category',
+      boundaryGap: false,
+      data: labels,
+      axisLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30' } },
+      axisTick: { show: false },
+      axisLabel: { ...axisLabelOpt(), interval: (i) => i === 0 || i === slots - 1 },
+    };
   }
 
-  // 每张画布只绑一次。mousemove 记下光标 x 后用缓存的上一次 line() 入参整帧重画
-  // （60 槽重画成本可忽略，不必另起合成层）；数据每秒才变一次，悬停期间读数是稳的。
-  function attachLineHover(canvas) {
-    if (canvas._lineHoverBound) return;
-    canvas._lineHoverBound = true;
-    canvas.addEventListener('mousemove', (e) => {
-      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
-      canvas.style.cursor = canvas._lineOpt ? 'crosshair' : '';
-      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
-    });
-    canvas.addEventListener('mouseleave', () => {
-      canvas._hoverX = -1;
-      canvas.style.cursor = '';
-      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
-    });
+  function emptyXAxis(slots, xLabels) {
+    const axis = lineXAxis(slots, xLabels);
+    return { ...axis, data: xLabels && xLabels.length ? xLabels.slice(0, 2) : [''] };
   }
 
-  // 与 attachLineHover 同一套「缓存入参 + mousemove 整帧重画」的模式。
-  function attachBarHover(canvas) {
-    if (canvas._barHoverBound) return;
-    canvas._barHoverBound = true;
-    canvas.addEventListener('mousemove', (e) => {
-      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
-      canvas.style.cursor = canvas._barOpt ? 'crosshair' : '';
-      if (canvas._barOpt) bars(canvas, canvas._barOpt);
+  // ---------- 柱状图 ----------
+  // groups = [{ label, values: [down] 或 [down, up] }]。检查栏 30 天图只画下载
+  // （296px 宽挤不开双色分组柱）；历史屏画双色分组。selectedIndex 那组保持全色、
+  // 其余组降透明 —— 选中这件事靠对比度表达，190ms 的平滑过渡比顶帽瞬变更清楚。
+
+  function bars(el, opt) {
+    const entry = acquire(el);
+    if (!entry) return null;
+    const groups = opt.groups || [];
+    const colors = opt.colors || [cssVar('--down') || '#f0963f', cssVar('--up') || '#62a9e8'];
+    const empty = !groups.length;
+
+    let dataMax = 0;
+    for (const g of groups) for (const v of g.values) if (v > dataMax) dataMax = v;
+    const yMax = niceMax(dataMax * 1.06);
+
+    if (empty) {
+      setShape(entry, 'B|empty', {
+        animation: false,
+        grid: gridFor(opt),
+        tooltip: { show: false },
+        xAxis: { ...lineXAxis(2, opt.xLabels), boundaryGap: true },
+        yAxis: yAxisOpt(yMax, opt.formatY || axisBytes),
+        series: [],
+      });
+      return null;
+    }
+
+    const seriesCount = Math.max(1, groups[0].values.length);
+    const sel = typeof opt.selectedIndex === 'number' ? opt.selectedIndex : -1;
+    const tickSet = new Set((opt.tickLabels || []).map((t) => t.index));
+    const grid = gridFor(opt);
+
+    const seriesOpt = [];
+    for (let si = 0; si < seriesCount; si++) {
+      seriesOpt.push({
+        name: (opt.seriesNames || [])[si] || '数值',
+        type: 'bar',
+        barCategoryGap: '25%',
+        barGap: '35%',
+        itemStyle: { color: colors[si] || colors[0], borderRadius: [2, 2, 0, 0] },
+        data: groups.map((g, gi) => ({
+          value: g.values[si] || 0,
+          itemStyle: sel >= 0 ? { opacity: gi === sel ? 1 : 0.45 } : undefined,
+        })),
+      });
+    }
+
+    const tipTitle = opt.tipTitle;
+    setShape(entry, `B|${seriesCount}|${groups.length}|${sel >= 0}`, {
+      ...animOpt(),
+      // 入场只在首次：柱子随每根 4ms 递进长出（90 根封顶 320ms），
+      // 之后切档位/选中只走 190ms 的更新过渡，不再重新逐根表演
+      animationDelay: entry.played ? 0 : (idx) => Math.min(idx * 4, 320),
+      grid,
+      tooltip: {
+        ...tooltipBase(),
+        trigger: 'axis',
+        axisPointer: { type: 'shadow', shadowStyle: { color: rgba(cssVar('--text') || '#e3e5e9', 0.06) } },
+        formatter: (params) => {
+          if (!params || !params.length) return '';
+          const gi = params[0].dataIndex;
+          const g = groups[gi];
+          if (!g) return '';
+          const title = String(tipTitle ? tipTitle(g, gi) : (g.label ?? ''));
+          const rows = params.map((p) => (
+            `<div>${p.marker}${esc(p.seriesName)}&nbsp;&nbsp;<b>${fmtFull(p.value, opt.tipSuffix || '')}</b></div>`
+          ));
+          return `<div style="color:${esc(cssVar('--text-2') || '#9ba1a9')};margin-bottom:2px">${esc(title)}</div>${rows.join('')}`;
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: groups.map((g) => g.label),
+        axisLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30' } },
+        axisTick: { show: false },
+        // 两端标注 + 月初刻度（tickLabels），贴太近的让 hideOverlap 裁掉
+        axisLabel: {
+          ...axisLabelOpt(),
+          interval: (i) => i === 0 || i === groups.length - 1 || tickSet.has(i),
+          hideOverlap: true,
+        },
+      },
+      yAxis: yAxisOpt(yMax, opt.formatY || axisBytes),
+      series: seriesOpt,
     });
-    canvas.addEventListener('mouseleave', () => {
-      canvas._hoverX = -1;
-      canvas.style.cursor = '';
-      if (canvas._barOpt) bars(canvas, canvas._barOpt);
-    });
+    entry.played = true;
+
+    // 点柱选中的命中测试。按固定 GRID 几何反推，与旧手写版同一套契约：
+    // 出绘图区返回 -1（点空白 = 取消选中）。
+    return {
+      indexAt(clientX) {
+        const box = el.getBoundingClientRect();
+        const x = clientX - box.left;
+        const left = grid.left;
+        const right = el.clientWidth - grid.right;
+        if (x < left || x > right) return -1;
+        const pitch = (right - left) / groups.length;
+        return Math.max(0, Math.min(groups.length - 1, Math.floor((x - left) / pitch)));
+      },
+    };
   }
 
-  // 光标落在哪个柱组里。与折线图不同，出绘图区即算无悬停、不留 6px 余量 ——
-  // 柱与柱有明确边界，贴着 y 轴标注还弹出读数反而含糊。
-  function barHoverIndexAt(canvas, r, n) {
-    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
-    const x = canvas._hoverX;
-    if (x < r.left || x > r.right) return -1;
-    return Math.max(0, Math.min(n - 1, Math.floor(((x - r.left) / r.plotW) * n)));
-  }
-
-  // 柱悬停小卡：组标签做标题（tipTitle 可覆盖，周聚合标「当周」），
-  // 各系列值用 fmtFull 全精度 —— 与折线悬停「轴上紧凑、卡里全精度」的分工一致。
-  function drawBarHover(ctx, r, groups, idx, opt, colors) {
-    const g = groups[idx];
-    const pitch = r.plotW / groups.length;
-    const cx = Math.round(r.left + (idx + 0.5) * pitch) + 0.5;
-
-    ctx.save();
-    ctx.strokeStyle = cssVar('--line') || '#32363e';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(cx, r.top);
-    ctx.lineTo(cx, r.bottom);
-    ctx.stroke();
-
-    const names = opt.seriesNames || [];
-    const rows = g.values.map((v, si) => ({
-      color: colors[si] || colors[0],
-      label: names[si] || '数值',
-      text: fmtFull(v || 0, opt.tipSuffix || ''),
-    }));
-    ctx.font = FONT_NUM;
-    const title = String(opt.tipTitle ? opt.tipTitle(g, idx) : (g.label ?? ''));
-    let textW = ctx.measureText(title).width;
-    for (const row of rows) textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
-    const boxW = textW + 22;
-    const boxH = 20 + rows.length * 14;
-    let bx = cx + 8;
-    if (bx + boxW > r.right + PAD_R) bx = cx - 8 - boxW;
-    const by = r.top + 4;
-
-    ctx.setLineDash([]);
-    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
-    ctx.strokeStyle = cssVar('--line') || '#32363e';
-    roundRectPath(ctx, bx, by, boxW, boxH, 6);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
-    ctx.fillText(title, bx + 10, by + 11);
-    rows.forEach((row, i) => {
-      const ry = by + 26 + i * 14;
-      ctx.fillStyle = row.color;
-      ctx.fillRect(bx + 10, ry - 3, 6, 6);
-      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
-      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
-    });
-    ctx.restore();
+  // 悬浮卡里的进程名 / 日期来自外部数据，进 HTML 前过一道转义
+  function esc(s) {
+    return window.NetPeekCommon ? window.NetPeekCommon.escapeHtml(s) : String(s);
   }
 
   window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };

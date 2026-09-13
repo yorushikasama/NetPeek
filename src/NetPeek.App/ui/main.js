@@ -10,7 +10,7 @@
 
 const { listen } = window.__TAURI__.event;
 const C = window.NetPeekCharts;
-const $ = (id) => document.getElementById(id);
+const $ = (id) => window.NetPeekCommon.byId(id, 'main');
 
 const WINDOW_SECS = 60;      // 两张实时图的时间窗
 
@@ -59,6 +59,7 @@ const els = {
   insp30Title: $('insp30Title'),
   insp30Total: $('insp30Total'),
   insp30Chart: $('insp30Chart'),
+  detailCard: $('detailCard'),
 };
 
 // ===== 状态 =====
@@ -102,49 +103,18 @@ function histKey(p) {
 }
 
 // ===== 格式化 =====
+// 实现全部在 common.js：小窗是独立 webview，历史屏又要跟表格里的数字对得上，
+// 各写一份迟早漂移成三套档位。这里只是把当前的 rateUnit 绑上去。
 
-// 单位非 B 时把数值压到 999 上限。起因：999_999 字节 / 1000 = 999.999，
-// 四舍五入成 "1000.0 KB" —— 数字跨出了自己的单位，读起来像计算错误。
-// 压到 999 比进位换单位简单，且在显示层面与真实量级的偏差可忽略。
-function clampUnit(n) {
-  return n > 999 ? 999 : n;
-}
+const _K = window.NetPeekCommon;
+const UNATTR = _K.UNATTR;
 
-function fmtRate(bps) {
-  if (rateUnit === 'kb') return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
-  if (rateUnit === 'mb') return `${clampUnit(bps / 1e6).toFixed(1)} MB/s`;
-  if (rateUnit === 'gb') return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
-  // GB 档此前缺失：万兆链路（1.25 GB/s）会被压在 "999.00 MB/s"，与 fmtBytes 的档位也不一致。
-  if (bps >= 1e9) return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
-  if (bps >= 1e6) return `${clampUnit(bps / 1e6).toFixed(2)} MB/s`;
-  if (bps >= 1e3) return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
-  return `${Math.round(bps)} B/s`;
-}
-
-function fmtBytes(bytes) {
-  if (rateUnit === 'kb') return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
-  if (rateUnit === 'mb') return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
-  if (rateUnit === 'gb') return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e9) return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
-  if (bytes >= 1e3) return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
-  return `${Math.round(bytes)} B`;
-}
-
-// 图标取不到时的首字母占位。未归因流量的名字是「(系统/未归因)」，
-// 直接切首字符会在徽标里画一个孤零零的半角括号，读成渲染出错而不是占位。
-const UNATTR = '(系统/未归因)';
-function initialOf(name, len) {
-  const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
-  if (!s) return '·';
-  return s.slice(0, len || 1).toUpperCase();
-}
+function fmtRate(bps) { return _K.fmtRate(bps, rateUnit); }
+function fmtBytes(bytes) { return _K.fmtBytes(bytes, rateUnit); }
+function initialOf(name, len) { return _K.initialOf(name, len); }
 
 // 顶栏的数字和单位分两个元素：单位降到 75% 不透明度且不跟着数字放大（§2.2）
-function splitUnit(text) {
-  const i = text.lastIndexOf(' ');
-  return i < 0 ? { value: text, unit: '' } : { value: text.slice(0, i), unit: text.slice(i + 1) };
-}
+function splitUnit(text) { return _K.splitUnit(text); }
 
 // 数字主体 + 小一号的灰单位，同一规则铺到表格速率、检查栏累计、今日合计 ——
 // 单位跟着数字同大小同色时，一列数字读起来是三段等重的字符串，量级感出不来。
@@ -606,6 +576,7 @@ function setProcState(kind) {
 
 // 未选中任何行时是总览态：全局字段 + 全局合计；选中后是详情态。
 // 两态共用头部与合计两行，只切换中间那一段（§2.4）。
+let inspKey = 'o'; // 详情卡动画的 key：'o' = 总览，否则是选中行的 rowKey
 function renderInspector(snap, procs) {
   const sel = selected && rowNodes.get(selected.keyStr)
     ? rowNodes.get(selected.keyStr).procData
@@ -616,6 +587,19 @@ function renderInspector(snap, procs) {
     renderOverview(snap, procs);
   } else {
     renderDetail(snap, sel);
+  }
+
+  // 选中对象变了（换行 / 切回总览）才让详情卡重播 180ms 入场 —— 本函数每秒
+  // 跑一次，靠 key 去重，逐帧刷新的重绘不会反复演。
+  const key = sel ? `d:${rowKey(sel)}` : 'o';
+  if (key !== inspKey) {
+    inspKey = key;
+    const card = els.detailCard;
+    if (card) {
+      card.classList.remove('is-enter');
+      void card.offsetWidth; // 强制重排，让同名动画能重放
+      card.classList.add('is-enter');
+    }
   }
 }
 
@@ -1098,6 +1082,10 @@ async function boot() {
 
   drawBandwidth();
   render30Day(null, true);
+
+  // 放在所有 init 之后：theme-ui / settings-ui / history-ui 的 $() 是在各自
+  // init 里跑的，早报会把它们还没查的节点算成「不缺」。
+  window.NetPeekCommon.reportMissingIds();
 }
 
 boot();

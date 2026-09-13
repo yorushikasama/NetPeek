@@ -7,8 +7,10 @@
 import { loadScripts, eq, section, report } from './_harness.mjs';
 
 // settings-ui.js 顶层就要摸 document.getElementById，给个空桩即可（不触发任何交互）。
+// common.js 必须先加载：$() 现在走 NetPeekCommon.byId（查空登记，见 dom-contract.test），
+// 少了它 settings-ui.js 第一行就炸。
 const stub = { getElementById: () => null };
-const UI = loadScripts(['settings-ui.js'], { document: stub }).NetPeekSettingsUI;
+const UI = loadScripts(['common.js', 'settings-ui.js'], { document: stub }).NetPeekSettingsUI;
 
 section('geoDbLabel 内嵌库');
 {

@@ -81,8 +81,11 @@
     </div>
     <span class="rail-grow" aria-hidden="true"></span>
     <button type="button" class="ri" id="miniToggle" data-tip="迷你窗" aria-label="打开迷你窗">
+      <!-- 画中画：外层窗口 + 右下角脱出的小窗。原来的「矩形+竖分隔线」是侧边栏图标，
+           读成「收起侧栏」，和「缩成悬浮小件」的本意完全对不上。同源 path 在
+           common.js icon() 里没有副本 —— 此图标只此一处使用。 -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
-           stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M14.5 4v16" /></svg>
+           stroke-linecap="round" stroke-linejoin="round"><path d="M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" /><rect x="12" y="13" width="10" height="8" rx="2" /></svg>
     </button>
   </nav>
 
@@ -101,7 +104,7 @@
               <span class="is-up"><i></i>上传</span>
             </div>
           </div>
-          <div class="plot"><canvas id="bandwidthChart" role="img" aria-label="总带宽最近 60 秒曲线"></canvas></div>
+          <div class="plot"><div id="bandwidthChart" role="img" aria-label="总带宽最近 60 秒曲线"></div></div>
         </div>
 
         <div class="card table-card">
@@ -182,7 +185,7 @@
             <span class="sp"></span>
             <span class="rc-aside" id="insp30Total">合计 —</span>
           </div>
-          <div class="rc-plot"><canvas id="insp30Chart" role="img" aria-label="最近 30 天每日下载柱状图"></canvas></div>
+          <div class="rc-plot"><div id="insp30Chart" role="img" aria-label="最近 30 天每日下载柱状图"></div></div>
         </div>
 
         <!-- 详情卡：选中一行 → 应用详情；未选中 → 总览字段 -->
@@ -195,7 +198,7 @@
             </div>
           </div>
           <div class="rc-path" id="inspPath">等待采集服务连接…</div>
-          <div class="rc-meta truncate" id="inspMeta">—</div>
+          <div class="rc-meta" id="inspMeta">—</div>
 
           <div class="duorow">
             <span class="it is-down"><span class="lbl">累计下载</span><b id="inspDownTotal">—</b></span>
@@ -209,7 +212,7 @@
               <span class="is-up" id="inspLiveUp"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>—</span>
               <span class="insp-live-cap">实时用量</span>
             </div>
-            <div class="rc-plot small"><canvas id="inspLiveChart" role="img" aria-label="选中应用最近 60 秒速率曲线"></canvas></div>
+            <div class="rc-plot small"><div id="inspLiveChart" role="img" aria-label="选中应用最近 60 秒速率曲线"></div></div>
           </div>
 
           <!-- 总览态：字段组。归因说明挂在归因覆盖率上，不另设入口。 -->
@@ -281,8 +284,8 @@
             </div>
           </div>
           <!-- tabindex + 方向键：柱图原本纯 click，键盘用户选不了某一天（U3） -->
-          <div class="plot"><canvas id="histChart" tabindex="0" role="img"
-               aria-label="历史流量每日柱状图，按左右方向键选择某一天，Esc 取消选中"></canvas></div>
+          <div class="plot"><div id="histChart" tabindex="0" role="img"
+               aria-label="历史流量每日柱状图，按左右方向键选择某一天，Esc 取消选中"></div></div>
         </div>
       </div>
 
@@ -319,7 +322,7 @@
           <div class="srow">
             <div class="t"><b>速率显示单位</b><small>自动挡按数值大小逐级切换；固定值后速率与总量都按该单位显示</small></div>
             <label class="field-inline">
-              <select id="setRateUnit">
+              <select id="setRateUnit" data-menu>
                 <option value="auto">自动（B / KB / MB / GB）</option>
                 <option value="kb">固定 KB</option>
                 <option value="mb">固定 MB</option>
@@ -360,6 +363,25 @@
             </button>
           </div>
 
+          <!-- 跟随系统深浅色：skin 存的是用户意图，resolveSkin 出口按系统深浅
+               在 plain/light 之间映射；系统翻转时由 theme-ui 的 matchMedia 监听重应用。 -->
+          <label class="check" id="followSystemWrap">
+            <input type="checkbox" id="followSystem" />
+            <span>跟随系统深浅色</span>
+          </label>
+          <div class="note" id="followSystemNote">朴素与浅色皮肤随系统深浅自动切换；琥珀、跟随背景图和自定义皮肤是你的显式选择，不参与切换。</div>
+
+          <!-- 全局界面不透明度：theme.applyUiOpacity 挂 --ui-opacity，
+               只淡底色与底图（主窗 .frame/.backdrop、小窗 .panel、能量球 .orb），
+               文字与边线不参与淡出；50% 为最淡一档。 -->
+          <div class="srow">
+            <div class="t"><b>界面不透明度</b><small>底色与底图变透、桌面透上来，文字保持清晰；50% 为最淡一档</small></div>
+            <div class="slider">
+              <input type="range" id="uiOpacity" min="0.5" max="1" step="0.05" value="1" aria-label="界面不透明度" />
+              <span class="value" id="uiOpacityValue">100%</span>
+            </div>
+          </div>
+
           <!-- 跟随背景图皮肤的专属区：背景图 + 面板微调 + AI 取色 -->
           <div class="image-skin-block" id="imageSkinBlock" hidden>
             <div class="srow">
@@ -370,22 +392,51 @@
               <input type="file" id="bgFile" accept="image/*" hidden />
             </div>
             <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
+
+            <!-- 内置壁纸：三张图一直在 ui/wallpapers/ 里，但没有任何入口，
+                 于是「跟随背景图」这个皮肤开箱是空的、必须用户自己去找图。 -->
+            <div class="wall-grid" id="wallGrid"></div>
+
+            <!-- 显示方式：置底 = 壁纸垫底、面板悬浮（原方式）；
+                 贴膜 = 壁纸按窗口坐标对齐,每块面板表面"剪"下落在自己身上的那块图,
+                 缝隙与窗口底是不可贴区、露素底（类似车膜,图案只留在可贴表面） -->
             <div class="srow">
-              <div class="t"><b>面板不透明度</b><small>0.82 – 1.00，越低底图越明显；下限保证 4.5:1 对比</small></div>
-              <div class="slider">
-                <input type="range" id="stdOpacity" min="0.82" max="1" step="0.01" value="0.92"
-                       aria-label="面板不透明度" />
-                <span class="value" id="opValue">0.92</span>
+              <div class="t"><b>显示方式</b><small>置底：壁纸垫底、面板悬浮；贴膜：壁纸只贴在面板表面，缝隙露素底</small></div>
+              <div class="seg" id="backdropStyleSeg" role="group" aria-label="显示方式">
+                <button type="button" data-style="underlay">置底</button>
+                <button type="button" data-style="wrap">贴膜</button>
               </div>
             </div>
+
+            <!-- 背景亮度（置底/贴膜通用）：暗图提亮、亮图压暗,深色模式下嫌底图
+                 太暗就往右拖;守卫按调亮后的实际亮度重算浓度/压暗地板 -->
             <div class="srow">
+              <div class="t"><b>背景亮度</b><small>暗图提亮、亮图压暗；深色模式下底图太暗就往右拖</small></div>
+              <div class="slider">
+                <input type="range" id="bgBrightness" min="0.5" max="1.5" step="0.05" value="1"
+                       aria-label="背景亮度" />
+                <span class="value" id="bgBrightnessValue">×1.00</span>
+              </div>
+            </div>
+
+            <div class="srow" id="opRow">
+              <div class="t"><b>面板不透明度</b><small>越低底图越透出来。图偏亮时系统自动补压暗，文字始终可读</small></div>
+              <div class="slider">
+                <input type="range" id="stdOpacity" min="0.7" max="1" step="0.01" value="0.88"
+                       aria-label="面板不透明度" />
+                <span class="value" id="opValue">0.88</span>
+              </div>
+            </div>
+            <!-- 这张图触发自动压暗 / 硬钳时才出现 -->
+            <div class="note is-warn" id="opFloorNote" hidden></div>
+            <div class="srow" id="blurRow">
               <div class="t"><b>背景模糊</b><small>只模糊底图，不模糊面板内容</small></div>
               <div class="slider">
-                <input type="range" id="stdBlur" min="0" max="40" step="1" value="0" aria-label="背景模糊" />
+                <input type="range" id="stdBlur" min="0" max="60" step="1" value="0" aria-label="背景模糊" />
                 <span class="value" id="blurValue">0 px</span>
               </div>
             </div>
-            <div class="srow">
+            <div class="srow" id="scrimRow">
               <div class="t"><b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small></div>
               <div class="slider">
                 <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
@@ -394,12 +445,44 @@
               </div>
             </div>
 
+            <!-- 贴膜浓度（仅贴膜模式）：面板底色与壁纸的调和比,越高文字越清楚;
+                 图偏亮时守卫自动加深（提示条复用 opFloorNote） -->
+            <div class="srow" id="wrapOpRow" hidden>
+              <div class="t"><b>贴膜浓度</b><small>越低图案越鲜活；图偏亮时自动加深保证文字可读</small></div>
+              <div class="slider">
+                <input type="range" id="wrapOpacity" min="0.4" max="0.9" step="0.01" value="0.62"
+                       aria-label="贴膜浓度" />
+                <span class="value" id="wrapOpValue">0.62</span>
+              </div>
+            </div>
+
+            <!-- 深浅偏好：auto 按壁纸主色亮度分深浅；dark / light 把方向钉死，
+                 改动会整条重跑取色管线 -->
+            <div class="srow">
+              <div class="t"><b>深浅偏好</b><small>自动按壁纸明暗决定，或固定为深色 / 浅色基底</small></div>
+              <div class="seg" id="imageModeSeg" role="group" aria-label="深浅偏好">
+                <button type="button" data-mode="light">浅色</button>
+                <button type="button" data-mode="auto">自动</button>
+                <button type="button" data-mode="dark">深色</button>
+              </div>
+            </div>
+
+            <!-- 强调色色板：取色管线按「彩度 × 占比」评分挑选；自动选中的带环，
+                 点任何一颗都把交互强调切到它 -->
+            <div class="srow">
+              <div class="t"><b>强调色</b><small>从背景图提取的候选，点色板可换交互强调</small></div>
+            </div>
+            <div class="pal-row" id="palRow" hidden></div>
+
             <!-- AI 取色：跟随背景图皮肤的高级选项 -->
             <div class="ai-fields" id="aiSection">
               <h5>AI 取色（高级）</h5>
               <p class="note">把背景缩略图交给多模态模型生成整套配色；失败自动回退本地取色。</p>
               <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
               <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
+              <!-- 明示而不是默默存：这个 key 会随 theme-config.json 明文落盘，
+                   用户有权在填写前知道它存在哪、何时离开本机。 -->
+              <div class="note">API Key 明文保存在本机配置文件（theme-config.json），不随皮肤导出；仅在你点「生成并应用」时随缩略图发往上面填写的接口地址。</div>
               <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
               <label class="check">
                 <input type="checkbox" id="aiConsent" />
@@ -434,11 +517,16 @@
               <button type="button" class="btn" data-preset="light">浅色</button>
               <button type="button" class="btn" data-preset="amber">琥珀</button>
             </div>
+            <!-- 对比度守卫的回执。改色当场生效，读不出来的颜色会被提亮到 4.5:1，
+                 这里把「动了哪一项」说出来 —— 静默改写用户挑的颜色是最不该做的。 -->
+            <div class="note is-warn" id="guardNote" hidden></div>
             <div class="bg-actions">
               <input type="text" id="themeName" placeholder="皮肤名称" class="text-input" />
               <button type="button" class="btn is-primary" id="themeSave">另存</button>
             </div>
+            <div class="note" id="themeHint"></div>
             <div class="theme-list" id="themeList"></div>
+            <div class="note" id="themeEmpty">还没有另存的皮肤。上面改出满意的配色后起个名字存下来，随时可以切回。</div>
             <button type="button" class="btn" id="themeReset">还原默认</button>
           </div>
         </div>
@@ -450,7 +538,7 @@
           <div class="srow">
             <div class="t"><b>保留周期</b><small id="histStats">暂无历史数据</small></div>
             <label class="field-inline">
-              <select id="setRetention">
+              <select id="setRetention" data-menu>
                 <option value="7">7 天</option>
                 <option value="30">30 天</option>
                 <option value="90">90 天</option>
@@ -522,9 +610,24 @@
         <!-- 关于 -->
         <div class="sgroup" data-sec="about" hidden>
           <h4>关于</h4>
-          <div class="note">NetPeek v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</div>
-          <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
-          <div class="note">国家/地区库：DB-IP Country Lite（© DB-IP.com，CC BY 4.0），每月随版本更新。</div>
+          <div class="about-brand">
+            <span class="about-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>
+            </span>
+            <span class="about-id">
+              <b>NetPeek</b>
+              <span class="note">v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</span>
+            </span>
+          </div>
+          <div class="srow">
+            <div class="t"><b>数据目录</b></div>
+            <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
+          </div>
+          <div class="srow">
+            <div class="t"><b>国家/地区库</b><small>每月随版本更新</small></div>
+            <div class="note">DB-IP Country Lite（© DB-IP.com，CC BY 4.0）</div>
+          </div>
           <h4 class="is-spaced">归因边界</h4>
           <div class="attrib-note">
             <ul>
@@ -553,9 +656,13 @@
 <script src="common.js"></script>
 <script src="flags.js"></script>
 <script src="services.js"></script>
+<script src="vendor/echarts.min.js"></script>
 <script src="charts.js"></script>
+<script src="vendor/chroma.min.js"></script>
+<script src="vendor/color-thief.min.js"></script>
 <script src="theme.js"></script>
 <script src="theme-ui.js"></script>
+<script src="select-menu.js"></script>
 <script src="settings-ui.js"></script>
 <script src="history-ui.js"></script>
 <script src="main.js"></script>

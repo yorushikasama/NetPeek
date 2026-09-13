@@ -1,4 +1,8 @@
-// main.js 单测：字节/速率格式化（clampUnit 截断）与对端列的渲染逻辑。
+// 格式化与对端列渲染的单测。
+//
+// 格式化实现在 common.js（原来 main.js 一份、mini.js 一份、history-ui.js 借一份，
+// 三处档位迟早漂移）。这里直接测那一份，主界面的 fmtRate/fmtBytes 只是把当前
+// rateUnit 绑上去的薄包装，没有独立逻辑可测。
 //
 // 重点是 clampUnit：单位非 B 时数值不得超过 999。修复前的 bug 是
 // 999_999 字节 / 1000 = 999.999 → toFixed(1) → "1000.0 KB"，数字跨出了自己的单位。
@@ -9,12 +13,15 @@
 
 import { makeWith, loadScripts, makeDocument, eq, ok, section, report } from './_harness.mjs';
 
-const ctx = loadScripts(['flags.js', 'services.js']);
+const ctx = loadScripts(['flags.js', 'services.js', 'common.js']);
 const S = ctx.NetPeekServices;
+const K = ctx.NetPeekCommon;
 
 // ---------- 格式化 ----------
 for (const unit of ['auto', 'kb', 'mb', 'gb']) {
-  const { fmtBytes, fmtRate } = makeWith('main.js', ['clampUnit', 'fmtBytes', 'fmtRate'], { rateUnit: unit });
+  // 绑定当前单位档，签名与主界面里那两个包装函数一致
+  const fmtBytes = (n) => K.fmtBytes(n, unit);
+  const fmtRate = (n) => K.fmtRate(n, unit);
 
   section(`fmtBytes（rateUnit=${unit}）`);
   switch (unit) {
@@ -64,6 +71,81 @@ for (const unit of ['auto', 'kb', 'mb', 'gb']) {
       eq(fmtRate(1e9), '1.00 GB/s', '强制 GB');
       break;
   }
+}
+
+// ---------- 档位边界与异常输入 ----------
+// 上面按单位档跑的是「典型值」。真正会出事的是档位切换那一个字节的两侧，
+// 以及采集端偶发的 null / 负数（进程退出那一帧算出来的速率可能是负的）。
+section('fmtBytes / fmtRate 档位边界');
+{
+  // 每个进位点的前后一字节都要落在正确的档里
+  eq(K.fmtBytes(999, 'auto'), '999 B', '1e3 前一档仍是 B');
+  eq(K.fmtBytes(1000, 'auto'), '1.0 KB', '1e3 整点进 KB');
+  eq(K.fmtBytes(999999, 'auto'), '999.0 KB', '1e6 前一字节仍是 KB');
+  eq(K.fmtBytes(1000000, 'auto'), '1.0 MB', '1e6 整点进 MB');
+  eq(K.fmtBytes(999999999, 'auto'), '999.0 MB', '1e9 前一字节仍是 MB');
+  eq(K.fmtBytes(1000000000, 'auto'), '1.00 GB', '1e9 整点进 GB');
+
+  // 速率的 MB 档比字节多一位小数（带宽读数要看得出百 KB 级的变化）
+  eq(K.fmtRate(1000000, 'auto'), '1.00 MB/s', '速率 MB 档两位小数');
+  eq(K.fmtBytes(1000000, 'auto'), '1.0 MB', '总量 MB 档一位小数');
+
+  // clampUnit 的边界：999.9xx 必须压回 999，不能进位成 1000
+  eq(K.clampUnit(999), 999, '999 不动');
+  eq(K.clampUnit(999.4), 999, '超过 999 一律压到 999');
+  eq(K.clampUnit(1000), 999, '1000 压到 999');
+}
+
+section('fmtBytes / fmtRate 异常输入不得渲染出 NaN');
+{
+  // 界面上出现 "NaN B/s" 比出现 "0 B/s" 严重得多：后者是读数为零，
+  // 前者让人以为整个采集链路坏了。
+  eq(K.fmtBytes(0, 'auto'), '0 B', '0');
+  eq(K.fmtRate(0, 'auto'), '0 B/s', '速率 0');
+  eq(K.fmtBytes(-1, 'auto'), '-1 B', '负数按原样显示，不伪装成 0');
+  ok(!/NaN/.test(K.fmtBytes(null, 'auto')), 'null 不产出 NaN');
+  ok(!/NaN/.test(K.fmtBytes(undefined, 'auto')), 'undefined 不产出 NaN');
+  ok(!/NaN/.test(K.fmtRate(null, 'auto')), '速率 null 不产出 NaN');
+  ok(!/NaN/.test(K.fmtBytes('abc', 'auto')), '非数字字符串不产出 NaN');
+}
+
+section('splitUnit：数值与单位分离');
+{
+  eq(K.splitUnit('1.23 MB/s').value, '1.23', '数值段');
+  eq(K.splitUnit('1.23 MB/s').unit, 'MB/s', '单位段');
+  eq(K.splitUnit('999 B').unit, 'B', '单字母单位');
+  // 没有空格时整串算数值：这样调用方不会拿到 undefined 去 textContent
+  eq(K.splitUnit('—').value, '—', '无空格时整串为数值段');
+  eq(K.splitUnit('—').unit, '', '无空格时单位为空串');
+}
+
+section('fmtDuration：HH:MM:SS');
+{
+  eq(K.fmtDuration(0), '00:00:00', '零');
+  eq(K.fmtDuration(59), '00:00:59', '分钟前一秒');
+  eq(K.fmtDuration(60), '00:01:00', '整分');
+  eq(K.fmtDuration(3599), '00:59:59', '小时前一秒');
+  eq(K.fmtDuration(3600), '01:00:00', '整时');
+  eq(K.fmtDuration(4513), '01:15:13', '常规组合');
+  eq(K.fmtDuration(360000), '100:00:00', '超过两位数的小时不截断');
+  // 负数会出现在「会话时长」上：进程启动时刻比本机时钟新（改过系统时间）
+  eq(K.fmtDuration(-5), '00:00:00', '负数夹到零，不显示 -1:59:55');
+  eq(K.fmtDuration(1.9), '00:00:01', '小数向下取整');
+  eq(K.fmtDuration(null), '00:00:00', 'null 不产出 NaN:NaN:NaN');
+}
+
+section('initialOf：首字母占位');
+{
+  eq(K.initialOf('msedge', 1), 'M', '常规名取首字母大写');
+  eq(K.initialOf('msedge', 2), 'MS', 'len=2 取两位');
+  // 未归因流量名以半角括号开头，直接切首字符会画出一个孤零零的括号
+  eq(K.initialOf(K.UNATTR, 1), '系', '跳过前导括号，取第一个文字');
+  eq(K.initialOf('(系统/未归因)', 2), '系统', '跳过括号后取两字');
+  eq(K.initialOf('', 1), '·', '空名回落中点');
+  eq(K.initialOf(null, 1), '·', 'null 回落中点');
+  eq(K.initialOf('...', 1), '·', '全是标点时回落中点');
+  eq(K.initialOf('7zip', 1), '7', '数字开头保留数字');
+  eq(K.initialOf('中文名', 1), '中', '中文名取首字');
 }
 
 // ---------- 对端列 ----------

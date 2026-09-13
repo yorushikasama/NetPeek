@@ -17,6 +17,26 @@
     <!-- 环形规：外圈 4px 琥珀 = 下载速率 ÷ 近 60 秒峰值，内圈 2px 钢蓝 = 上传（§2.9）。
          轨道垫在下面，没有轨道就只剩一段孤立弧线，读不出「相对水位」。 -->
     <svg class="orb-gauge" viewBox="0 0 92 92" aria-hidden="true">
+      <defs>
+        <!-- 环的管状明暗：同一盏左上光把环照成凸起的管子，而不是贴在球面上的
+             平线。g 所在组带 rotate(-90)，渐变轴按「局部右 = 屏幕上」补偿，
+             亮端落在真实的顶部。换肤跟随靠 stop-color 里的令牌（theme-anim
+             窗口对 stop-color 一并过渡）。 -->
+        <linearGradient id="ringDownG" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" style="stop-color: color-mix(in srgb, var(--down) 82%, white)" />
+          <stop offset="0.55" style="stop-color: var(--down)" />
+          <stop offset="1" style="stop-color: color-mix(in srgb, var(--down) 58%, black)" />
+        </linearGradient>
+        <linearGradient id="ringUpG" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" style="stop-color: color-mix(in srgb, var(--up) 82%, white)" />
+          <stop offset="0.55" style="stop-color: var(--up)" />
+          <stop offset="1" style="stop-color: color-mix(in srgb, var(--up) 58%, black)" />
+        </linearGradient>
+        <linearGradient id="trackG" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" style="stop-color: color-mix(in srgb, var(--line) 62%, white)" />
+          <stop offset="1" style="stop-color: color-mix(in srgb, var(--line) 55%, black)" />
+        </linearGradient>
+      </defs>
       <!-- 半径缩进球缘 3px（外环外缘 43 < 46）：原来外环外缘 = 46 正好压在球的
            1px 边框上，边框线把环切了一道；内外环间隙也从 2px 拉到 3px，
            小尺寸下两条环不再糊成一圈。 -->
@@ -91,7 +111,9 @@
 
   <!-- theme.js 只为拿 applyTokens / resolveSkin / initTheme：小窗是独立 webview，CSS 变量不跨窗口共享 -->
   <script src="common.js"></script>
-  <script src="theme.js"></script>
+  <script src="vendor/chroma.min.js"></script>
+  <script src="vendor/color-thief.min.js"></script>
+<script src="theme.js"></script>
   <script src="mini.js"></script>
 </body>
 </html>

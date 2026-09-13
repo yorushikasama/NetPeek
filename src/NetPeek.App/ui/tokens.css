@@ -36,11 +36,37 @@
   --accent-ink: #1b1d21;  /* 强调底上的文字 */
   --sel-bar: #c9cdd4;     /* 选中指示条、焦点环 */
 
+  /* ---- 全局界面不透明度（外观屏滑杆 → theme.applyUiOpacity） ---- */
+  --ui-opacity: 1;        /* 0.5–1：底色/底图/各表面漆层变透，文字不淡 */
+  --paint-op: var(--ui-opacity);
+                          /* 漆层有效不透明度：无背景图时 = --ui-opacity；
+                             body.has-bg 时由 styles.css 覆写为
+                             max(--panel-op, --panel-op-floor) × --ui-opacity */
+
   /* ---- 背景图模式（「跟随背景图」皮肤专用；其余皮肤恒为不透明、无模糊） ---- */
-  --panel-op: 1;          /* 面板不透明度，仅 body.has-bg 时生效，下限 0.82 */
+  --panel-op: 1;          /* 面板不透明度，仅 body.has-bg 时生效；滑杆下限 0.82，
+                             实际下限由 theme.js 按底图实测亮度动态抬高（backdropFloor） */
+  --panel-op-floor: 0;    /* 面板漆层的可读下限（syncOpacityFloor 写入）。有效漆层 =
+                             max(--panel-op, --panel-op-floor) × --ui-opacity——
+                             floor 只钳面板滑杆与底图的关系；全局界面不透明度
+                             作用于整体，不被 floor 钳住 */
   --bg-blur: 0px;         /* 背景图模糊半径 */
-  --backdrop-dim: 0;      /* 背景图压暗强度 0–0.6 */
+  --bg-brightness: 1;     /* 背景亮度 0.5–1.5：<1 压暗、>1 提亮。置底走底图滤镜，
+                             贴膜走白/黑补偿层；守卫按调亮后的实际亮度算地板 */
+  --bg-sat: 1.35;         /* 底图饱和度提升档：玻璃「透亮感」的来源，仅 body.has-bg 可见 */
+  --backdrop-dim: 0;      /* 背景图压暗强度 0–0.6（用户滑杆） */
+  --backdrop-auto: 0;     /* 自动压暗 0–0.6：可读性守卫的补偿输出，垫在 tint 纱之下，
+                             亮图上代替「硬钳面板不透明度」保文字可读（backdropGuard） */
+  --wrap-op: 0.62;        /* 贴膜浓度：面板底色与壁纸的调和比（贴膜模式专用），
+                             越高越偏面板色、文字越清楚；守卫会按底图亮度自动抬高 */
+  --backdrop-tint: #0b0c0e;
+                          /* 压暗纱的色调：跟随背景图皮肤由 theme.scrimTint 按壁纸
+                             主色派生写入（亮度钳 ≤0.1，保持 floor 近似模型保守）；
+                             其余皮肤纱层根本不渲染，值无所谓 */
   --theme-bg-image: none; /* backdrop 层的背景图 url() */
+  --noise-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='discrete' tableValues='0 1'/%3E%3CfeFuncG type='discrete' tableValues='0 1'/%3E%3CfeFuncB type='discrete' tableValues='0 1'/%3E%3CfeFuncA type='linear' slope='0' intercept='1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+                          /* 单色盐椒噪点（Acrylic 标配，压大半径模糊的色带），
+                             4% 强度烘在资源里；仅背景图模式的压暗纱引用 */
 
   /* ---- 形状 / 字体 / 动效（皮肤不可改） ---- */
   --r-l: 12px;

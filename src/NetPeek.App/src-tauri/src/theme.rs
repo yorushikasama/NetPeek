@@ -44,7 +44,16 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
     let body = data_url
         .strip_prefix("data:image/")
         .ok_or("背景图格式必须是 data URL")?;
-    let ext = body.split([';', ',']).next().unwrap_or("png").to_string();
+    // MIME 子类型 → 扩展名白名单。直接拿子类型当扩展名的话，svg 会落盘成
+    // "*.svg+xml"，读回时对不上 MIME 表、按 image/png 返回，图必坏。
+    let ext = match body.split([';', ',']).next().unwrap_or("png") {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "svg+xml" => "svg",
+        other => return Err(format!("不支持的背景图格式: {other}")),
+    };
     let b64 = body.split(',').nth(1).ok_or("data URL 缺少 base64 内容")?;
     let bytes = base64_decode(b64)?;
 
@@ -82,6 +91,7 @@ pub fn read_background_image(path: String) -> Result<String, String> {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "svg" => "image/svg+xml",
         _ => "image/png",
     };
     Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))

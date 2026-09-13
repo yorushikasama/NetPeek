@@ -7,7 +7,7 @@
 // - 「退出」不在这里，在托盘右键菜单：它和「主界面」并排等宽时误点一下就把采集停了。
 
 (function () {
-  const $ = (id) => document.getElementById(id);
+  const $ = (id) => window.NetPeekCommon.byId(id, 'mini');
 
   const els = {
     orb: $('orb'),
@@ -79,13 +79,9 @@
   const esc = window.NetPeekCommon.escapeHtml;
   const ic = window.NetPeekCommon.icon;
 
-  // 图标取不到时的首字母占位。跳过开头的非字母数字：未归因流量那类以半角括号
-  // 开头的名字直接切首字符，会在徽标里画一个孤零零的括号。小窗只加载 theme.js，
-  // 拿不到主界面那份实现，所以这里自己带一份。
-  function initialOf(name) {
-    const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
-    return s ? s.slice(0, 1).toUpperCase() : '·';
-  }
+  // 首字母占位也走 common.js：小窗原来自己带了一份，与主界面那份逐字相同 ——
+  // 「未归因名字以半角括号开头」这个特例只该在一处维护。
+  const initialOf = (name) => window.NetPeekCommon.initialOf(name, 1);
 
   // 图标缓存：采集端改按路径增量下发（IconUpdates），小窗是独立 webview，
   // 得自己收一份缓存；解析逻辑与主界面 iconOf 相同（含旧协议内联回退）。
@@ -246,6 +242,9 @@
       frag.appendChild(row);
     }
     els.list.replaceChildren(frag);
+    // 放不下的行会被列表底边拦腰截断 —— 静止看像渲染事故。溢出时给底部一层
+    // 渐隐遮罩，把「还有更多」变成一个可读的视觉信号。
+    els.list.classList.toggle('is-fade', els.list.scrollHeight > els.list.clientHeight + 2);
   }
 
   // 状态点：颜色是状态本身，完整文案挂 title / aria-label（40px 的头放不下一句话）。
@@ -312,17 +311,24 @@
     if (!T || !payload || !payload.tokens) return;
     try {
       T.applyTokens(payload.tokens, { silent: true });
+      // 全局界面不透明度随同一次广播过来；缺省（旧主界面）不动本地值
+      if (payload.uiOpacity != null) T.applyUiOpacity(payload.uiOpacity);
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }
   }
 
   async function initTokens() {
     const T = window.NetPeekTheme;
-    if (!T) return;
     try {
+      if (!T) return;
       const boot = await T.initTheme();
       const skin = T.resolveSkin(boot.state); // 内置 / image / 自定义皮肤统一从这走
-      applyTokens({ tokens: skin.tokens });
+      applyTokens({ tokens: skin.tokens, uiOpacity: boot.state.uiOpacity });
     } catch { /* 读不到配置就用兜底值 */ }
+    finally {
+      // 首帧守卫（mini.css html:not(.theme-ready)）：无论成败都要放行渲染，
+      // 失败时兜底色也比永远空白诚实
+      document.documentElement.classList.add('theme-ready');
+    }
   }
 
   // ---------- 事件 ----------
@@ -387,6 +393,10 @@
   });
 
   // ---------- 启动 ----------
+
+  // els 里的查找已经全部做完，这里把缺失的节点一次性报出来。小窗是独立 webview，
+  // mini.html 少一个节点时，症状是「球上某个读数永远不动」——不报出来根本查不到。
+  window.NetPeekCommon.reportMissingIds();
 
   // 先落位：越早设越好，窗口显示前定位完，用户看不到中间态
   placeDefault();

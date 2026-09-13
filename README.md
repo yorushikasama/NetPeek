@@ -50,6 +50,19 @@ pwsh -File scripts/build-installer.ps1
 
 ### 采集服务（需管理员，否则 ETW 会话开不起来）
 
+用 `scripts/dev-collector.ps1`：构建、清掉上一次的僵尸实例、提权后台启动、等两条命名管道
+真的出现了才算成功。从普通权限窗口跑就行，只有启动/停止那一步会弹 UAC。
+
+```bash
+pwsh -ExecutionPolicy Bypass -File scripts/dev-collector.ps1              # 构建并（重）启动
+pwsh -ExecutionPolicy Bypass -File scripts/dev-collector.ps1 -NoBuild     # 跳过构建直接重启
+pwsh -ExecutionPolicy Bypass -File scripts/dev-collector.ps1 -Status      # 只看进程/管道/日志尾部
+pwsh -ExecutionPolicy Bypass -File scripts/dev-collector.ps1 -Tail        # 启动后跟随日志
+pwsh -ExecutionPolicy Bypass -File scripts/dev-collector.ps1 -Stop        # 只停止
+```
+
+手工等价操作（脚本出问题时的退路）：
+
 ```bash
 dotnet build NetPeek.sln
 pwsh -NoProfile -Command "Start-Process 'src\NetPeek.Collector\bin\Debug\net8.0-windows\NetPeek.Collector.exe' -Verb RunAs -WindowStyle Hidden"

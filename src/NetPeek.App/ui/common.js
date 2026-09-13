@@ -3,6 +3,30 @@
 // theme-ui.js 统一从这里取 —— 转义规则这类「各写一份迟早漂移」的东西只留一处。
 
 window.NetPeekCommon = {
+  // ---------- DOM 契约 ----------
+  // HTML 里的 id 和各脚本里的 getElementById 是一份跨文件的隐式契约，共 120 处查找，
+  // 没有任何一层校验它：查不到就是 null，然后在第一次 .textContent = 时才炸，
+  // 而且炸的位置离真正的原因（HTML 少了个节点）很远。这里把每次查空都记下来，
+  // 由 boot() 末尾一次性报出来 —— 一条日志说清「谁少了哪些节点」。
+  _missingIds: [],
+
+  /** getElementById + 查空登记。所有脚本的 $() 都走这一份。 */
+  byId(id, owner) {
+    const el = document.getElementById(id);
+    if (!el) window.NetPeekCommon._missingIds.push(owner ? `${owner}:${id}` : id);
+    return el;
+  },
+
+  /** 报告并清空累积的缺失 id。返回缺失列表，便于调用方决定是否降级。 */
+  reportMissingIds() {
+    const miss = window.NetPeekCommon._missingIds.slice();
+    if (miss.length) {
+      console.warn(`[NetPeek] HTML 缺少 ${miss.length} 个脚本要用的节点：${miss.join(', ')}`);
+    }
+    window.NetPeekCommon._missingIds.length = 0;
+    return miss;
+  },
+
   // HTML 文本转义。凡是用 innerHTML 拼接、内容含进程名/路径/主题名等外部字符串的地方都要过它。
   escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => (
@@ -29,6 +53,86 @@ window.NetPeekCommon = {
     };
     return `<svg class="ic ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor"`
       + ` stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
+  },
+
+  // 未归因流量的显示名。main.js 与 mini.js 都要用它做首字母占位的特例判断，
+  // 各写一份字面量迟早漂移成两个不同的字符串。
+  UNATTR: '(系统/未归因)',
+
+  /**
+   * 图标取不到时的首字母占位。
+   * 跳过开头的非字母数字：未归因流量那类以半角括号开头的名字直接切首字符，
+   * 会在徽标里画一个孤零零的括号 —— 读起来是渲染出错，不是占位。
+   */
+  initialOf(name, len) {
+    const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
+    if (!s) return '·';
+    return s.slice(0, len || 1).toUpperCase();
+  },
+
+  // 单位非 B 时把数值压到 999 上限。起因：999_999 字节 / 1000 = 999.999，
+  // 四舍五入成 "1000.0 KB" —— 数字跨出了自己的单位，读起来像计算错误。
+  clampUnit(n) {
+    return n > 999 ? 999 : n;
+  },
+
+  /**
+   * 入口取数：非有限值一律当 0。
+   * 快照字段缺失时（采集端换协议、旧库回读、未归因行没有速率）传进来的是
+   * undefined，`undefined / 1e3` 是 NaN，最后渲染成 "NaN B" 摆在表格里 ——
+   * 那比显示 0 更糟：它看着像程序崩了，而不是「这一行没有流量」。
+   */
+  toFinite(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  },
+
+  /**
+   * 速率格式化。unit 为 'auto' | 'kb' | 'mb' | 'gb'（设置屏的「速率单位」）。
+   * 固定档直接换算，auto 档按量级选档。
+   * GB 档不可省：万兆链路（1.25 GB/s）在没有 GB 档时会被压在 "999.00 MB/s"，
+   * 而且与 fmtBytes 的档位不一致。
+   */
+  fmtRate(v, unit) {
+    const K = window.NetPeekCommon;
+    const c = K.clampUnit;
+    const bps = K.toFinite(v);
+    if (unit === 'kb') return `${c(bps / 1e3).toFixed(1)} KB/s`;
+    if (unit === 'mb') return `${c(bps / 1e6).toFixed(1)} MB/s`;
+    if (unit === 'gb') return `${c(bps / 1e9).toFixed(2)} GB/s`;
+    if (bps >= 1e9) return `${c(bps / 1e9).toFixed(2)} GB/s`;
+    if (bps >= 1e6) return `${c(bps / 1e6).toFixed(2)} MB/s`;
+    if (bps >= 1e3) return `${c(bps / 1e3).toFixed(1)} KB/s`;
+    return `${Math.round(bps)} B/s`;
+  },
+
+  /** 字节总量格式化。档位与 fmtRate 对齐，只是不带 /s。 */
+  fmtBytes(v, unit) {
+    const K = window.NetPeekCommon;
+    const c = K.clampUnit;
+    const bytes = K.toFinite(v);
+    if (unit === 'kb') return `${c(bytes / 1e3).toFixed(1)} KB`;
+    if (unit === 'mb') return `${c(bytes / 1e6).toFixed(1)} MB`;
+    if (unit === 'gb') return `${c(bytes / 1e9).toFixed(2)} GB`;
+    if (bytes >= 1e9) return `${c(bytes / 1e9).toFixed(2)} GB`;
+    if (bytes >= 1e6) return `${c(bytes / 1e6).toFixed(1)} MB`;
+    if (bytes >= 1e3) return `${c(bytes / 1e3).toFixed(1)} KB`;
+    return `${Math.round(bytes)} B`;
+  },
+
+  /** 把 "1.23 MB/s" 拆成数值与单位两段：单位要用小一号字排，不能混在一个字号里。 */
+  splitUnit(text) {
+    const i = String(text).lastIndexOf(' ');
+    return i < 0
+      ? { value: String(text), unit: '' }
+      : { value: String(text).slice(0, i), unit: String(text).slice(i + 1) };
+  },
+
+  /** 秒 → HH:MM:SS。负数与小数一律先夹到非负整数，避免出现 "-1:59:59"。 */
+  fmtDuration(sec) {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
   },
 
   /**

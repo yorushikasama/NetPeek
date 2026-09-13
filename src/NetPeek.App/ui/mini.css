@@ -36,8 +36,18 @@ html, body {
 
 /* ---------- 能量球 ---------- */
 
+/* 首帧守卫：initTokens 是异步的，令牌落地前形态元素先用 tokens.css 的 plain 兜底
+   色渲染，然后跳到用户皮肤 —— 一帧闪色。窗口虽是 visible:false 创建，但显示时机
+   由托盘控制，不保证晚于取色完成；令牌就绪（或读取失败）前先把形态藏起来。 */
+html:not(.theme-ready) .orb,
+html:not(.theme-ready) .panel { visibility: hidden; }
+
 .orb {
   position: absolute;
+  /* 全局界面不透明度（与主窗 .frame 共用 --ui-opacity，theme-changed 广播）：
+     只淡「漆」不淡字 —— 球体底色 / 边线 / 光照层按 --o 淡出，速率数字与环形规
+     是数据、保持不透明。原来整层 opacity 淡出，50% 档连球上唯一的读数也只剩一半。 */
+  --o: calc(var(--ui-opacity) * 100%);
   /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口 108×108 由 mini.rs 的 ORB_W/H
      写定，改球径要连那两个常量一起改，否则球不再居中。 */
   width: 92px;
@@ -46,17 +56,25 @@ html, body {
   top: 50%;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  /* 不加外发光。球是一颗有体积的实体，体积感由下面 ::before 的球面明暗负责；
-     再往外撒一圈同色辉光只会被透明窗口的硬边界裁成亮线。 */
+  /* 球体自身的对角光照：左上提亮、右下压暗 —— 球面必须和环、投影共享同一盏
+     左上光，::before 的反射层只做点缀，主体明暗得长在球底上。
+     每一站都乘 --o：球漆随全局不透明度淡出，桌面从球底透上来。 */
+  background: radial-gradient(circle at 30% 24%,
+    color-mix(in srgb, color-mix(in srgb, var(--panel-hi) 86%, white 14%) var(--o), transparent) 0%,
+    color-mix(in srgb, var(--panel) var(--o), transparent) 46%,
+    color-mix(in srgb, color-mix(in srgb, var(--panel-2) 78%, black 22%) var(--o), transparent) 100%);
+  border: 1px solid color-mix(in srgb, var(--line) var(--o), transparent);
+  /* 回弹投影（不是外发光）：球悬在桌面之上，往页面上投一小片软阴影才有
+     「放上去」的重量。窗口四周只剩 8px，offset 2 + blur 5 = 7px 是不裁边的上限；
+     再大阴影会被透明窗口的硬边界切出一条直线。 */
+  box-shadow: 0 2px 5px rgb(0 0 0 / calc(0.35 * var(--ui-opacity)));
   cursor: grab;
   /* hover 微抬：cursor:grab 只说得出「可拖」，说不出「可点开」。
      1.04 够感知、不越界（95.7 < 108 窗口）。
      只动 transform，reduced-motion 由全局媒体查询关掉。 */
-  transition: transform var(--t-fast) var(--ease);
+  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
 }
-.orb:hover { transform: translate(-50%, -50%) scale(1.04); }
+.orb:hover { transform: translate(-50%, -50%) scale(1.04); box-shadow: 0 3px 7px rgb(0 0 0 / 0.4); }
 .orb:active { transform: translate(-50%, -50%) scale(0.98); cursor: grabbing; }
 /* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪。
    焦点环走交互强调（sel-bar），不占数据色。 */
@@ -75,17 +93,24 @@ html, body {
   border-radius: 50%;
   pointer-events: none;
   background:
+    /* 底部内遮蔽（AO）：球底往里收的那一圈暗，是把「球」从「圆片」区分开的
+       关键一层 —— 没有它，再亮的高光也只是纸上的渐变。
+       整层乘 --o：光照随球漆一起淡出，不然球底透明了高光还悬在半空 */
+    radial-gradient(circle at 50% 118%,
+      color-mix(in srgb, black calc(46% * var(--ui-opacity)), transparent) 0%,
+      color-mix(in srgb, black calc(20% * var(--ui-opacity)), transparent) 28%,
+      transparent 50%),
     /* 底部环境反弹：桌面把光打回球底，很淡 */
     radial-gradient(circle at 50% 98%,
-      color-mix(in srgb, var(--down) 16%, transparent) 0%,
+      color-mix(in srgb, var(--down) calc(16% * var(--ui-opacity)), transparent) 0%,
       transparent 44%),
     /* 球面明暗：高光在 34%/28%，右下压到 30% 黑 —— 球体的体积感 */
     radial-gradient(circle at 34% 28%,
-      color-mix(in srgb, white 14%, transparent) 0%,
-      color-mix(in srgb, white 6%, transparent) 20%,
+      color-mix(in srgb, white calc(14% * var(--ui-opacity)), transparent) 0%,
+      color-mix(in srgb, white calc(6% * var(--ui-opacity)), transparent) 20%,
       transparent 46%,
-      color-mix(in srgb, black 11%, transparent) 76%,
-      color-mix(in srgb, black 30%, transparent) 100%);
+      color-mix(in srgb, black calc(11% * var(--ui-opacity)), transparent) 76%,
+      color-mix(in srgb, black calc(30% * var(--ui-opacity)), transparent) 100%);
 }
 
 /* 原来这里有一整套「能量光效」：绕球外扩的 halo 光晕、球心随负载点亮的 core
@@ -97,17 +122,41 @@ html, body {
    ::after 的镜面高光（固定不动）、以及环形规本身。速率高低看环的水位和数字，
    不靠亮度猜 —— 那本来也是环形规存在的理由。 */
 
-/* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开） */
-.orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-/* 轨道用实色 --line 而不是半透白：球底（--panel）上零流量的球不能读作一块
-   空黑饼，「相对水位」的表盘感全靠轨道垫出来。实色令牌让轨道跟随皮肤，
-   与控制件描边同一档。 */
-.orb-gauge .track { stroke: var(--line); }
-/* 弧线是实线，不带 drop-shadow 辉光。原来两条弧各挂一圈同色发光，和已删掉的
-   核/晕是同一套「能量语言」；光一去掉，剩下这两圈反而成了糊边 —— 2.5px 的辉光
-   在 4px 宽的弧上就是把线的边缘晕开，读作没对焦，而不是在发光。 */
-.orb-gauge .arc-down { stroke: var(--down); }
-.orb-gauge .arc-up { stroke: var(--up); }
+/* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开）。
+   层序：球体/明暗（::before z1）→ 镜面高光（::after z2，压在环下面不抢数字）→
+   环形规（svg z3）→ 读数（nums z4）。 */
+.orb::before { z-index: 1; }
+.orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
+/* 注释里说过多年「::after 的镜面高光」，这条规则其实从来没落过地 —— 丢了。
+   第一版放在 10–11 点方向的球缘，恰好被内外两圈环的笔画整个压住（视觉验收
+   5/10 的主因）。挪进内圈之内的开阔球面、数字左上方，按实际像素给柔边亮点：
+   中心 50% 白自然衰减成光晕，z2 压在环下面。 */
+.orb::after {
+  content: '';
+  position: absolute;
+  left: 31px;
+  top: 21px;
+  width: 12px;
+  height: 8px;
+  z-index: 2;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(closest-side,
+    rgb(255 255 255 / calc(0.5 * var(--ui-opacity))) 0%,
+    rgb(255 255 255 / calc(0.14 * var(--ui-opacity))) 55%,
+    transparent 100%);
+  transform: rotate(-28deg);
+}
+/* 轨道：管状明暗（defs 里的渐变），凹进球面而不是画在球面上 */
+.orb-gauge .track { stroke: url(#trackG); }
+/* 进度弧：管状明暗 + 往球面投 2px 软阴影 —— 环是凸起物，影子才是「凸起」的
+   证据。这是投影不是辉光：方向固定向下、颜色只有黑，跟删掉的那套彩色光晕
+   不是一回事。 */
+.orb-gauge .arc {
+  filter: drop-shadow(0 2px 2px rgb(0 0 0 / 0.42));
+}
+.orb-gauge .arc-down { stroke: url(#ringDownG); }
+.orb-gauge .arc-up { stroke: url(#ringUpG); }
 
 /* 92px 的球扣掉两圈环，中心可写字的圆直径只剩约 76px，最上面那行更窄（约 66px）。
    所以球上的下载只排「数值 + 单位」，方向靠琥珀色和下面那行的 ↑ 区分；
@@ -115,6 +164,7 @@ html, body {
 .orb-nums {
   position: absolute;
   inset: 0;
+  z-index: 4;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -122,6 +172,8 @@ html, body {
   gap: 1px;
   pointer-events: none;
   text-align: center;
+  /* 数字嵌在球面上：一层贴地投影，把读数从渐变底上「托」出来 */
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.45);
 }
 .orb-down {
   color: var(--down);
@@ -152,13 +204,15 @@ html, body {
 
 .panel {
   position: absolute;
+  /* 全局界面不透明度：面板只淡「漆」不淡字（与主窗 .frame 同一原则，共用
+     --ui-opacity）——列表里的应用名、速率在 50% 档仍然清晰，桌面从面板底下透上来。 */
+  background: color-mix(in srgb, var(--panel) calc(var(--ui-opacity) * 100%), transparent);
   /* 四周退 12px 给投影让位（窗口 344×324 = 面板 320×300 + 12×2）。
      原来 inset:0，box-shadow 整个落在窗口外一点都看不见，圆角外的四个角
      反而被自己的投影填上了色 —— 面板既没有浮起的层次，又像被一层方框框住。 */
   inset: 12px;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-l);
   overflow: hidden;
@@ -218,7 +272,7 @@ html, body {
 .icon-btn:hover { background: var(--panel-hi); color: var(--text); }
 .icon-btn:active { background: color-mix(in srgb, var(--panel-hi) 92%, #000); }
 /* 隐藏小窗 = 主界面「隐藏到托盘」的同义操作，用同一档危险色反馈 */
-.icon-btn.is-danger:hover { background: var(--error); color: #1a0f0e; }
+.icon-btn.is-danger:hover { background: var(--error); color: color-mix(in srgb, black 82%, var(--error)); }
 .icon-btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
 
 .panel-total {
@@ -257,6 +311,12 @@ html, body {
   padding: 0 8px;
   display: flex;
   flex-direction: column;
+}
+/* 溢出时（mini.js 按 scrollHeight 判定加挂）底部 16px 渐隐：被拦腰截断的下一行
+   读作「还有更多」的信号，而不是渲染事故。 */
+.panel-list.is-fade {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 16px), transparent);
 }
 /* flex:none：列向 flex 里的行默认可压缩，5 行 32 塞进 160 的槽时任何一点内边距都会
    把行一起压矮、图标跟着挤扁 —— 宁可溢出滚动，不要偷偷变矮。 */
