@@ -1,5 +1,7 @@
 namespace NetPeek.Shared.Protocol;
 
+using System.Text.Json.Serialization;
+
 /// <summary>一个进程在采样周期内的流量统计。</summary>
 public sealed class ProcessTraffic
 {
@@ -13,16 +15,9 @@ public sealed class ProcessTraffic
     public string Path { get; set; } = "";
 
     /// <summary>
-    /// 图标标识（按可执行文件路径生成的稳定短 id，空串表示无图标）。
-    /// 图标内容是静态的，每帧重传 base64 会让帧体积涨一个数量级，因此改为按 id 缓存：
-    /// 同一条管道连接内，某个 id 的 <see cref="IconBase64"/> 只在首帧出现时携带，
-    /// 之后各帧只带 id，UI 按 id 从本地缓存取图。UI 重连时服务端重置发送记录，会重新补发。
-    /// </summary>
-    public string IconId { get; set; } = "";
-
-    /// <summary>
-    /// 应用图标（base64 PNG 的 data URL）。仅在本连接首次出现该 <see cref="IconId"/> 时非空；
-    /// 后续帧为空串，UI 应按 <see cref="IconId"/> 命中自己的缓存，不要当作「图标丢失」。
+    /// 应用图标（base64 PNG 的 data URL）。
+    /// 旧字段，恒为空串：图标改由快照级 <see cref="TrafficSnapshot.IconUpdates"/> 按路径增量下发，
+    /// 保留此属性仅为升级窗口内的旧 UI 兼容，不再赋值。
     /// </summary>
     public string IconBase64 { get; set; } = "";
 
@@ -43,6 +38,16 @@ public sealed class ProcessTraffic
 
     /// <summary>本次会话累计重传字节（单独统计，不混入上传量）。</summary>
     public ulong RetransmitTotal { get; set; }
+
+    /// <summary>
+    /// 本采样周期内该进程流量最大的远端 IP（对端）。
+    /// 取自 ETW 事件的源/目的地址：发送取目的端、接收取源端；无端点信息时为空串。
+    /// 每帧重置，代表的是「这一秒谁在说话」，不是会话累计。
+    /// </summary>
+    public string TopRemoteIp { get; set; } = "";
+
+    /// <summary>对端端口号；0 = 未知。</summary>
+    public ushort TopRemotePort { get; set; }
 }
 
 /// <summary>采集服务每秒推送给 UI 的一帧快照。</summary>
@@ -63,8 +68,23 @@ public sealed class TrafficSnapshot
     /// <summary>采集服务启动时刻（Unix 毫秒），UI 据此计算会话时长。</summary>
     public long SessionStartedUnixMs { get; set; }
 
-    /// <summary>采集状态：ok / paused / error。</summary>
+    /// <summary>
+    /// 采集状态：
+    /// <c>ok</c> = 正在收事件；<c>paused</c> = 用户暂停（累计值保持，速率报 0）；
+    /// <c>starting</c> = ETW 会话还在后台启动（含残留会话清理，实测 0.3–2.4s），
+    /// 管道已在推帧但 Processes 为空 —— 这是正常启动流程，UI 不应报错；
+    /// <c>error</c> = 会话启动失败或事件线程异常退出（通常缺管理员权限）。
+    /// </summary>
     public string Status { get; set; } = "ok";
+
+    /// <summary>
+    /// 本帧新出现的进程图标（路径 → data URL），null = 本帧没有新图标。
+    /// 32px 图标每个 2–5KB，逐帧随每个进程下发会让整条链路（C# 序列化 → 管道 →
+    /// Rust 解析 → Tauri 转发 → WebView 解析）每秒白搬几十到两百 KB —— 图标按路径
+    /// 缓存后终生不变，只在首次出现时发一次；UI 重连时采集端重发全量。
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? IconUpdates { get; set; }
 
     public List<ProcessTraffic> Processes { get; set; } = new();
 }

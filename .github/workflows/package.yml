@@ -1,0 +1,88 @@
+name: 打包
+
+# 手动触发（Actions 页面点 Run workflow），或推 v* 标签时自动出包。
+# 与 CI 分开是有意的：CI 每次推送都跑，打包要十几分钟且只在发版时需要。
+#
+# 参考 Sniffnet 的 package.yml：它做 9 个 target 的矩阵、打包 job 全部
+# needs: build 再 download-artifact。NetPeek 只有 win-x64 一个目标，
+# 那些矩阵结构全都不需要，串成一个 job 反而更短更清楚。
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 同时创建 GitHub Release 并附上安装包
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: 出 MSI 安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/NetPeek.App/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/NetPeek.App/src-tauri -> target
+
+      - name: 安装前端依赖
+        working-directory: src/NetPeek.App
+        run: npm ci
+
+      # 这一个脚本包办全部：self-contained 发布采集服务（LocalSystem 服务不能
+      # 依赖用户装 .NET 运行时）→ 拷到 fragment 相对路径解析点 → tauri build --bundles msi。
+      # WiX 由 Tauri 自己拉取，MSI 里以 fragment 形式合并 collector.wxs 注册服务。
+      - name: 构建安装包
+        shell: pwsh
+        run: ./scripts/build-installer.ps1
+
+      - name: 收集产物信息
+        id: msi
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem src/NetPeek.App/src-tauri/target/release/bundle/msi/*.msi |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $f) { throw '未找到 MSI' }
+          "path=$($f.FullName)" | Out-File -Append $env:GITHUB_OUTPUT
+          "name=$($f.Name)"     | Out-File -Append $env:GITHUB_OUTPUT
+          "{0}: {1:N1} MB" -f $f.Name, ($f.Length / 1MB) | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netpeek-msi
+          path: src/NetPeek.App/src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      # 代码签名留白：Sniffnet 走 SignPath 的免费开源项目额度，先传未签名 MSI
+      # 拿到 artifact-id，签名后再以 overwrite: true 覆盖同一份产物。
+      # 那需要 SignPath 账号与 secrets，这里只留位置说明，不假装已经签好了。
+
+      - name: 创建 Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.msi.outputs.path }}
+          generate_release_notes: true
+          draft: true

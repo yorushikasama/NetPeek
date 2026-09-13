@@ -27,6 +27,7 @@
     btnCollapse: $('btnCollapse'),
     btnClose: $('btnClose'),
     btnPause: $('btnPause'),
+    pauseLbl: $('pauseLbl'),
     btnMain: $('btnMain'),
   };
 
@@ -74,11 +75,9 @@
     return `${v} ${u}`;
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    }[c]));
-  }
+  // 转义统一走 common.js（U4 收敛），小窗也先加载那一份。
+  const esc = window.NetPeekCommon.escapeHtml;
+  const ic = window.NetPeekCommon.icon;
 
   // 图标取不到时的首字母占位。跳过开头的非字母数字：未归因流量那类以半角括号
   // 开头的名字直接切首字符，会在徽标里画一个孤零零的括号。小窗只加载 theme.js，
@@ -86,6 +85,15 @@
   function initialOf(name) {
     const s = String(name || '').replace(/^[^\p{L}\p{N}]+/u, '');
     return s ? s.slice(0, 1).toUpperCase() : '·';
+  }
+
+  // 图标缓存：采集端改按路径增量下发（IconUpdates），小窗是独立 webview，
+  // 得自己收一份缓存；解析逻辑与主界面 iconOf 相同（含旧协议内联回退）。
+  const iconCache = new Map();
+
+  function iconOf(p) {
+    if (p.IconBase64) return p.IconBase64;
+    return p.Path ? (iconCache.get(p.Path) || '') : '';
   }
 
   // ---------- 环形规 ----------
@@ -124,14 +132,50 @@
   // ---------- 形态切换 ----------
 
   // 展开/收起：窗口尺寸与位置由 Rust 侧 set_mini_shape 调整（保持中心、夹屏幕）。
+  // 单独抽出来是因为它还有第二个调用点：托盘每次显示小窗后 Rust 会广播
+  // mini-shown，那时形态没变、但窗口尺寸需要重新对齐（见 realignShape）。
+  async function applyShapeSize() {
+    try {
+      await invoke('set_mini_shape', { shape });
+    } catch { /* 非 Tauri 环境忽略 */ }
+  }
+
   async function setShape(next) {
     if (next === shape) return;
     shape = next;
-    try {
-      await invoke('set_mini_shape', { shape: next });
-    } catch { /* 非 Tauri 环境忽略 */ }
+    await applyShapeSize();
     els.orb.hidden = next !== 'orb';
     els.panel.hidden = next !== 'panel';
+  }
+
+  // 首次显示时窗口尺寸会被系统的阴影 inset 撑大（实测逻辑宽 135 而非 108，
+  // 要切一次形态才被纠正），于是球偏在一边。这里按当前形态重新对齐一次 ——
+  // 不能走 setShape，它有 `next === shape` 短路，而「形态没变」正是要修的场景。
+  const realignShape = () => applyShapeSize();
+
+  // ---------- 初始落位 ----------
+
+  // 默认停在屏幕工作区右下角。工作区只有 WebView 的 screen 对象给得出 ——
+  // availLeft/availTop/availWidth/availHeight 天生是「排除任务栏后的可用区」，
+  // 而 tauri 的 Monitor 只有整屏尺寸，Rust 侧又因 forbid(unsafe_code) 走不了 Win32。
+  // 只在页面加载时调这一次：之后位置完全交给用户拖动，托盘开关不会把球拽回来。
+  // 落位发生在窗口显示之前（配置里 visible: false），所以看不到「先闪中间再跳走」。
+  async function placeDefault() {
+    if (!tauri) return;
+    const s = window.screen;
+    const height = s.availHeight || s.height;
+    const width = s.availWidth || s.width;
+    if (!height || !width) return;
+    try {
+      await invoke('place_mini_default', {
+        area: {
+          x: s.availLeft || 0,
+          y: s.availTop || 0,
+          width,
+          height,
+        },
+      });
+    } catch { /* 拿不到就留在系统默认位置 */ }
   }
 
   // ---------- 渲染 ----------
@@ -150,7 +194,7 @@
       }
       agg.DownBytes += p.DownloadBytes || 0;
       agg.UpBytes += p.UploadBytes || 0;
-      if (!agg.IconBase64 && p.IconBase64) agg.IconBase64 = p.IconBase64;
+      if (!agg.IconBase64) agg.IconBase64 = iconOf(p);
     }
     const apps = Array.from(map.values());
     apps.sort((a, b) => (b.DownBytes + b.UpBytes) - (a.DownBytes + a.UpBytes));
@@ -186,11 +230,10 @@
     for (const a of apps) {
       const row = document.createElement('div');
       row.className = 'pitem';
-      // 占比不占列宽：整行背景一条从左起的极淡琥珀渐变，和主界面进程表同一条（§2.5）
+      // 占比不占列宽：整行背景一条从左起的极淡渐变，和主界面进程表同一条（§2.5）。
+      // 渐变写在 mini.css 的 .pitem 里，这里只写百分比 —— 颜色要跟着主题的下载色走。
       const share = peak > 0 ? Math.min(100, Math.round((a.DownBytes / peak) * 100)) : 0;
-      row.style.backgroundImage = share > 0
-        ? `linear-gradient(90deg, rgba(240,145,63,0.09), rgba(240,145,63,0) ${share}%)`
-        : 'none';
+      row.style.setProperty('--share', `${share}%`);
       const d = splitRate(a.DownBytes);
       const u = splitRate(a.UpBytes);
       row.innerHTML = `
@@ -198,8 +241,8 @@
           ? `<img src="${a.IconBase64}" alt="" />`
           : `<span class="pico">${esc(initialOf(a.Name))}</span>`}
         <span class="pname" title="${esc(a.Name)}">${esc(a.Name)}</span>
-        <span class="prate is-down">↓${d.v} ${d.u}</span>
-        <span class="prate is-up">↑${u.v} ${u.u}</span>`;
+        <span class="prate is-down">${ic('arrow-down')}${d.v} ${d.u}</span>
+        <span class="prate is-up">${ic('arrow-up')}${u.v} ${u.u}</span>`;
       frag.appendChild(row);
     }
     els.list.replaceChildren(frag);
@@ -209,12 +252,18 @@
   // 措辞和顶栏胶囊、设置屏共用一套（监控中 / 已暂停 / 异常）。
   function paintStatus(snap) {
     const lost = snap.EventsLost || 0;
+    // starting 单独一支：ETW 会话在后台起（含残留会话清理，实测 0.3–2.4s），
+    // 这几秒管道已在推帧但还没有事件。并到 error 那支就是每次启动的头几秒
+    // 都亮红点、报「需管理员权限」，与事实相反。
+    const starting = snap.Status === 'starting';
+    const failed = !paused && !starting && snap.Status !== 'ok';
     const text = paused ? '已暂停'
-      : snap.Status !== 'ok' ? '服务异常 · 需管理员权限'
+      : starting ? '正在启动采集'
+      : failed ? '服务异常 · 需管理员权限'
       : lost > 0 ? `监控中 · ETW 丢事件 ${lost} 条`
       : '监控中';
-    const cls = snap.Status !== 'ok' && !paused ? 'is-error'
-      : paused || lost > 0 ? 'is-warn'
+    const cls = failed ? 'is-error'
+      : paused || starting || lost > 0 ? 'is-warn'
       : 'is-ok';
     els.dot.className = `panel-dot ${cls}`;
     els.dot.title = text;
@@ -222,7 +271,12 @@
     els.orb.title = paused
       ? 'NetPeek · 已暂停'
       : `NetPeek · ↓ ${fmtFull(last.down)} · ↑ ${fmtFull(last.up)}`;
-    els.btnPause.textContent = paused ? '恢复' : '暂停';
+    // 暂停是双态控件：状态挂在 aria-pressed 上（CSS 据它切图标与配色），
+    // 文案是按钮里那个 <span class="lbl">，不再整体改 textContent ——
+    // 那会把按钮里的 SVG 图标一起清掉。
+    els.btnPause.setAttribute('aria-pressed', paused ? 'true' : 'false');
+    els.pauseLbl.textContent = paused ? '恢复' : '暂停';
+    els.btnPause.title = paused ? '恢复监控' : '暂停监控';
     els.btnPause.disabled = false;
   }
 
@@ -251,11 +305,13 @@
   // ---------- 主题 ----------
 
   // 小窗只要令牌，不要背景图：透明窗口后面没有网页内容，backdrop-filter 无从取样。
-  function applyTokens(theme) {
+  // payload 是主界面广播的 { tokens, background }（背景已剥掉），或 initTokens 里
+  // 自己包的同一形状 —— 真正落地的只有 tokens 那 17 键。
+  function applyTokens(payload) {
     const T = window.NetPeekTheme;
-    if (!T || !theme || !theme.tokens) return;
+    if (!T || !payload || !payload.tokens) return;
     try {
-      T.applyTheme({ ...theme, background: '' }, { silent: true });
+      T.applyTokens(payload.tokens, { silent: true });
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }
   }
 
@@ -264,9 +320,8 @@
     if (!T) return;
     try {
       const boot = await T.initTheme();
-      const { state } = boot;
-      // v2 模型：current 才是真正生效的令牌；旧配置迁移失败时退回激活主题
-      applyTokens(state.current || state.themes[state.active] || Object.values(state.themes)[0]);
+      const skin = T.resolveSkin(boot.state); // 内置 / image / 自定义皮肤统一从这走
+      applyTokens({ tokens: skin.tokens });
     } catch { /* 读不到配置就用兜底值 */ }
   }
 
@@ -300,6 +355,14 @@
   bindDrag(els.panel.querySelector('.panel-head'));
 
   els.orb.addEventListener('click', () => setShape('panel'));
+  // 键盘入口：orb 是 role=button，Enter/Space 等价点击。没有它，小窗对键盘用户
+  // 是一扇完全打不开的门（展开、暂停全都只能鼠标）。
+  els.orb.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setShape('panel');
+    }
+  });
   els.btnCollapse.addEventListener('click', () => setShape('orb'));
 
   els.btnClose.addEventListener('click', async () => {
@@ -312,7 +375,9 @@
     els.btnPause.disabled = true;
     try {
       await invoke('send_control_command', { command: paused ? 'resume' : 'pause' });
-    } catch {
+    } catch (err) {
+      // 命令没送到就恢复按钮；错误必须露出来，否则「点了没反应」无从排查
+      console.error('发送暂停命令失败：', err);
       els.btnPause.disabled = false;
     }
   });
@@ -323,11 +388,20 @@
 
   // ---------- 启动 ----------
 
+  // 先落位：越早设越好，窗口显示前定位完，用户看不到中间态
+  placeDefault();
+
   setArc(els.arcDown, 0, false);
   setArc(els.arcUp, 0, false);
   initTokens();
 
-  listen('snapshot', (e) => render(e.payload));
+  // 图标增量必须在 render 之前入缓存：这一帧的行要靠它才画得出图标。
+  // 缓存更新不受可见性影响 —— 隐藏期间照收，恢复时 repaintMini 补画的那帧才有图。
+  listen('snapshot', (e) => {
+    const snap = e.payload;
+    if (snap.IconUpdates) for (const k of Object.keys(snap.IconUpdates)) iconCache.set(k, snap.IconUpdates[k]);
+    render(snap);
+  });
   // 隐藏到托盘时跳过重绘（§4.1）：document.hidden 在 WebView2 隐藏宿主窗口时不保证触发，
   // 所以 Rust 侧 show/hide 时广播 win-visibility 作为权威信号（初始隐藏，与配置一致）。
   let winHidden = true;
@@ -342,6 +416,8 @@
   });
   // 主界面换主题时广播过来，小窗跟着改（§2.9「小窗跟随主题令牌」）
   listen('theme-changed', (e) => applyTokens(e.payload));
+  // 托盘「打开迷你窗」之后：窗口刚显示，尺寸对齐一次（见 realignShape）
+  listen('mini-shown', () => realignShape());
   listen('pipe-status', (e) => {
     if (e.payload === 'connected') return;
     els.dot.className = 'panel-dot is-error';

@@ -23,6 +23,7 @@ public class ProtocolTests
             EventsLost = 9,
             SessionStartedUnixMs = 10,
             Status = "ok",
+            IconUpdates = new Dictionary<string, string> { [@"C:\a.exe"] = "data:image/png;base64,AA==" },
             Processes =
             [
                 new ProcessTraffic
@@ -30,8 +31,6 @@ public class ProtocolTests
                     Pid = 42,
                     Name = "a.exe",
                     Path = @"C:\a.exe",
-                    IconId = "IC1",
-                    IconBase64 = "data:image/png;base64,AA==",
                     StartTimeUnixMs = 99,
                     DownloadBytes = 1,
                     UploadBytes = 2,
@@ -49,7 +48,7 @@ public class ProtocolTests
         foreach (var name in new[]
                  {
                      "TimestampUnixMs", "TotalDownloadBytes", "TotalUploadBytes",
-                     "EventsLost", "SessionStartedUnixMs", "Status", "Processes",
+                     "EventsLost", "SessionStartedUnixMs", "Status", "Processes", "IconUpdates",
                  })
         {
             Assert.True(root.TryGetProperty(name, out _), $"快照缺少契约字段 {name}");
@@ -60,7 +59,7 @@ public class ProtocolTests
         var proc = root.GetProperty("Processes")[0];
         foreach (var name in new[]
                  {
-                     "Pid", "Name", "Path", "IconId", "IconBase64", "StartTimeUnixMs",
+                     "Pid", "Name", "Path", "IconBase64", "StartTimeUnixMs",
                      "DownloadBytes", "UploadBytes", "DownloadTotal", "UploadTotal", "RetransmitTotal",
                  })
         {
@@ -71,7 +70,7 @@ public class ProtocolTests
         var back = JsonSerializer.Deserialize<TrafficSnapshot>(json)!;
         Assert.Equal(snapshot.TotalDownloadBytes, back.TotalDownloadBytes);
         Assert.Equal(42u, back.Processes[0].Pid);
-        Assert.Equal("IC1", back.Processes[0].IconId);
+        Assert.Equal("data:image/png;base64,AA==", back.IconUpdates![@"C:\a.exe"]);
         Assert.Equal(5UL, back.Processes[0].RetransmitTotal);
     }
 

@@ -55,8 +55,8 @@
 
   // 画坐标框：y 三档标注 + 2 条横向虚线网格 + x 两端标注。返回绘图区矩形。
   function drawFrame(ctx, w, h, yMax, opt) {
-    const muted = cssVar('--text-muted') || '#b4a99e';
-    const line = cssVar('--line') || 'rgba(255,255,255,0.10)';
+    const muted = cssVar('--text-2') || '#9ba1a9';
+    const line = cssVar('--line-soft') || '#272a30';
     const left = AXIS_W;
     const right = w - PAD_R;
     const top = PAD_T;
@@ -118,7 +118,11 @@
     }
     const yMax = niceMax(opt.yMax || dataMax || 1);
     const r = drawFrame(ctx, w, h, yMax, opt);
-    if (opt.axesOnly) return;
+    if (opt.axesOnly) {
+      // 没数据的坐标框不缓存悬停入参：鼠标扫过时不能拿上一份数据重画。
+      canvas._lineOpt = null;
+      return;
+    }
 
     const step = r.plotW / (slots - 1);
     // 非零值不许压在绘图区底边上。上传常比下载小一到两个数量级（1.3M/s 对 10M/s 的量程），
@@ -165,6 +169,18 @@
       }
       ctx.restore();
     }
+
+    // 悬停读数层画在曲线之上（在 clip 之外，圆点允许压到边缘 1-2px）。
+    // 缓存本次入参供 mousemove 重画；mousemove 里再调 line() 会重新走这里，入参一致。
+    if (series.length && series[0].values.length) {
+      const idx = hoverIndexAt(canvas, r, series[0].values.length, slots);
+      canvas._hoverIdx = idx; // 记录在画布上，测试脚手架可以直接断言
+      if (idx >= 0) drawHover(ctx, canvas, r, series, idx, opt, slots, yMax);
+    } else {
+      canvas._hoverIdx = -1;
+    }
+    canvas._lineOpt = opt;
+    attachLineHover(canvas);
   }
 
   function strokeSegment(ctx, values, xFor, yFor, from, to, dash) {
@@ -179,49 +195,14 @@
   }
 
   // 柱状图。groups = [{ label, values: [down] 或 [down, up] }]。
-  // 检查栏 30 天图只画下载（296px 宽挤不开双色分组柱）；历史屏把上传拆成
-  // 独立量程的窄条图 —— 双序列共享量程时 15:1 的量级差会把上传压成贴地条。
-  // selectedIndex 那一组加 2px 顶帽、其余组降到 45%（过滤范围直接读在图上）。
-  // 悬浮：组高亮带 + 数值浮层（需要 opt.tipFormat，值由调用方格式化）。
-  // 监听器按 canvas 只绑一次，重复调用只更新 opt；hover 变化整帧重画
-  // （几十根柱的矢量重画远低于 1Hz 的刷新预算）。
+  // 检查栏 30 天图只画下载（296px 宽挤不开双色分组柱）；历史屏画双色分组。
+  // selectedIndex 那一组加 2px 顶帽标出（§2.6）。返回 hitTest 供点柱选中用。
   function bars(canvas, opt) {
-    const state = canvas.__npBars || (canvas.__npBars = { hoverIdx: -1, bound: false });
-    state.opt = opt;
-    if (!state.bound) {
-      state.bound = true;
-      canvas.addEventListener('mousemove', (e) => {
-        const st = canvas.__npBars;
-        const idx = st.rects ? barIndexAt(st.rects, canvas, e.clientX) : -1;
-        canvas.style.cursor = idx >= 0 ? 'pointer' : 'default';
-        if (idx !== st.hoverIdx) { st.hoverIdx = idx; drawBars(canvas); }
-      });
-      canvas.addEventListener('mouseleave', () => {
-        const st = canvas.__npBars;
-        canvas.style.cursor = 'default';
-        if (st.hoverIdx !== -1) { st.hoverIdx = -1; drawBars(canvas); }
-      });
-    }
-    return drawBars(canvas);
-  }
-
-  function barIndexAt(rects, canvas, clientX) {
-    const box = canvas.getBoundingClientRect();
-    const x = clientX - box.left;
-    for (const rect of rects) if (x >= rect.x0 && x < rect.x1) return rect.index;
-    return -1;
-  }
-
-  function drawBars(canvas) {
-    const state = canvas.__npBars;
-    const opt = state.opt || {};
-    const hoverIdx = state.hoverIdx;
-    state.rects = null;
     const p = prepare(canvas);
     if (!p) return null;
     const { ctx, w, h } = p;
     const groups = opt.groups || [];
-    const colors = opt.colors || [cssVar('--down') || '#f0913f', cssVar('--up') || '#7fa8c9'];
+    const colors = opt.colors || [cssVar('--down') || '#f0963f', cssVar('--up') || '#62a9e8'];
 
     let dataMax = 0;
     for (const g of groups) {
@@ -229,17 +210,10 @@
     }
     const yMax = niceMax(dataMax || 1);
     const r = drawFrame(ctx, w, h, yMax, opt);
-    // 零数据空态：库里还没有任何落库流量时，画一个「1 / 0」刻度的空坐标框
-    // 读起来像渲染出错。emptyText 由调用方决定措辞（检查栏与历史屏不同）。
-    if (opt.emptyText && !dataMax) {
-      ctx.font = '12px "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif';
-      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(opt.emptyText, (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    if (!groups.length) {
+      canvas._barOpt = null;
       return null;
     }
-    if (!groups.length) return null;
 
     const seriesCount = Math.max(1, groups[0].values.length);
     const innerGap = seriesCount > 1 ? 3 : 0;
@@ -249,21 +223,10 @@
     const groupW = Math.max(2, pitch - groupGap);
     const barW = Math.max(1.5, (groupW - innerGap * (seriesCount - 1)) / seriesCount);
 
-    // 选中过滤态：未选中的组整体降到 45%，被选中的组保持全亮
-    const alphaFor = (gi) =>
-      (opt.selectedIndex >= 0 && gi !== opt.selectedIndex ? 0.45 : 1);
-
-    // 悬浮高亮带：给「这一列是哪一组」一个载体，也提升窄柱的命中感
-    if (hoverIdx >= 0 && hoverIdx < groups.length) {
-      ctx.fillStyle = rgba(cssVar('--surface-hi') || '#2f2924', 0.55);
-      ctx.fillRect(r.left + hoverIdx * pitch, r.top, pitch, r.plotH);
-    }
-
     const rects = [];
     for (let gi = 0; gi < groups.length; gi++) {
       const gx = r.left + gi * pitch + groupGap / 2;
       rects.push({ x0: r.left + gi * pitch, x1: r.left + (gi + 1) * pitch, index: gi });
-      ctx.globalAlpha = alphaFor(gi);
       for (let si = 0; si < seriesCount; si++) {
         const v = groups[gi].values[si] || 0;
         const bh = Math.max(v > 0 ? 1 : 0, (Math.min(v, yMax) / yMax) * r.plotH);
@@ -271,9 +234,9 @@
         ctx.fillStyle = colors[si] || colors[0];
         ctx.fillRect(x, r.bottom - bh, barW, bh);
       }
-      ctx.globalAlpha = 1;
       if (opt.selectedIndex === gi) {
-        ctx.fillStyle = cssVar('--down') || '#f0913f';
+        // 顶帽是「选中」这件事的标记，走交互强调（sel-bar），不占数据色的语义
+        ctx.fillStyle = cssVar('--sel-bar') || '#c9cdd4';
         ctx.fillRect(gx, r.top - 2, groupW, 2);
       }
     }
@@ -282,7 +245,7 @@
     // 34px 的固定余量挡不住「9 月 1 日」这种 5 字标签，会和右端标注挤在一起。
     if (opt.tickLabels) {
       ctx.font = FONT_NUM;
-      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
+      ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'center';
       const y = h - XLAB_H / 2 + 1;
@@ -299,48 +262,21 @@
       }
     }
 
-    // 悬浮数值浮层：标签 + 各序列值（值经 opt.tipFormat 格式化，行色随序列色）
-    if (hoverIdx >= 0 && hoverIdx < groups.length && opt.tipFormat) {
-      const g = groups[hoverIdx];
-      const arrows = seriesCount > 1 ? ['▼ ', '▲ '] : [''];
-      ctx.font = FONT_NUM;
-      const rows = [];
-      for (let si = 0; si < seriesCount; si++) {
-        rows.push({
-          color: colors[si] || colors[0],
-          text: (arrows[si] || '') + opt.tipFormat(g.values[si] || 0),
-        });
-      }
-      const valW = Math.max(...rows.map((row) => ctx.measureText(row.text).width));
-      const uiFont = '11px "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei", sans-serif';
-      ctx.font = uiFont;
-      const label = String(g.label);
-      const boxW = Math.max(valW, ctx.measureText(label).width) + 20;
-      const boxH = 30 + rows.length * 16;
-      let bx = r.left + (hoverIdx + 0.5) * pitch - boxW / 2;
-      bx = Math.max(r.left, Math.min(bx, r.right - boxW));
-      const by = r.top + 4;
-      ctx.fillStyle = rgba(cssVar('--surface') || '#1e1a16', 0.92);
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(bx, by, boxW, boxH, 8); else ctx.rect(bx, by, boxW, boxH);
-      ctx.fill();
-      ctx.strokeStyle = cssVar('--line') || 'rgba(255,255,255,0.1)';
-      ctx.stroke();
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      ctx.font = uiFont;
-      ctx.fillStyle = cssVar('--text-muted') || '#b4a99e';
-      ctx.fillText(label, bx + 10, by + 15);
-      ctx.font = FONT_NUM;
-      for (let i = 0; i < rows.length; i++) {
-        ctx.fillStyle = rows[i].color;
-        ctx.fillText(rows[i].text, bx + 10, by + 31 + i * 16);
-      }
-    }
+    // 悬停读数（opt.seriesNames 提供时启用）：竖参考线立在组中央 + 深色小卡，
+    // 卡片画法与折线图同一套。数据点圆点有意不画 —— 零值日的圆点会趴在底边上，
+    // 读成凭空多出来的一条横线（折线图没这个问题，圆点总在曲线上）。
+    const hoverIdx = opt.seriesNames ? barHoverIndexAt(canvas, r, groups.length) : -1;
+    if (hoverIdx >= 0) drawBarHover(ctx, r, groups, hoverIdx, opt, colors);
+    canvas._barOpt = opt;
+    attachBarHover(canvas);
 
-    state.rects = rects;
     return {
-      indexAt: (clientX) => barIndexAt(rects, canvas, clientX),
+      indexAt(clientX) {
+        const box = canvas.getBoundingClientRect();
+        const x = clientX - box.left;
+        for (const rect of rects) if (x >= rect.x0 && x < rect.x1) return rect.index;
+        return -1;
+      },
     };
   }
 
@@ -361,5 +297,203 @@
   const axisBytes = (v) => axisNum(v, '');
   const axisRate = (v) => axisNum(v, '/s');
 
-  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate, niceMax };
+  // 悬停小卡用的全精度格式。y 轴为了塞进 52px 用紧凑格式，读数里要能看出
+  // 「2.35 MB/s」这种两位小数 —— 两处格式化有意不同。
+  function fmtFull(v, suffix) {
+    if (!(v > 0)) return `0${suffix}`;
+    const units = [[1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
+    for (const [scale, tag] of units) {
+      if (v >= scale) {
+        const n = v / scale;
+        return `${n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2)} ${tag}${suffix}`;
+      }
+    }
+    return `${Math.round(v)}${suffix}`;
+  }
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+  }
+
+  // 悬停读数：竖向参考线 + 各系列数据点圆点 + 深色小卡（相对现在的秒数与精确速率）。
+  // 卡片靠近右缘时翻到参考线左侧，不会被裁。yFor 与 line() 的主绘制共用同一套
+  // 抬升规则（非零值抬 2px），圆点必须落在曲线上而不是坐标框底边。
+  function drawHover(ctx, canvas, r, series, idx, opt, slots, yMax) {
+    const n = series[0].values.length;
+    const step = r.plotW / (slots - 1);
+    const x = r.right - (n - 1 - idx) * step;
+    const suffix = opt.tipSuffix || '';
+    const LIFT = 2;
+    const yFor = (v) => {
+      const y = r.bottom - Math.min(1, Math.max(0, v / yMax)) * r.plotH;
+      return v > 0 ? Math.min(y, r.bottom - LIFT) : y;
+    };
+
+    ctx.save();
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, r.top);
+    ctx.lineTo(Math.round(x) + 0.5, r.bottom);
+    ctx.stroke();
+
+    for (const s of series) {
+      const v = s.values[idx] || 0;
+      ctx.beginPath();
+      ctx.arc(x, yFor(v), 3, 0, Math.PI * 2);
+      ctx.fillStyle = s.color;
+      ctx.fill();
+      ctx.strokeStyle = cssVar('--bg') || '#1b1d21';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    const ago = n - 1 - idx;
+    const title = ago === 0 ? '现在' : `-${ago}s`;
+    const rows = series.map((s) => ({
+      color: s.color,
+      label: s.label || '数值',
+      text: fmtFull(s.values[idx] || 0, suffix),
+    }));
+    ctx.font = FONT_NUM;
+    let textW = ctx.measureText(title).width;
+    for (const row of rows) {
+      textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
+    }
+    const boxW = textW + 22;
+    const boxH = 20 + rows.length * 14;
+    let bx = x + 8;
+    if (bx + boxW > r.right + PAD_R) bx = x - 8 - boxW;
+    const by = r.top + 4;
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
+    roundRectPath(ctx, bx, by, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
+    ctx.fillText(title, bx + 10, by + 11);
+    rows.forEach((row, i) => {
+      const ry = by + 26 + i * 14;
+      ctx.fillStyle = row.color;
+      ctx.fillRect(bx + 10, ry - 3, 6, 6);
+      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
+      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
+    });
+    ctx.restore();
+  }
+
+  // 光标 x -> 最近数据点下标。超出绘图区 6px 视为没悬停（比如在 y 轴标注上）。
+  function hoverIndexAt(canvas, r, n, slots) {
+    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
+    const x = canvas._hoverX;
+    if (x < r.left - 6 || x > r.right + 6) return -1;
+    const step = r.plotW / (slots - 1);
+    const idx = Math.round(n - 1 - (r.right - x) / step);
+    return Math.max(0, Math.min(n - 1, idx));
+  }
+
+  // 每张画布只绑一次。mousemove 记下光标 x 后用缓存的上一次 line() 入参整帧重画
+  // （60 槽重画成本可忽略，不必另起合成层）；数据每秒才变一次，悬停期间读数是稳的。
+  function attachLineHover(canvas) {
+    if (canvas._lineHoverBound) return;
+    canvas._lineHoverBound = true;
+    canvas.addEventListener('mousemove', (e) => {
+      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
+      canvas.style.cursor = canvas._lineOpt ? 'crosshair' : '';
+      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
+    });
+    canvas.addEventListener('mouseleave', () => {
+      canvas._hoverX = -1;
+      canvas.style.cursor = '';
+      if (canvas._lineOpt) line(canvas, canvas._lineOpt);
+    });
+  }
+
+  // 与 attachLineHover 同一套「缓存入参 + mousemove 整帧重画」的模式。
+  function attachBarHover(canvas) {
+    if (canvas._barHoverBound) return;
+    canvas._barHoverBound = true;
+    canvas.addEventListener('mousemove', (e) => {
+      canvas._hoverX = e.clientX - canvas.getBoundingClientRect().left;
+      canvas.style.cursor = canvas._barOpt ? 'crosshair' : '';
+      if (canvas._barOpt) bars(canvas, canvas._barOpt);
+    });
+    canvas.addEventListener('mouseleave', () => {
+      canvas._hoverX = -1;
+      canvas.style.cursor = '';
+      if (canvas._barOpt) bars(canvas, canvas._barOpt);
+    });
+  }
+
+  // 光标落在哪个柱组里。与折线图不同，出绘图区即算无悬停、不留 6px 余量 ——
+  // 柱与柱有明确边界，贴着 y 轴标注还弹出读数反而含糊。
+  function barHoverIndexAt(canvas, r, n) {
+    if (!(n > 0) || !(canvas._hoverX >= 0)) return -1;
+    const x = canvas._hoverX;
+    if (x < r.left || x > r.right) return -1;
+    return Math.max(0, Math.min(n - 1, Math.floor(((x - r.left) / r.plotW) * n)));
+  }
+
+  // 柱悬停小卡：组标签做标题（tipTitle 可覆盖，周聚合标「当周」），
+  // 各系列值用 fmtFull 全精度 —— 与折线悬停「轴上紧凑、卡里全精度」的分工一致。
+  function drawBarHover(ctx, r, groups, idx, opt, colors) {
+    const g = groups[idx];
+    const pitch = r.plotW / groups.length;
+    const cx = Math.round(r.left + (idx + 0.5) * pitch) + 0.5;
+
+    ctx.save();
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(cx, r.top);
+    ctx.lineTo(cx, r.bottom);
+    ctx.stroke();
+
+    const names = opt.seriesNames || [];
+    const rows = g.values.map((v, si) => ({
+      color: colors[si] || colors[0],
+      label: names[si] || '数值',
+      text: fmtFull(v || 0, opt.tipSuffix || ''),
+    }));
+    ctx.font = FONT_NUM;
+    const title = String(opt.tipTitle ? opt.tipTitle(g, idx) : (g.label ?? ''));
+    let textW = ctx.measureText(title).width;
+    for (const row of rows) textW = Math.max(textW, ctx.measureText(`${row.label} ${row.text}`).width);
+    const boxW = textW + 22;
+    const boxH = 20 + rows.length * 14;
+    let bx = cx + 8;
+    if (bx + boxW > r.right + PAD_R) bx = cx - 8 - boxW;
+    const by = r.top + 4;
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--panel-hi') || '#2c2f36';
+    ctx.strokeStyle = cssVar('--line') || '#32363e';
+    roundRectPath(ctx, bx, by, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = cssVar('--text-2') || '#9ba1a9';
+    ctx.fillText(title, bx + 10, by + 11);
+    rows.forEach((row, i) => {
+      const ry = by + 26 + i * 14;
+      ctx.fillStyle = row.color;
+      ctx.fillRect(bx + 10, ry - 3, 6, 6);
+      ctx.fillStyle = cssVar('--text') || '#e3e5e9';
+      ctx.fillText(`${row.label} ${row.text}`, bx + 21, ry);
+    });
+    ctx.restore();
+  }
+
+  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };
 })();

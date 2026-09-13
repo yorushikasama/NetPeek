@@ -1,32 +1,34 @@
 // NetPeek 前端主逻辑。监听采集服务经 Tauri 转发的 TrafficSnapshot 事件，
-// 渲染顶栏总速率、进程表、检查栏与两张实时图；同时负责屏切换、密集模式和无边框窗口的控制。
+// 渲染顶栏总速率、进程表与右栏三卡；同时负责屏切换、迷你窗入口和无边框窗口的控制。
 // 快照字段为 PascalCase（与 C# System.Text.Json 默认序列化一致）。
 //
-// 布局与样式规格见 docs/UI生成提示词.md §2–3。几条关键约束在这里体现：
-// - 数字直接替换，不做补间：数据每秒一帧，补间等于永远在滚（§3.6）。
-// - 一张图只答一个问题：底部带宽图答「总带宽这一分钟怎么走的」，
-//   检查栏实时图答「这个应用这一分钟怎么走的」，30 天图答「这个应用一个月用了多少」。
-// - 装饰性动效只有一处：从静默跨到有流量的那一刻，岛屿外发光涨一次再落回。
+// 布局与样式规格见 docs/redesign/netpeek-redesign-v2.html。几条关键约束在这里体现：
+// - 数字直接替换，不做补间：数据每秒一帧，补间等于永远在滚。
+// - 一张图只答一个问题：带宽图答「总带宽这一分钟怎么走的」，
+//   右栏实时图答「这个应用这一分钟怎么走的」，30 天图答「这个应用一个月用了多少」。
+// - 不做装饰性动效：卡片层次靠底色差和 1px 边线给，不靠发光脉冲。
 
 const { listen } = window.__TAURI__.event;
 const C = window.NetPeekCharts;
 const $ = (id) => document.getElementById(id);
 
 const WINDOW_SECS = 60;      // 两张实时图的时间窗
-const DENSE_KEY = 'netpeek-dense';
 
 const els = {
   frame: $('frame'),
-  shell: $('shell'),
   statusPill: $('statusPill'),
   statusText: $('statusText'),
   lostDot: $('lostDot'),
+  topMeta: $('topMeta'),
   totalDownValue: $('totalDownValue'),
   totalDownUnit: $('totalDownUnit'),
   totalUpValue: $('totalUpValue'),
   totalUpUnit: $('totalUpUnit'),
   todayTotal: $('todayTotal'),
+  todayDown: $('todayDown'),
+  todayUp: $('todayUp'),
   viewToggle: $('viewToggle'),
+  procCount: $('procCount'),
   search: $('search'),
   pidLabel: $('pidLabel'),
   rows: $('rows'),
@@ -35,9 +37,7 @@ const els = {
   procStateTitle: $('procStateTitle'),
   procStateDesc: $('procStateDesc'),
   bandwidthChart: $('bandwidthChart'),
-  denseGrip: $('denseGrip'),
   nav: $('nav'),
-  stagePickBg: $('stagePickBg'),
   inspIcon: $('inspIcon'),
   inspIconPh: $('inspIconPh'),
   inspName: $('inspName'),
@@ -71,9 +71,8 @@ let viewMode = 'process';      // process 按进程明细 / app 按应用聚合
 let rateUnit = 'auto';         // 由设置屏更新
 let selected = null;           // { keyStr, mode, key, data }
 let screen = 'live';
-let wasIdle = true;            // 上一帧是否静默，用于发光脉冲的边界判定
-let todayBase = 0;             // 今日已落库的字节数（启动时从历史库取）
-let todayDelta = 0;            // 启动之后累加的字节数
+let todayBase = { down: 0, up: 0 };  // 今日已落库的字节数（启动时从历史库取）
+let todayDelta = { down: 0, up: 0 }; // 启动之后累加的字节数
 let todayStamp = new Date().toDateString();
 
 // 总带宽 60 秒环形缓冲
@@ -82,28 +81,53 @@ const samples = [];            // { t, down, up }
 // 只按 PID 存会把新进程接到上一个进程的曲线尾巴上（后端历史聚合同样按这两项）。
 const procHist = new Map();    // "pid:startMs" -> { t: [], down: [], up: [] }
 
+// 图标缓存：path -> dataURL。图标不再逐帧随进程下发（32px base64 每个 2–5KB，
+// 每秒全量搬一遍是白扔的开销），采集端只在路径首次出现时发 IconUpdates，
+// 这里收下并按路径解析 —— 进程数据里只带 Path，不再带图标本体。
+const iconCache = new Map();
+
+function mergeIcons(snap) {
+  const updates = snap.IconUpdates;
+  if (updates) for (const k of Object.keys(updates)) iconCache.set(k, updates[k]);
+}
+
+// 进程行图标解析：兼容旧协议（IconBase64 内联），新协议按 Path 查缓存。
+function iconOf(p) {
+  if (p.IconBase64) return p.IconBase64;
+  return p.Path ? (iconCache.get(p.Path) || '') : '';
+}
+
 function histKey(p) {
   return `${p.Pid}:${p.StartTimeUnixMs || 0}`;
 }
 
 // ===== 格式化 =====
 
+// 单位非 B 时把数值压到 999 上限。起因：999_999 字节 / 1000 = 999.999，
+// 四舍五入成 "1000.0 KB" —— 数字跨出了自己的单位，读起来像计算错误。
+// 压到 999 比进位换单位简单，且在显示层面与真实量级的偏差可忽略。
+function clampUnit(n) {
+  return n > 999 ? 999 : n;
+}
+
 function fmtRate(bps) {
-  if (rateUnit === 'kb') return `${(bps / 1e3).toFixed(1)} KB/s`;
-  if (rateUnit === 'mb') return `${(bps / 1e6).toFixed(1)} MB/s`;
-  if (rateUnit === 'gb') return `${(bps / 1e9).toFixed(2)} GB/s`;
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} MB/s`;
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} KB/s`;
+  if (rateUnit === 'kb') return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
+  if (rateUnit === 'mb') return `${clampUnit(bps / 1e6).toFixed(1)} MB/s`;
+  if (rateUnit === 'gb') return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
+  // GB 档此前缺失：万兆链路（1.25 GB/s）会被压在 "999.00 MB/s"，与 fmtBytes 的档位也不一致。
+  if (bps >= 1e9) return `${clampUnit(bps / 1e9).toFixed(2)} GB/s`;
+  if (bps >= 1e6) return `${clampUnit(bps / 1e6).toFixed(2)} MB/s`;
+  if (bps >= 1e3) return `${clampUnit(bps / 1e3).toFixed(1)} KB/s`;
   return `${Math.round(bps)} B/s`;
 }
 
 function fmtBytes(bytes) {
-  if (rateUnit === 'kb') return `${(bytes / 1e3).toFixed(1)} KB`;
-  if (rateUnit === 'mb') return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (rateUnit === 'gb') return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`;
+  if (rateUnit === 'kb') return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
+  if (rateUnit === 'mb') return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
+  if (rateUnit === 'gb') return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e9) return `${clampUnit(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e6) return `${clampUnit(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${clampUnit(bytes / 1e3).toFixed(1)} KB`;
   return `${Math.round(bytes)} B`;
 }
 
@@ -122,16 +146,40 @@ function splitUnit(text) {
   return i < 0 ? { value: text, unit: '' } : { value: text.slice(0, i), unit: text.slice(i + 1) };
 }
 
+// 数字主体 + 小一号的灰单位，同一规则铺到表格速率、检查栏累计、今日合计 ——
+// 单位跟着数字同大小同色时，一列数字读起来是三段等重的字符串，量级感出不来。
+// 复用首次插入的节点：速率单元格每秒刷新，不能每次 replaceChildren 造垃圾。
+function setRateCell(cell, text) {
+  const { value, unit } = splitUnit(text);
+  if (!cell._rateV) {
+    const v = document.createTextNode('');
+    const u = document.createElement('span');
+    u.className = 'u';
+    cell.replaceChildren(v, u);
+    cell._rateV = v;
+    cell._rateU = u;
+  }
+  if (cell._rateV.nodeValue !== value) cell._rateV.nodeValue = value;
+  if (cell._rateU.textContent !== unit) cell._rateU.textContent = unit;
+}
+
+// 一次性场景（累计值 / 今日合计），不值得预建节点
+function setSplitText(el, text) {
+  const { value, unit } = splitUnit(text);
+  const u = document.createElement('span');
+  u.className = 'u';
+  u.textContent = unit;
+  el.replaceChildren(value, u);
+}
+
 function fmtDuration(sec) {
   const s = Math.max(0, Math.floor(sec));
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+// 本界面不用 innerHTML 拼外部字符串（表格行走 DOM API），无需转义器；
+// 其余脚本统一从 common.js 取 escapeHtml。
 
 // ===== 采样缓冲 =====
 
@@ -163,10 +211,11 @@ function accumulateToday(snap) {
   const stamp = new Date().toDateString();
   if (stamp !== todayStamp) {
     todayStamp = stamp;
-    todayBase = 0;
-    todayDelta = 0;
+    todayBase = { down: 0, up: 0 };
+    todayDelta = { down: 0, up: 0 };
   }
-  todayDelta += (snap.TotalDownloadBytes || 0) + (snap.TotalUploadBytes || 0);
+  todayDelta.down += snap.TotalDownloadBytes || 0;
+  todayDelta.up += snap.TotalUploadBytes || 0;
 }
 
 async function loadTodayBase() {
@@ -174,12 +223,15 @@ async function loadTodayBase() {
     const raw = await window.__TAURI__.core.invoke('history_daily', { days: 1 });
     const today = new Date();
     const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    let sum = 0;
+    const base = { down: 0, up: 0 };
     for (const r of JSON.parse(raw || '[]')) {
-      if (r.day === key) sum += (r.down || 0) + (r.up || 0);
+      if (r.day === key) {
+        base.down += r.down || 0;
+        base.up += r.up || 0;
+      }
     }
-    todayBase = sum;
-  } catch { todayBase = 0; }
+    todayBase = base;
+  } catch { todayBase = { down: 0, up: 0 }; }
 }
 
 // ===== 顶栏 =====
@@ -187,14 +239,23 @@ async function loadTodayBase() {
 const STATUS = {
   ok:        { cls: 'is-ok',    text: '监控中' },
   paused:    { cls: 'is-warn',  text: '已暂停' },
+  starting:  { cls: 'is-warn',  text: '正在启动采集' },
   error:     { cls: 'is-error', text: '服务异常 · 需管理员权限' },
   connecting:{ cls: 'is-warn',  text: '连接中' },
   offline:   { cls: '',         text: '未连接采集服务' },
 };
 
+// 快照 Status（ok / paused / starting / error）→ STATUS 的键。
+// starting 必须单列：ETW 会话在后台起，含残留会话清理实测 0.3–2.4s，这段窗口里
+// 管道已经在推帧但还没有事件——归到 error 就是在每次启动的头几秒稳定播报
+// 「服务异常 · 需管理员权限」，与事实相反。未知值仍按 error 兜底。
+function statusKey(status) {
+  return status === 'ok' || status === 'paused' || status === 'starting' ? status : 'error';
+}
+
 function setStatus(kind) {
   const s = STATUS[kind] || STATUS.offline;
-  els.statusPill.className = `status-pill ${s.cls}`.trim();
+  els.statusPill.className = `top-status ${s.cls}`.trim();
   els.statusText.textContent = s.text;
   els.frame.classList.toggle('is-paused', kind === 'paused');
 }
@@ -206,28 +267,76 @@ function renderTopbar(snap) {
   els.totalDownUnit.textContent = down.unit;
   els.totalUpValue.textContent = up.value;
   els.totalUpUnit.textContent = up.unit;
-  els.todayTotal.textContent = fmtBytes(todayBase + todayDelta);
+
+  // 顶栏元信息承接原检查栏总览的「已采集 / N 个进程」：采集状态是常看项，
+  // 放在视野里比收进详情卡字段里顺手
+  const startedMs = snap.SessionStartedUnixMs || 0;
+  const upSec = startedMs > 0 ? ((snap.TimestampUnixMs || Date.now()) - startedMs) / 1000 : samples.length;
+  const procN = (snap.Processes || []).length;
+  els.topMeta.textContent = `已采集 ${fmtDuration(upSec)} · ${procN} 个进程`;
+
+  // 今日卡：合计大字 + 下载/上传两个小值
+  setSplitText(els.todayTotal, fmtBytes(todayBase.down + todayDelta.down + todayBase.up + todayDelta.up));
+  setSplitText(els.todayDown, fmtBytes(todayBase.down + todayDelta.down));
+  setSplitText(els.todayUp, fmtBytes(todayBase.up + todayDelta.up));
 
   const lost = snap.EventsLost || 0;
   els.lostDot.hidden = lost === 0;
-  if (lost > 0) els.lostDot.title = `事件丢失 ${lost} 条 · 实际用量可能高于显示值`;
+  if (lost > 0) {
+    const msg = `事件丢失 ${lost} 条 · 实际用量可能高于显示值`;
+    els.lostDot.title = msg;
+    els.lostDot.setAttribute('aria-label', msg);
+  }
 
-  setStatus(snap.Status === 'ok' ? 'ok' : snap.Status === 'paused' ? 'paused' : 'error');
+  setStatus(statusKey(snap.Status));
 }
 
-// 从静默跨到有流量的那一刻，四块岛屿的外发光涨一次再落回。
-// 只在跨过边界时触发一次，速率持续变化时发光不动（§3.6）。
-function pulseIfWaking(snap) {
-  const busy = (snap.TotalDownloadBytes || 0) + (snap.TotalUploadBytes || 0) > 0;
-  if (busy && wasIdle && snap.Status === 'ok') {
-    const islands = document.querySelectorAll('.island');
-    islands.forEach((el) => el.classList.remove('is-waking'));
-    // 强制回流后再加类，否则连续触发时动画不会重播
-    void els.shell.offsetWidth;
-    islands.forEach((el) => el.classList.add('is-waking'));
-    setTimeout(() => islands.forEach((el) => el.classList.remove('is-waking')), 320);
+// ===== 搜索 =====
+
+// 统一前缀语义（照 Sniffnet 的 FilterInputType 做法）：=x 精确、!=x 不等于、!x 不含、x 含。
+// 大小写一律不敏感。加维度只改这张表，不改判断逻辑——这是把「搜索」从
+// 一串 includes 变成可扩展机制的关键。
+function parseQuery(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  let op = 'has';
+  let body = text;
+  if (text.startsWith('!=')) { op = 'ne'; body = text.slice(2); }
+  else if (text.startsWith('=')) { op = 'eq'; body = text.slice(1); }
+  else if (text.startsWith('!')) { op = 'not'; body = text.slice(1); }
+  // 只认最前面那一个操作符，后面出现的一律当普通字符——`!a=b` 是「不含 'a=b'」，
+  // 不做嵌套解析（搜索框不是查询语言，多一层规则就多一层要记的东西）。
+  body = body.trim().toLowerCase();
+  if (!body) return null;
+  return { op, body };
+}
+
+// 参与搜索的维度。名字用英文键是为了让用户能 `=chrome.exe` 这种写法保持直觉：
+// 这里比的是「值」，不引入字段名语法，避免多一层要记的规则。
+function searchFields(p) {
+  const S = window.NetPeekServices || {};
+  const port = Number(p.TopRemotePort) || 0;
+  return [
+    p.Name || '',
+    p.Path || '',
+    String(p.Pid),
+    p.TopRemoteIp || '',
+    port > 0 ? String(port) : '',
+    S.serviceName ? S.serviceName(port) : '',
+    p.TopRemoteCountry || '',
+    S.bogonLabel ? S.bogonLabel(p.TopRemoteIp || '') : '',
+  ];
+}
+
+function matchesQuery(p, q) {
+  if (!q) return true;
+  const fields = searchFields(p).map((v) => String(v).toLowerCase());
+  switch (q.op) {
+    case 'eq': return fields.some((v) => v === q.body);
+    case 'ne': return fields.every((v) => v !== q.body);
+    case 'not': return fields.every((v) => !v.includes(q.body));
+    default: return fields.some((v) => v.includes(q.body));
   }
-  wasIdle = !busy;
 }
 
 // ===== 进程表 =====
@@ -241,11 +350,8 @@ const sortAccessors = {
 
 function visibleProcesses(snap) {
   let procs = (snap.Processes || []).slice();
-  if (query) {
-    const q = query.trim().toLowerCase();
-    procs = procs.filter((p) =>
-      (p.Name || '').toLowerCase().includes(q) || String(p.Pid).includes(q));
-  }
+  const q = parseQuery(query);
+  if (q) procs = procs.filter((p) => matchesQuery(p, q));
 
   if (viewMode === 'app') {
     const map = new Map();
@@ -257,6 +363,7 @@ function visibleProcesses(snap) {
         agg = {
           Name: name, IconBase64: '', Pid: 0, Path: p.Path || '', StartTimeUnixMs: 0,
           DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0, RetransmitTotal: 0,
+          TopRemoteIp: '', TopRemotePort: 0, TopRemoteCountry: '', _memberBytes: -1,
           Members: [],
         };
         map.set(key, agg);
@@ -272,7 +379,15 @@ function visibleProcesses(snap) {
       agg.DownloadTotal += p.DownloadTotal || 0;
       agg.UploadTotal += p.UploadTotal || 0;
       agg.RetransmitTotal += p.RetransmitTotal || 0;
-      if (!agg.IconBase64 && p.IconBase64) agg.IconBase64 = p.IconBase64;
+      if (!agg.IconBase64) agg.IconBase64 = iconOf(p);
+      // 聚合行显示流量最大成员的对端（每秒都在变，取最热的一个有代表性）
+      const memberBytes = (p.DownloadBytes || 0) + (p.UploadBytes || 0);
+      if (memberBytes > agg._memberBytes) {
+        agg._memberBytes = memberBytes;
+        agg.TopRemoteIp = p.TopRemoteIp || '';
+        agg.TopRemotePort = p.TopRemotePort || 0;
+        agg.TopRemoteCountry = p.TopRemoteCountry || '';
+      }
     }
     procs = Array.from(map.values());
   }
@@ -306,6 +421,7 @@ function buildRow(key) {
       <img class="proc-icon" alt="" hidden /><span class="proc-icon is-placeholder"></span>
       <span class="row-name"></span><span class="count-suffix"></span>
     </span></td>
+    <td class="td-peer"></td>
     <td class="is-num td-pid"></td>
     <td class="is-num td-rate down"></td>
     <td class="is-num td-rate up"></td>`;
@@ -314,18 +430,77 @@ function buildRow(key) {
     ph: tr.querySelector('.proc-icon.is-placeholder'),
     name: tr.querySelector('.row-name'),
     suffix: tr.querySelector('.count-suffix'),
-    pid: tr.children[1],
-    down: tr.children[2],
-    up: tr.children[3],
+    peer: tr.querySelector('.td-peer'),
+    pid: tr.children[2],
+    down: tr.children[3],
+    up: tr.children[4],
   };
   return tr;
+}
+
+// 对端图标节点。key 形如 '' | 'sem:lan' | 'jp'。
+// 国家码走 flags.png 雪碧图（就近取位，无网络、无解码开销）；
+// 语义图标走内联 SVG，stroke 用 currentColor 以便跟随主题。
+// 两者内容都来自自有常量、不含任何网络数据，所以这里的 innerHTML 是安全的。
+function peerIconNode(key) {
+  const F = window.NetPeekFlags;
+  if (!key || !F) return null;
+  // 形状合法但雪碧图里没有的码（DB-IP 的 ZZ、或库里新增而我们没重新生成图）必须退回
+  // 语义图标——否则这个格子会既没有旗也没有图标，看着像渲染失败。
+  const sem = key.startsWith('sem:') ? key.slice(4) : F.pos(key) ? '' : 'unknown';
+  const el = document.createElement('span');
+  if (sem) {
+    const html = F.semantic(sem);
+    if (!html) return null;
+    el.className = 'peer-icon';
+    el.innerHTML = html;
+  } else {
+    el.className = 'peer-flag';
+    el.style.backgroundImage = 'url(flags.png)';
+    el.style.backgroundPosition = F.pos(key);
+    el.style.backgroundSize = `${F.size.sheetW}px ${F.size.sheetH}px`;
+  }
+  el.style.width = `${F.size.w}px`;
+  el.style.height = `${F.size.h}px`;
+  return el;
+}
+
+// 对端单元格：图标 + IP + 服务名。
+// 图标只在 key 变化时重建——1 Hz 刷新下每秒重设一次 innerHTML 是白扔的开销，
+// 也会把正在显示的悬浮提示打断。文本走独立文本节点，其余全程 textContent 语义。
+function updatePeerCell(cell, p) {
+  const S = window.NetPeekServices || {};
+  const parts = S.peerParts
+    ? S.peerParts(p.TopRemoteIp || '', Number(p.TopRemotePort) || 0, p.TopRemoteCountry || '')
+    : { icon: '', text: '', title: '' };
+
+  if (!parts.text) {
+    if (cell.textContent !== '—') cell.textContent = '—';
+    cell.title = '';
+    cell._peerIcon = undefined;
+    cell._peerText = null;
+    cell.classList.remove('has-peer');
+    return;
+  }
+
+  if (cell._peerIcon !== parts.icon) {
+    cell._peerIcon = parts.icon;
+    const icon = peerIconNode(parts.icon);
+    const text = document.createTextNode('');
+    cell.replaceChildren(...(icon ? [icon] : []), text);
+    cell._peerText = text;
+  }
+  if (cell._peerText.nodeValue !== parts.text) cell._peerText.nodeValue = parts.text;
+  if (cell.title !== parts.title) cell.title = parts.title;
+  cell.classList.add('has-peer');
 }
 
 function updateRow(tr, p, peakDown) {
   const r = tr.refs;
   const name = p.Name || '(系统/未归因)';
-  if (p.IconBase64) {
-    if (r.img.getAttribute('src') !== p.IconBase64) r.img.src = p.IconBase64;
+  const icon = iconOf(p);
+  if (icon) {
+    if (r.img.getAttribute('src') !== icon) r.img.src = icon;
     r.img.hidden = false;
     r.ph.hidden = true;
   } else {
@@ -335,16 +510,17 @@ function updateRow(tr, p, peakDown) {
   }
   if (r.name.textContent !== name) r.name.textContent = name;
   r.suffix.textContent = viewMode === 'app' ? `×${p.Pid}` : '';
+  updatePeerCell(r.peer, p);
   r.pid.textContent = viewMode === 'app' ? `${p.Pid} 个进程` : p.Pid;
-  r.down.textContent = fmtRate(p.DownloadBytes || 0);
-  r.up.textContent = fmtRate(p.UploadBytes || 0);
+  setRateCell(r.down, fmtRate(p.DownloadBytes || 0));
+  setRateCell(r.up, fmtRate(p.UploadBytes || 0));
 
-  // 占比不占列宽：整行背景一条从左起的极淡琥珀渐变（§2.5）
+  // 占比不占列宽：整行背景一条从左起的极淡下载色渐变（§2.5）。
+  // 渐变本身写在 styles.css 的 .proc-table tbody tr 里，这里只喂百分比 ——
+  // 原来这里拼的是写死的 rgba(240,145,63)，换主题时这条占比条不跟着走。
   const share = peakDown > 0 ? Math.min(100, Math.round(((p.DownloadBytes || 0) / peakDown) * 100)) : 0;
-  const grad = share > 0
-    ? `linear-gradient(90deg, rgba(240,145,63,0.09), rgba(240,145,63,0) ${share}%)`
-    : 'none';
-  if (tr.style.backgroundImage !== grad) tr.style.backgroundImage = grad;
+  const pct = `${share}%`;
+  if (tr.style.getPropertyValue('--share') !== pct) tr.style.setProperty('--share', pct);
 
   tr.classList.toggle('is-selected', !!selected && selected.keyStr === tr.dataset.key);
 }
@@ -374,10 +550,13 @@ function renderTable(snap) {
 }
 
 function renderSortMarks() {
+  const icon = window.NetPeekCommon.icon;
   for (const th of document.querySelectorAll('.proc-table th[data-sort]')) {
     const on = th.dataset.sort === sortKey;
     th.classList.toggle('is-sorted', on);
-    th.querySelector('.sort-mark').textContent = on ? (sortDir === -1 ? '▼' : '▲') : '';
+    th.querySelector('.sort-mark').innerHTML = on ? icon(sortDir === -1 ? 'caret-down' : 'caret-up') : '';
+    // 读屏用户靠 aria-sort 知道当前按哪列、什么方向排序，光标图形它读不到
+    th.setAttribute('aria-sort', on ? (sortDir === -1 ? 'descending' : 'ascending') : 'none');
   }
 }
 
@@ -390,6 +569,11 @@ const PROC_STATES = {
     title: '采集服务未连接',
     desc: 'NetPeek 的 ETW 采集需要 LocalSystem 权限。请确认 NetPeekCollector 服务正在运行。',
     retry: true, skeleton: false,
+  },
+  starting: {
+    // 管道已连上、帧也在来，只是 ETW 会话还在后台起（含残留会话清理，实测
+    // 0.3–2.4s）。骨架条而不是异常卡片：这几秒是正常启动流程，不该报错。
+    title: '正在启动采集会话', desc: '内核 ETW 会话就绪后会立刻出现数据。', retry: false, skeleton: true,
   },
   error: {
     title: '采集服务异常',
@@ -451,9 +635,9 @@ function renderOverview(snap, procs) {
   els.inspMeta.textContent = `${procs.length} 个${viewMode === 'app' ? '应用' : '进程'}有流量`;
 
   const all = snap.Processes || [];
-  els.inspDownTotal.textContent = fmtBytes(all.reduce((s, p) => s + (p.DownloadTotal || 0), 0));
-  els.inspUpTotal.textContent = fmtBytes(all.reduce((s, p) => s + (p.UploadTotal || 0), 0));
-  els.inspUpLabel.textContent = '启动以来上传';
+  setSplitText(els.inspDownTotal, fmtBytes(all.reduce((s, p) => s + (p.DownloadTotal || 0), 0)));
+  setSplitText(els.inspUpTotal, fmtBytes(all.reduce((s, p) => s + (p.UploadTotal || 0), 0)));
+  els.inspUpLabel.textContent = '累计上传';
 
   els.inspLiveSec.hidden = true;
   els.inspFieldsSec.hidden = false;
@@ -462,10 +646,29 @@ function renderOverview(snap, procs) {
 }
 
 // 详情态。会话时长按进程创建时间算，不是「选中以来」。
+// 详情行是「字符串 / 图标块」混排：国旗是图片节点，没法塞进 join 出来的字符串，
+// 所以按节点拼。分隔符统一在这里生成，调用方只关心片段顺序。
+function setInspMeta(parts) {
+  const frag = document.createDocumentFragment();
+  parts.forEach((part, i) => {
+    if (i > 0) frag.appendChild(document.createTextNode(' · '));
+    if (typeof part === 'string') {
+      frag.appendChild(document.createTextNode(part));
+      return;
+    }
+    if (part.lead) frag.appendChild(document.createTextNode(part.lead));
+    const icon = peerIconNode(part.icon);
+    if (icon) frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(part.text || ''));
+  });
+  els.inspMeta.replaceChildren(frag);
+}
+
 function renderDetail(snap, p) {
   const name = p.Name || '(系统/未归因)';
-  if (p.IconBase64) {
-    if (els.inspIcon.getAttribute('src') !== p.IconBase64) els.inspIcon.src = p.IconBase64;
+  const icon = iconOf(p);
+  if (icon) {
+    if (els.inspIcon.getAttribute('src') !== icon) els.inspIcon.src = icon;
     els.inspIcon.hidden = false;
     els.inspIconPh.hidden = true;
   } else {
@@ -486,16 +689,25 @@ function renderDetail(snap, p) {
     parts.push(`会话 ${fmtDuration(((snap.TimestampUnixMs || Date.now()) - p.StartTimeUnixMs) / 1000)}`);
   }
   if (p.RetransmitTotal > 0) parts.push(`重传 ${fmtBytes(p.RetransmitTotal)}`);
-  els.inspMeta.textContent = parts.join(' · ');
+  // 本秒最热的对端也上详情行：检查栏是看「这个应用在和谁说话」最顺眼的地方。
+  // 这一项带图标，所以是对象而不是字符串（国旗是节点，塞不进一个串里）。
+  if (p.TopRemoteIp) {
+    const S = window.NetPeekServices || {};
+    const d = S.peerParts
+      ? S.peerParts(p.TopRemoteIp, Number(p.TopRemotePort) || 0, p.TopRemoteCountry || '')
+      : null;
+    if (d) parts.push({ lead: '对端 ', icon: d.icon, text: d.detail });
+  }
+  setInspMeta(parts);
 
-  els.inspDownTotal.textContent = fmtBytes(p.DownloadTotal || 0);
-  els.inspUpTotal.textContent = fmtBytes(p.UploadTotal || 0);
-  els.inspUpLabel.textContent = '启动以来上传';
+  setSplitText(els.inspDownTotal, fmtBytes(p.DownloadTotal || 0));
+  setSplitText(els.inspUpTotal, fmtBytes(p.UploadTotal || 0));
+  els.inspUpLabel.textContent = '累计上传';
 
   els.inspFieldsSec.hidden = true;
   els.inspLiveSec.hidden = false;
-  els.inspLiveDown.textContent = `▼ ${fmtRate(p.DownloadBytes || 0)}`;
-  els.inspLiveUp.textContent = `▲ ${fmtRate(p.UploadBytes || 0)}`;
+  els.inspLiveDown.innerHTML = window.NetPeekCommon.icon('caret-down') + fmtRate(p.DownloadBytes || 0);
+  els.inspLiveUp.innerHTML = window.NetPeekCommon.icon('caret-up') + fmtRate(p.UploadBytes || 0);
   drawProcChart(p);
   render30Day(name);
 }
@@ -517,8 +729,7 @@ function renderFields(snap) {
     ? `${((named / total) * 100).toFixed(1)}% 已归因`
     : '暂无流量';
 
-  els.fldService.textContent = STATUS[snap.Status === 'ok' ? 'ok'
-    : snap.Status === 'paused' ? 'paused' : 'error'].text;
+  els.fldService.textContent = STATUS[statusKey(snap.Status)].text;
 
   const lost = snap.EventsLost || 0;
   els.fldLost.textContent = lost === 0 ? '无丢失' : `${lost} 条`;
@@ -540,101 +751,31 @@ function setFieldsOffline() {
 // 底部带宽图答「总带宽这一分钟怎么走的」；检查栏实时图答「这个应用这一分钟怎么走的」；
 // 30 天图答「这个应用一个月用了多少」。三个问题不重叠（§3.7 第 9 条）。
 
+function chartOpts(extra) {
+  return Object.assign({
+    window: WINDOW_SECS,
+    xLabels: [`-${WINDOW_SECS}s`, '现在'],
+    formatY: C.axisRate,
+    tipSuffix: '/s',   // 悬停读数的单位后缀（y 轴走紧凑 formatY，读数走全精度）
+  }, extra);
+}
+
 // 暂停时曲线尾巴转虚线，从暂停那一刻的下标开始（§2.8）
 let pausedIndex = -1;
 
-// ===== 实时折线（ECharts）=====
-// 1Hz × 60 点的小数据量，交互与美观优先；真正的海量高频流才需要
-// uPlot 级别的方案（§4.2）。与统计页共用同一份 vendored ECharts。
-// 平滑用 smoothMonotone:'x' 抑制曲线过冲 —— 速率读数不许画出比峰值还高的鼓包。
-
-function ensureLineChart(el) {
-  let inst = echarts.getInstanceByDom(el);
-  if (!inst) inst = echarts.init(el);
-  // init 落在布局完成前会拿到 0×0（ECharts 回退 100×100），尺寸不符就重量测
-  if (inst.getWidth() !== el.clientWidth || inst.getHeight() !== el.clientHeight) inst.resize();
-  return inst;
-}
-
-// defs: [{ name, color, points: [[tMs, v]...], dashFrom }]；dashFrom ≥ 0 时该下标起转虚线，
-// 虚线段补上边界前一点保持视觉接续。opt: { area, yMax, tooltip, grid, windowMs }
-function liveLineOption(defs, opt = {}) {
-  const mut = C.cssVar('--text-muted') || '#b4a99e';
-  const txt = C.cssVar('--text') || '#f6efe8';
-  const line = 'rgba(255,255,255,0.08)';
-  const now = Date.now();
-  const windowMs = (opt.windowSecs || WINDOW_SECS) * 1000;
-  const series = [];
-  for (const d of defs) {
-    const solid = [];
-    const dash = [];
-    const cut = Number.isInteger(d.dashFrom) ? d.dashFrom : -1;
-    d.points.forEach(([t, v], i) => {
-      if (cut >= 0 && i >= cut) {
-        dash.push([t, v]);
-      } else {
-        solid.push([t, v]);
-        if (cut >= 0 && i === cut - 1) dash.push([t, v]);
-      }
-    });
-    const lineBase = {
-      type: 'line', showSymbol: false, smooth: true, smoothMonotone: 'x',
-      lineStyle: { width: 2, color: d.color },
-    };
-    series.push({
-      ...lineBase, name: d.name,
-      areaStyle: opt.area ? {
-        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: d.color + '38' },
-          { offset: 1, color: d.color + '00' },
-        ]),
-      } : undefined,
-      data: solid,
-    });
-    if (cut >= 0) {
-      series.push({
-        ...lineBase, name: `${d.name}（暂停）`,
-        lineStyle: { width: 2, color: d.color, type: 'dashed', opacity: 0.7 },
-        data: dash,
-      });
-    }
-  }
-  return {
-    animation: false,
-    grid: opt.grid || { left: 52, right: 12, top: 12, bottom: 8 },
-    xAxis: { type: 'time', min: now - windowMs, max: now,
-      axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false },
-      splitLine: { show: false } },
-    yAxis: { type: 'value', min: 0, max: opt.yMax, splitNumber: 2,
-      axisLabel: { color: mut, fontSize: 10, formatter: C.axisRate },
-      splitLine: { lineStyle: { color: line, type: 'dashed' } } },
-    tooltip: opt.tooltip ? {
-      trigger: 'axis',
-      backgroundColor: C.cssVar('--surface') || '#1e1a16',
-      borderColor: 'rgba(255,255,255,0.12)',
-      textStyle: { color: txt, fontSize: 12 },
-      valueFormatter: (v) => C.axisRate(v),
-    } : undefined,
-    series,
-  };
-}
-
 function drawBandwidth() {
   if (!els.bandwidthChart) return;
-  const inst = ensureLineChart(els.bandwidthChart);
   if (!lastSnapshot) {
-    // 断线：只留空坐标轴（§2.8），连接恢复后下一帧自然填上
-    inst.setOption(liveLineOption([], { yMax: 1 }), true);
+    C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
     return;
   }
-  const pts = (pick) => samples.map((s) => [s.t * 1000, pick(s)]);
-  const peak = samples.reduce((m, s) => Math.max(m, s.down, s.up), 1);
-  inst.setOption(liveLineOption([
-    { name: '下载', color: C.cssVar('--down') || '#f0913f', points: pts((s) => s.down), dashFrom: pausedIndex },
-    { name: '上传', color: C.cssVar('--up') || '#7fa8c9', points: pts((s) => s.up), dashFrom: pausedIndex },
-  ], { yMax: C.niceMax(peak), area: true }), true);
-  // 不给实时图配 tooltip：1Hz setOption 会每秒把浮层重置掉（一闪一灭），
-  // 且当前精确值就在顶栏大数字里 —— 这张图只负责「趋势形状」。
+  C.line(els.bandwidthChart, chartOpts({
+    series: [
+      { values: samples.map((s) => s.down), color: C.cssVar('--down'), label: '下载' },
+      { values: samples.map((s) => s.up), color: C.cssVar('--up'), label: '上传' },
+    ],
+    dashFrom: pausedIndex,
+  }));
 }
 
 // 选中行的 60 秒曲线。按应用聚合时把成员进程逐槽相加，
@@ -662,50 +803,38 @@ function seriesFor(p) {
 function drawProcChart(p) {
   if (!els.inspLiveChart || els.inspLiveSec.hidden) return;
   const s = seriesFor(p);
-  const inst = ensureLineChart(els.inspLiveChart);
   if (!s.down.length) {
-    inst.setOption(liveLineOption([], { yMax: 1, grid: { left: 44, right: 8, top: 8, bottom: 6 } }), true);
+    C.line(els.inspLiveChart, chartOpts({ axesOnly: true, yMax: 1 }));
     return;
   }
-  // 槽位右对齐：最右一个槽就是当前秒
-  const len = s.down.length;
-  const now = Date.now() / 1000;
-  const toPoints = (arr) => arr.map((v, i) => [(now - (len - 1 - i)) * 1000, v]);
-  const peak = s.down.reduce((m, v) => Math.max(m, v), s.up.reduce((m2, v) => Math.max(m2, v), 1));
-  inst.setOption(liveLineOption([
-    { name: '下载', color: C.cssVar('--down') || '#f0913f', points: toPoints(s.down), dashFrom: pausedIndex },
-    { name: '上传', color: C.cssVar('--up') || '#7fa8c9', points: toPoints(s.up), dashFrom: pausedIndex },
-  ], { yMax: C.niceMax(peak), area: true, grid: { left: 44, right: 8, top: 8, bottom: 6 } }), true);
+  C.line(els.inspLiveChart, chartOpts({
+    series: [
+      { values: s.down, color: C.cssVar('--down'), label: '下载' },
+      { values: s.up, color: C.cssVar('--up'), label: '上传' },
+    ],
+    dashFrom: pausedIndex,
+  }));
 }
 
 // 30 天下载柱图。检查栏只有 296px 宽，挤不开双色分组柱，上传去历史屏看（§2.4）。
 // 数据复用历史屏那一次日聚合查询，不再单独查库。
-// 库每整分钟落一次盘，仅靠「换选中行才重查」的话，UI 启动那一刻库还是空的
-// 就会永远停在「合计 0 B」—— 所以超过 60s 的渲染强制重查一次。
-const REFRESH_30_MS = 60000;
 let last30Name = undefined;
-let last30At = 0;
 
 async function render30Day(name, force) {
-  const stale = Date.now() - last30At >= REFRESH_30_MS;
-  if (!force && name === last30Name && !stale) return;
+  if (!force && name === last30Name) return;
   last30Name = name;
-  last30At = Date.now();
   els.insp30Title.textContent = name ? '30 天下载' : '30 天下载（全部应用）';
   if (!window.NetPeekHistoryUI) return;
   try {
     const points = await window.NetPeekHistoryUI.dailyFor(name, 30);
     if (last30Name !== name) return;      // 期间又换了选中行，这份结果作废
     const total = points.reduce((s, p) => s + p.value, 0);
-    els.insp30Total.textContent = total > 0 ? `合计 ${fmtBytes(total)}` : '暂无数据';
+    els.insp30Total.textContent = `合计 ${fmtBytes(total)}`;
     C.bars(els.insp30Chart, {
       groups: points.map((p) => ({ label: p.label, values: [p.value] })),
-      colors: [C.cssVar('--down') || '#f0913f'],
       formatY: C.axisBytes,
-      tipFormat: fmtBytes,
-      seriesNames: ['下载'],
       xLabels: points.length ? [points[0].label, points[points.length - 1].label] : [],
-      emptyText: '暂无历史数据',
+      seriesNames: ['下载'],
     });
   } catch {
     els.insp30Total.textContent = '合计 —';
@@ -719,26 +848,18 @@ function renderAll(snap) {
   renderTopbar(snap);
   const procs = renderTable(snap);
 
-  if (snap.Status !== 'ok' && snap.Status !== 'paused') setProcState('error');
-  else if (procs.length === 0) setProcState(query ? 'empty' : 'idle');
+  if (snap.Status === 'starting') setProcState('starting');
+  else if (snap.Status !== 'ok' && snap.Status !== 'paused') setProcState('error');
+  else if (procs.length === 0) setProcState(parseQuery(query) ? 'empty' : 'idle');
   else setProcState(null);
 
   renderInspector(snap, procs);
   drawBandwidth();
-  pulseIfWaking(snap);
-}
-
-// 隐藏到托盘时跳过 DOM/canvas 重绘（§4.1/§11 硬性要求）。
-// 可见性有两个来源：document.hidden（页面级）与 win-visibility 事件 —— WebView2
-// 对宿主窗口隐藏不保证触发 visibilitychange，所以 Rust 侧在 show/hide 时显式广播兜底。
-let winHidden = false;
-function uiVisible() { return !document.hidden && !winHidden; }
-function repaintIfVisible() {
-  if (uiVisible() && screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
 }
 
 function onSnapshot(snap) {
   lastSnapshot = snap;
+  mergeIcons(snap);
   pushSamples(snap);
   accumulateToday(snap);
   // 暂停是从当前这一帧起虚线；恢复后回到全实线
@@ -746,81 +867,41 @@ function onSnapshot(snap) {
     ? (pausedIndex >= 0 ? pausedIndex : samples.length - 1)
     : -1;
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateService(snap);
-  if (!uiVisible()) return;              // 隐藏到托盘：数据照常进采样缓冲，只停重绘
+  // 窗口隐藏到托盘后不做任何渲染：记账照跑（今日合计、采样缓冲），省掉每秒
+  // 一轮的 DOM 更新和 canvas 重画。恢复可见时补一帧，不等下一秒。
+  if (document.hidden) return;
   if (screen !== 'live') return;         // 别的屏不用重画实时件
   renderAll(snap);
 }
-
-document.addEventListener('visibilitychange', repaintIfVisible);
 
 // 断线：数字停在最后一帧，图只留坐标轴，表格换成可重试的异常态（§2.8）
 function onDisconnected() {
   setStatus('offline');
   setProcState('offline');
   setFieldsOffline();
-  drawBandwidth(); // lastSnapshot 为空 → 空坐标轴分支
+  C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateServiceOffline();
 }
 
 // ===== 屏切换 =====
-// 岛的位置不动，只换岛内内容（§2.6）。视图切换和搜索只对实时屏有意义，
-// 换屏时隐藏它们，而不是留在那里点了没反应。
+// 主区三屏互斥显示；rail 的选中态跟过去。视图切换和搜索在表格卡头里，
+// 随 live 屏整体显隐，不需要单独处理。
 
 function setScreen(next) {
   if (next === screen) return;
   screen = next;
-  // 当前屏挂到 body 上：CSS 按屏调骨架（如历史屏把数据岛加高），JS 不感知具体值
-  document.body.dataset.screen = next;
-  for (const pane of document.querySelectorAll('.pane[data-screen]')) {
+  for (const pane of document.querySelectorAll('.screen[data-screen]')) {
     pane.hidden = pane.dataset.screen !== next;
   }
-  for (const btn of els.nav.querySelectorAll('.nav-item')) {
+  for (const btn of els.nav.querySelectorAll('.ri[data-screen]')) {
     const on = btn.dataset.screen === next;
-    btn.classList.toggle('is-active', on);
+    btn.classList.toggle('is-on', on);
     btn.setAttribute('aria-current', on ? 'page' : 'false');
   }
-  els.viewToggle.hidden = next !== 'live';
-  $('searchBox').hidden = next !== 'live';
 
   if (next === 'live' && lastSnapshot) renderAll(lastSnapshot);
   if (next === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.onEnter();
   if (next === 'settings' && window.NetPeekSettingsUI) window.NetPeekSettingsUI.onEnter();
-}
-
-// ===== 密集模式 =====
-// 收起留白区和检查栏，把数据岛撑到整个下半部分。导航岛留在原位：
-// 唯一的导航入口不该被一个临时视图吞掉（这一条是对规格的有意偏离）。
-
-function setDense(on) {
-  els.shell.classList.toggle('is-dense', on);
-  els.denseGrip.setAttribute('aria-expanded', String(on));
-  els.denseGrip.title = on ? '双击恢复三段布局' : '双击展开进程表';
-  localStorage.setItem(DENSE_KEY, on ? '1' : '0');
-  // 布局变了，画布尺寸也变了，图得重画
-  requestAnimationFrame(() => {
-    if (screen === 'live') drawBandwidth();
-    if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
-  });
-}
-
-function bindDenseGrip() {
-  let startY = 0;
-  let dragging = false;
-  els.denseGrip.addEventListener('pointerdown', (e) => {
-    dragging = true;
-    startY = e.clientY;
-    els.denseGrip.setPointerCapture(e.pointerId);
-  });
-  els.denseGrip.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const dy = e.clientY - startY;
-    if (dy < -24) { setDense(true); dragging = false; }
-    else if (dy > 24) { setDense(false); dragging = false; }
-  });
-  els.denseGrip.addEventListener('pointerup', () => { dragging = false; });
-  els.denseGrip.addEventListener('dblclick', () => {
-    setDense(!els.shell.classList.contains('is-dense'));
-  });
 }
 
 // ===== 无边框窗口 =====
@@ -917,9 +998,18 @@ function bindControls() {
   });
 
   els.nav.addEventListener('click', (e) => {
-    const btn = e.target.closest('.nav-item');
+    const btn = e.target.closest('.ri[data-screen]');
     if (btn) setScreen(btn.dataset.screen);
   });
+
+  // 迷你窗入口：rail 底部的独立开关，托盘/能量球之外的第三个入口
+  $('miniToggle').addEventListener('click', async () => {
+    try { await window.__TAURI__.core.invoke('toggle_mini'); } catch { /* ignore */ }
+  });
+
+  // 今日合计 → 历史屏：实时屏里唯一指向「更早的数据」的数字，
+  // 点它就该去历史屏，而不是让用户自己去导航岛找图标（button 原生响应 Enter/Space）
+  $('todayBtn').addEventListener('click', () => setScreen('history'));
 
   // 归因说明挂在归因覆盖率上：点开点收，不另设入口（§2.4）
   const toggleNote = () => {
@@ -934,12 +1024,6 @@ function bindControls() {
   $('retryConnect').addEventListener('click', () => {
     setProcState('connecting');
     // 管道客户端自己每秒重连，这里只把界面切回等待态
-  });
-
-  // 留白区的按钮是无背景图态的唯一例外（§2.8）
-  els.stagePickBg.addEventListener('click', () => {
-    setScreen('theme');
-    if (window.NetPeekThemeUI) window.NetPeekThemeUI.pickBackground();
   });
 
   window.addEventListener('netpeek-settingschange', (e) => {
@@ -965,6 +1049,12 @@ function bindControls() {
       if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
     }, 120);
   });
+
+  // 从托盘恢复可见：onSnapshot 在隐藏期间提前返回了，这里立即补一帧，
+  // 否则界面要干等到下一秒的快照才更新。
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
+  });
 }
 
 // ===== 启动 =====
@@ -975,17 +1065,15 @@ window.NetPeekLive = {
   fmtBytes,
   fmtRate,
   initialOf,
+  iconOf,
   UNATTR,
 };
 
 async function boot() {
   renderSortMarks();
-  setDense(localStorage.getItem(DENSE_KEY) === '1');
   setProcState('connecting');
-  els.viewToggle.hidden = false;
   bindTable();
   bindControls();
-  bindDenseGrip();
 
   // 管道监听先挂上：后面的主题、设置、首绘任何一步抛错都不该让界面收不到快照
   if (window.__TAURI__) {
@@ -993,12 +1081,6 @@ async function boot() {
     await listen('pipe-status', (e) => {
       if (e.payload === 'connected') setProcState('connecting');
       else onDisconnected();
-    });
-    // Rust 侧 show/hide 时广播的窗口可见性（uiVisible 的权威来源，见其注释）
-    await listen('win-visibility', (e) => {
-      if (e.payload.label !== 'main') return;
-      winHidden = !e.payload.visible;
-      repaintIfVisible();
     });
   } else {
     // 浏览器里直接开 index.html 时没有管道，停在异常态而不是空白
@@ -1012,21 +1094,10 @@ async function boot() {
   // 主题要在首绘之前起来：图里的颜色是从 --down / --up 读出来画上去的
   if (window.NetPeekThemeUI) { try { await window.NetPeekThemeUI.init(); } catch { /* 用默认令牌 */ } }
   if (window.NetPeekSettingsUI) { try { await window.NetPeekSettingsUI.init(); } catch { /* 用默认设置 */ } }
+  await loadTodayBase();
 
   drawBandwidth();
-  // 首绘就绪，显示窗口（此前窗口隐藏，WebView2 冷启动期的空白帧不会露出来）
-  showWindow();
-  console.log('[netpeek] 界面就绪', Math.round(performance.now() - (window.__BOOT_T0 || 0)), 'ms');
-
-  // 非关键路径后置：今日合计底数从历史库补，晚到几百毫秒只影响顶栏一个读数
-  loadTodayBase();
   render30Day(null, true);
-}
-
-function showWindow() {
-  try {
-    window.__TAURI__?.window?.getCurrentWindow?.().show();
-  } catch { /* 浏览器预览没有窗口对象 */ }
 }
 
 boot();

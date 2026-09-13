@@ -1,44 +1,43 @@
-// 外观屏交互层。
+// 外观（皮肤）交互层。皮肤 = 整套 17 键 token 的预设包，结构与布局不变。
 //
-// v2 统一模型（2026-09-05 重设计）：state.current 是唯一事实源——
-// 换壁纸自动取色、AI 生成、预设起步都是往 current 里写令牌的「生成方式」，
-// 高级色板微调与材质滑杆编辑的也是 current，没有互斥的模式开关。
-// 检查栏放当前主题卡 / 对比度校验结果 / 主题列表；数据岛放壁纸条与材质。
+// 界面分三块（index.html 设置屏 · 外观分区）：
+//   1. skinCards：四张内置皮肤卡（朴素 / 浅色 / 琥珀 / 跟随背景图），点卡即切；
+//   2. imageSkinBlock：「跟随背景图」专属 —— 选图、取色、三滑块（不透明/模糊/压暗）、AI 取色；
+//   3. customSkinBlock：自定义编辑器 —— 在当前生效颜色上改单键、当场预览、命名另存。
 //
-// 背景 URL 的三种来源与解析：
-//   data:…        原样用（浏览器调试 / IPC 回退）
-//   builtin:x     ui/wallpapers/x.jpg（随前端静态资源分发，相对路径）
-//   本地文件路径   优先 asset protocol（convertFileSrc，零拷贝过 IPC），
-//                 画布取色失败（跨域污染）或 convert 不可用时回退 IPC data URL
+// 状态结构（theme.js defaultState，与 Rust 持久化的 JSON 一致）：
+// {
+//   skin: 'plain'|'light'|'amber'|'image'|自定义名,
+//   backgroundImage, panelOpacity, bgBlur, scrim,
+//   imageDraft: { tokens, source }, custom: { tokens } | null,
+//   themes: { name: { name, tokens } }, ai: { provider, consented }
+// }
 
 (function () {
   const T = window.NetPeekTheme;
   const $ = (id) => document.getElementById(id);
 
-  const SWATCH_IDS = ['cBg', 'cPanel', 'cText', 'cMuted', 'cDown', 'cUp', 'cOk', 'cWarn', 'cError', 'cBorder'];
+  const SWATCH_IDS = ['cBg', 'cPanel', 'cText', 'cMuted', 'cAccent', 'cDown', 'cUp', 'cOk', 'cWarn', 'cError', 'cBorder'];
   const SWATCH_TO_TOKEN = {
-    cBg: 'bg', cPanel: 'panel', cText: 'text', cMuted: 'muted', cDown: 'down',
-    cUp: 'up', cOk: 'ok', cWarn: 'warn', cError: 'error', cBorder: 'border',
+    cBg: 'bg', cPanel: 'panel', cText: 'text', cMuted: 'text2', cAccent: 'accent',
+    cDown: 'down', cUp: 'up', cOk: 'ok', cWarn: 'warn', cError: 'error', cBorder: 'line',
   };
-  const CONTRAST_KEYS = ['text', 'muted', 'down', 'up', 'ok', 'warn', 'error'];
-  const SOURCE_LABEL = { standard: '取色', ai: 'AI', custom: '定制' };
-  const WALLPAPER_PREFIX = 'builtin:';
 
   const els = {
-    bgStatus: $('bgStatus'),
+    skinCards: Array.from(document.querySelectorAll('#skinCards .skin-card')),
+    imageSkinBlock: $('imageSkinBlock'),
+    bgThumb: $('bgThumb'),
     bgPick: $('bgPick'),
     bgClear: $('bgClear'),
     bgFile: $('bgFile'),
-    stdOpacity: $('stdOpacity'),
-    stdScrim: $('stdScrim'),
-    stdBlur: $('stdBlur'),
+    bgStatus: $('bgStatus'),
+    opacity: $('stdOpacity'),
+    scrim: $('stdScrim'),
+    blur: $('stdBlur'),
     opValue: $('opValue'),
     scrimValue: $('scrimValue'),
     blurValue: $('blurValue'),
-    materialNote: $('materialNote'),
-    followSystem: $('followSystem'),
-    followSystemWrap: $('followSystemWrap'),
-    advToggle: $('advToggle'),
+    aiSection: $('aiSection'),
     aiEndpoint: $('aiEndpoint'),
     aiApiKey: $('aiApiKey'),
     aiModel: $('aiModel'),
@@ -46,101 +45,190 @@
     aiGenerate: $('aiGenerate'),
     aiStatus: $('aiStatus'),
     presets: Array.from(document.querySelectorAll('[data-preset]')),
-    wallThumbs: Array.from(document.querySelectorAll('.wall-thumb[data-wall]')),
-    curThemeChip: $('curThemeChip'),
-    curThemeName: $('curThemeName'),
-    curThemeMeta: $('curThemeMeta'),
-    contrastBadge: $('contrastBadge'),
     themeName: $('themeName'),
     themeSave: $('themeSave'),
     themeList: $('themeList'),
     themeReset: $('themeReset'),
-    stageHint: $('stageHint'),
   };
   SWATCH_IDS.forEach((id) => { els[id] = $(id); });
 
   let state = null;
   let storage = null;
-  let bgDataUrl = '';    // 当前背景的解析结果（data: / asset: / 相对路径），CSS 与画布共用
-  let stdImage = null;   // ≤512px 的 ImageData，取色与 AI 缩略图共用
-  let thumbDataUrl = ''; // AI 请求用的 JPEG 缩略图，随背景失效
+  let bgDataUrl = '';   // 当前背景的 data URL（已解析，直接给 CSS / 取色 / AI 请求用）
+  let stdImage = null;  // 当前背景图的 ImageData，无背景时 null
 
-  // ---------- 背景解析 ----------
+  // ---------- 应用当前皮肤 ----------
 
-  async function resolveBgUrl(value) {
-    if (!value) return '';
-    if (value.startsWith('data:')) return value;
-    if (value.startsWith(WALLPAPER_PREFIX)) {
-      return 'wallpapers/' + value.slice(WALLPAPER_PREFIX.length) + '.jpg';
-    }
-    const tauri = window.__TAURI__;
-    if (tauri && tauri.core && tauri.core.convertFileSrc) {
-      try {
-        return tauri.core.convertFileSrc(value);
-      } catch { /* convert 失败走 IPC 回退 */ }
-    }
-    try { return await storage.readBackground(value); } catch { return ''; }
+  function currentTokens() {
+    return T.resolveSkin(state).tokens;
   }
 
-  function loadImageData(src) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      // asset 域与页面不同源，必须带 CORS 头才不会污染画布（Tauri asset protocol 带 ACAM:*）
-      if (!src.startsWith('data:')) img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        try {
-          const max = 512; // 缩到 ≤512px：取色够用，也是发给 AI 的尺寸上限（隐私承诺）
-          const scale = Math.min(1, max / Math.max(img.width, img.height));
-          const w = Math.max(1, Math.round(img.width * scale));
-          const h = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(img, 0, 0, w, h);
-          resolve(ctx.getImageData(0, 0, w, h));
-        } catch {
-          resolve(null); // 画布被污染 → 调用方回退 IPC data URL
-        }
-      };
-      img.onerror = () => resolve(null);
-      img.src = src;
+  // 编辑器草稿的颜色（没有草稿就等于当前生效颜色）
+  function draftTokens() {
+    return (state.custom && state.custom.tokens) || currentTokens();
+  }
+
+  function cloneTokens(t) {
+    return JSON.parse(JSON.stringify(t));
+  }
+
+  // 把当前皮肤（含 image 背景解析）铺到界面上。
+  async function applyCurrent() {
+    const skin = T.resolveSkin(state);
+    let bg = skin.background || '';
+    if (bg && !bg.startsWith('data:')) {
+      try { bg = await storage.readBackground(bg); } catch { bg = ''; }
+    }
+    bgDataUrl = bg;
+    T.applyTokens(skin.tokens);
+    T.applyBackdrop({
+      background: bg,
+      panelOpacity: skin.panelOpacity,
+      bgBlur: skin.bgBlur,
+      scrim: skin.scrim,
+    });
+    broadcastTokens(skin.tokens);
+    if (state.skin === 'image') {
+      els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
+      els.bgStatus.className = 'note truncate';
+    }
+  }
+
+  // 仅背景三滑块变化：颜色没变，不用广播令牌，重铺 backdrop 就够
+  function applyBackdropOnly() {
+    T.applyBackdrop({
+      background: bgDataUrl,
+      panelOpacity: state.panelOpacity,
+      bgBlur: state.bgBlur,
+      scrim: state.scrim,
     });
   }
 
-  async function loadStdImage() {
-    const url = await resolveBgUrl(state.current.background);
-    bgDataUrl = url;
-    stdImage = url ? await loadImageData(url) : null;
-    thumbDataUrl = '';
-    if (!stdImage && url && state.current.background && !state.current.background.startsWith(WALLPAPER_PREFIX)) {
-      try {
-        const dataUrl = await storage.readBackground(state.current.background);
-        if (dataUrl) {
-          bgDataUrl = dataUrl;
-          stdImage = await loadImageData(dataUrl);
-        }
-      } catch { /* 取色与 AI 在本轮不可用，材质不受影响 */ }
+  // 小窗是另一个 webview，documentElement 上的 CSS 变量不跨窗口继承，得把令牌广播过去
+  // 它才跟着改。背景图剥掉：小窗不做 backdrop，data URL 底图有几 MB，没必要在事件里搬。
+  // 节流是因为拖滑块 / 拖取色器每帧都会走一次应用。
+  let broadcastTimer = 0;
+  function broadcastTokens(tokens) {
+    if (!window.__TAURI__) return;
+    clearTimeout(broadcastTimer);
+    broadcastTimer = setTimeout(() => {
+      window.__TAURI__.event.emit('theme-changed', { tokens, background: '' }).catch(() => {});
+    }, 120);
+  }
+
+  // ---------- 皮肤卡 ----------
+
+  function renderSkinCards() {
+    els.skinCards.forEach((card) => {
+      const on = state.skin === card.dataset.skin;
+      card.classList.toggle('is-on', on);
+      card.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    els.imageSkinBlock.hidden = state.skin !== 'image';
+  }
+
+  async function selectSkin(id) {
+    state.skin = id;
+    state.active = id;
+    renderSkinCards();
+    if (id === 'image') await ensureImageDraft(); // 有图无草稿（旧配置迁移）→ 自动补取色
+    await applyCurrent();
+    fillSwatches(currentTokens());
+    renderThemeList();
+    persist();
+  }
+
+  // image 皮肤有背景但没有取色草稿 → 拿背景图自动跑一次本地取色。
+  async function ensureImageDraft() {
+    if (state.skin !== 'image' || state.imageDraft) return;
+    if (!state.backgroundImage) return;
+    let bg = state.backgroundImage;
+    if (!bg.startsWith('data:')) {
+      try { bg = await storage.readBackground(bg); } catch { return; }
+    }
+    const img = await loadImageData(bg);
+    if (!img) return;
+    bgDataUrl = bg;
+    stdImage = img;
+    state.imageDraft = { tokens: T.tokensFromImage(img), source: 'standard' };
+  }
+
+  // ---------- 背景图（image 皮肤） ----------
+
+  async function loadImageData(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 512; // 缩到 ≤512px 保证取色速度
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(ctx.getImageData(0, 0, w, h));
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
+  function updateBgThumb() {
+    if (bgDataUrl) {
+      els.bgThumb.hidden = false;
+      els.bgThumb.style.backgroundImage = `url("${bgDataUrl}")`;
+    } else {
+      els.bgThumb.hidden = true;
+      els.bgThumb.style.backgroundImage = '';
     }
   }
 
-  // ---------- 应用当前主题（唯一出口） ----------
-
-  function syncTuningLabels() {
-    els.opValue.textContent = parseFloat(els.stdOpacity.value).toFixed(2);
-    els.scrimValue.textContent = parseFloat(els.stdScrim.value).toFixed(2);
-    // 不透明度和压暗是比例，模糊半径是长度，得带单位才知道量级
-    els.blurValue.textContent = `${els.stdBlur.value} px`;
+  async function runImageColor() {
+    const tokens = stdImage ? T.tokensFromImage(stdImage) : null;
+    if (!tokens) return;
+    state.imageDraft = { tokens, source: 'standard' };
+    await applyCurrent();
+    fillSwatches(tokens);
   }
 
-  // 校验把多少个颜色动了手（用户可见的质量信号，见检查栏「对比度」）
-  function countCorrected(before, after) {
-    let n = 0;
-    for (const k of CONTRAST_KEYS) {
-      if (String(before[k] || '').toLowerCase() !== String(after[k] || '').toLowerCase()) n++;
+  // ---------- AI 取色 ----------
+
+  function syncAiGate() {
+    // 未勾选授权 / 无背景图时「生成并应用」是 disabled 态，不是点了报错
+    els.aiGenerate.disabled = !els.aiConsent.checked || !bgDataUrl;
+  }
+
+  async function runAi() {
+    els.aiStatus.textContent = 'AI 生成中…';
+    els.aiStatus.className = 'note';
+    try {
+      const res = await T.aiGenerate({
+        endpoint: els.aiEndpoint.value.trim(),
+        apiKey: els.aiApiKey.value.trim(),
+        model: els.aiModel.value.trim(),
+      }, bgDataUrl);
+      const tokens = T.validateSkin(T.convertLegacyTokens(res.tokens));
+      state.imageDraft = { tokens, source: 'ai' };
+      // AI 给的面板不透明度 / 模糊半径同步回滑块，所见即所存
+      state.panelOpacity = T.clamp(res.panelOpacity, 0.82, 1);
+      state.bgBlur = Math.round(T.clamp(res.blur, 0, 40));
+      syncTuningLabels();
+      els.opacity.value = state.panelOpacity;
+      els.blur.value = state.bgBlur;
+      await applyCurrent();
+      fillSwatches(tokens);
+      els.aiStatus.textContent = '已应用，可在下方编辑并另存为自己的皮肤';
+      els.aiStatus.className = 'note is-ok';
+    } catch (err) {
+      els.aiStatus.textContent = `AI 失败（${err.message}），已回退本地取色`;
+      els.aiStatus.className = 'note is-error';
+      await runImageColor();
     }
-    return n;
   }
+
+  // ---------- 自定义编辑器 ----------
 
   function fillSwatches(tokens) {
     for (const id of SWATCH_IDS) {
@@ -149,381 +237,146 @@
     }
   }
 
-  function activeThemeName() {
-    const th = state.themes[state.active];
-    if (!th) return '';
-    const saved = JSON.stringify([th.tokens, th.panelOpacity, th.blur, th.scrim, th.background]);
-    const cur = JSON.stringify([state.current.tokens, state.current.panelOpacity, state.current.blur, state.current.scrim, state.current.background]);
-    return saved === cur ? state.active : '';
+  function ensureCustomDraft() {
+    if (!state.custom) state.custom = { tokens: cloneTokens(currentTokens()) };
+    return state.custom.tokens;
   }
 
-  // 小窗是另一个 webview，CSS 变量不跨窗口继承，把令牌广播过去（背景剥掉，data URL 太大；
-  // 拖滑杆会每帧触发，节流 120ms）。
-  let broadcastTimer = 0;
-  function broadcast(cur) {
-    if (!window.__TAURI__) return;
-    clearTimeout(broadcastTimer);
-    broadcastTimer = setTimeout(() => {
-      window.__TAURI__.event.emit('theme-changed', {
-        source: cur.source, tokens: cur.tokens,
-        panelOpacity: cur.panelOpacity, blur: cur.blur, scrim: cur.scrim,
-      }).catch(() => {});
-    }, 120);
+  // 草稿改动当场生效（预览态）；state.skin 不动，切走皮肤卡时草稿留在 state.custom 不丢
+  async function applyDraft() {
+    const tokens = draftTokens();
+    T.applyTokens(tokens);
+    T.applyBackdrop({ background: '', panelOpacity: 1, bgBlur: 0, scrim: 0 });
+    broadcastTokens(tokens);
   }
 
-  function syncStageHint() {
-    els.stageHint.hidden = !!state.current.background || !!state.bgHintDismissed;
-  }
+  // ---------- 已另存的皮肤列表 ----------
 
-  async function applyCurrent() {
-    const cur = state.current;
-    const tokens = T.validateTokens(cur.tokens);
-    const corrected = countCorrected(cur.tokens, tokens);
-    cur.tokens = tokens; // 校正结果写回事实源，保存主题时带出去的就是校正后的值
-
-    const bg = await resolveBgUrl(cur.background);
-    bgDataUrl = bg;
-    T.applyTheme({ source: cur.source, tokens, background: bg, panelOpacity: cur.panelOpacity, blur: cur.blur, scrim: cur.scrim });
-    broadcast(cur);
-    fillSwatches(tokens);
-
-    // 检查栏「当前主题」卡
-    const name = activeThemeName();
-    els.curThemeName.textContent = name || '未保存的定制';
-    els.curThemeMeta.textContent =
-      `${SOURCE_LABEL[cur.source] || '定制'} · 岛屿 ${Number(cur.panelOpacity).toFixed(2)} · 模糊 ${Math.round(cur.blur)}px · 压暗 ${Number(cur.scrim).toFixed(2)}`;
-    els.curThemeChip.style.background = `linear-gradient(135deg, ${tokens.down} 50%, ${tokens.up} 50%)`;
-    els.contrastBadge.textContent = corrected ? `${corrected} 项已校正` : '✓ 全部达标';
-    els.contrastBadge.className = 'sec-aside ' + (corrected ? 'is-warn' : 'is-ok');
-
-    // 材质滑杆只在有背景图时有意义（无背景时岛屿不透明、没有 scrim 可言）
-    const hasBg = !!cur.background;
-    for (const s of [els.stdOpacity, els.stdScrim, els.stdBlur]) s.disabled = !hasBg;
-    els.materialNote.hidden = hasBg;
-    els.followSystemWrap.hidden = hasBg;
-
-    // 壁纸条选中态与状态行。内置壁纸把 data-wall 映射到缩略图 title（熔金暮色…），
-    // 状态行直接借来当名字，用户才知道当前背景是哪一张。
-    for (const b of els.wallThumbs) b.classList.toggle('is-active', b.dataset.wall === cur.background);
-    const builtinName = els.wallThumbs.find((b) => b.dataset.wall === cur.background)?.title;
-    els.bgStatus.textContent = hasBg
-      ? (cur.background.startsWith(WALLPAPER_PREFIX)
-          ? `当前：${builtinName || '内置壁纸'}（内置）`
-          : '当前：自定义图片')
-      : '未设置背景（使用面板底色）';
-    els.bgStatus.className = 'note truncate';
-
-    syncAiGate();
-    syncStageHint();
-  }
-
-  // ---------- 生成方式 1：从背景取色（换壁纸自动触发） ----------
-
-  function systemPrefersDark() {
-    return !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
-  }
-
-  // 无背景时的兜底令牌：跟随系统开关决定深 / 浅
-  function fallbackPreset() {
-    const dark = !state.followSystem || systemPrefersDark();
-    return T.tokensFromPreset(dark ? 'dark' : 'light');
-  }
-
-  async function regenerateFromImage() {
-    const base = stdImage ? T.tokensFromImage(stdImage) : fallbackPreset();
-    state.current.tokens = T.validateTokens(base.tokens);
-    state.current.source = 'standard';
-    await applyCurrent();
-  }
-
-  async function setWallpaper(value) {
-    state.current.background = value;
-    await loadStdImage();
-    await regenerateFromImage();
-    persist();
-  }
-
-  // ---------- 生成方式 2：AI 自适应 ----------
-
-  function aiThumbDataUrl() {
-    if (!stdImage) return '';
-    if (!thumbDataUrl) {
-      const canvas = document.createElement('canvas');
-      canvas.width = stdImage.width;
-      canvas.height = stdImage.height;
-      canvas.getContext('2d').putImageData(stdImage, 0, 0);
-      thumbDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-    }
-    return thumbDataUrl;
-  }
-
-  function syncAiGate() {
-    // 未勾选授权或没有背景图时「生成并应用」是 disabled 态，不是点了报错
-    els.aiGenerate.disabled = !els.aiConsent.checked || !stdImage;
-  }
-
-  async function runAi() {
-    els.aiStatus.textContent = 'AI 生成中…';
-    els.aiStatus.className = 'note';
-    // 同图复用：像素哈希命中缓存就直接应用，不发请求
-    const hash = T.hashImageData(stdImage);
-    const cached = state.ai.cache[hash];
-    if (cached) {
-      await applyAiResult(cached);
-      state.ai.lastImageHash = hash;
-      els.aiStatus.textContent = '同一张图已生成过，直接复用上次结果';
-      els.aiStatus.className = 'note is-ok';
-      return;
-    }
-    try {
-      const res = await T.aiGenerate({
-        endpoint: els.aiEndpoint.value.trim(),
-        apiKey: els.aiApiKey.value.trim(),
-        model: els.aiModel.value.trim(),
-      }, aiThumbDataUrl());
-      await applyAiResult(res);
-      // 缓存应用后的结果；上限 5 份，超出淘汰最早的
-      state.ai.lastImageHash = hash;
-      state.ai.cache[hash] = {
-        tokens: { ...state.current.tokens },
-        panelOpacity: state.current.panelOpacity,
-        blur: state.current.blur,
-      };
-      const keys = Object.keys(state.ai.cache);
-      while (keys.length > 5) delete state.ai.cache[keys.shift()];
-      els.aiStatus.textContent = '已应用，可在右侧命名保存到主题列表';
-      els.aiStatus.className = 'note is-ok';
-    } catch (err) {
-      els.aiStatus.textContent = `AI 失败（${err.message}），已回退离线取色`;
-      els.aiStatus.className = 'note is-error';
-      await regenerateFromImage();
-    }
-  }
-
-  async function applyAiResult(res) {
-    state.current.tokens = T.validateTokens(res.tokens);
-    state.current.source = 'ai';
-    state.current.panelOpacity = T.clamp(res.panelOpacity, 0.82, 1);
-    state.current.blur = T.clamp(res.blur, 0, 40);
-    els.stdOpacity.value = state.current.panelOpacity;
-    els.stdBlur.value = Math.round(state.current.blur);
-    syncTuningLabels();
-    await applyCurrent();
-  }
-
-  // ---------- 高级微调（语义色） ----------
-
-  function syncAdvanced() {
-    els.advToggle.checked = !!state.advanced;
-    for (const id of SWATCH_IDS) {
-      const locked = id === 'cDown' || id === 'cUp';
-      els[id].disabled = !state.advanced || locked;
-      els[id].closest('.swatch').style.opacity = !state.advanced ? '0.4' : (locked ? '0.6' : '');
-    }
-  }
-
-  // ---------- 主题列表 ----------
-
-  const TAGS = { ai: 'AI', standard: '取色', custom: '定制' };
+  const { icon } = window.NetPeekCommon;
+  const escapeHtml = window.NetPeekCommon.escapeHtml;
 
   function renderThemeList() {
     const frag = document.createDocumentFragment();
     for (const name of Object.keys(state.themes || {})) {
-      const th = state.themes[name];
       const item = document.createElement('div');
-      item.className = 'theme-item' + (state.active === name ? ' is-active' : '');
+      item.className = 'theme-item' + (state.skin === name ? ' is-active' : '');
       item.innerHTML = `
         <span class="name">${escapeHtml(name)}</span>
-        <span class="tag">${TAGS[th.source] || '定制'}</span>
+        <span class="tag">自定义</span>
         <span class="row-actions">
-          <button type="button" class="icon-btn" data-act="use" title="应用">✓</button>
-          <button type="button" class="icon-btn" data-act="rename" title="重命名">✎</button>
-          <button type="button" class="icon-btn" data-act="delete" title="删除">🗑</button>
+          <button type="button" class="icon-btn" data-act="use" title="应用" aria-label="应用皮肤">${icon('check')}</button>
+          <button type="button" class="icon-btn" data-act="rename" title="重命名" aria-label="重命名皮肤">${icon('pencil')}</button>
+          <button type="button" class="icon-btn" data-act="delete" title="删除" aria-label="删除皮肤">${icon('trash')}</button>
         </span>`;
-      item.querySelector('[data-act="use"]').addEventListener('click', () => useTheme(name));
-      item.querySelector('[data-act="rename"]').addEventListener('click', () => renameTheme(name, item.querySelector('.name')));
-      item.querySelector('[data-act="delete"]').addEventListener('click', () => deleteTheme(name));
+      item.querySelector('[data-act="use"]').addEventListener('click', () => selectSkin(name));
+      item.querySelector('[data-act="rename"]').addEventListener('click', () => renameSkin(name));
+      item.querySelector('[data-act="delete"]').addEventListener('click', () => deleteSkin(name));
       frag.appendChild(item);
     }
     els.themeList.replaceChildren(frag);
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  async function useTheme(name) {
-    const th = state.themes[name];
-    if (!th) return;
-    state.active = name;
-    state.current = {
-      source: th.source || 'custom',
-      tokens: { ...T.tokensFromPreset('dark').tokens, ...(th.tokens || {}) },
-      background: th.background || '',
-      panelOpacity: T.clamp(th.panelOpacity ?? 0.88, 0.82, 1),
-      blur: T.clamp(th.blur ?? 24, 0, 40),
-      scrim: T.clamp(th.scrim ?? 0.30, 0.2, 0.6),
-    };
-    els.stdOpacity.value = state.current.panelOpacity;
-    els.stdBlur.value = Math.round(state.current.blur);
-    els.stdScrim.value = state.current.scrim;
-    syncTuningLabels();
-    await loadStdImage();
-    await applyCurrent();
-    renderThemeList();
-    persist();
-  }
-
-  // 内联重命名：点 ✎ 后名字原位变输入框，Enter/失焦提交，Esc 取消。
-  // 不用 window.prompt —— Tauri 的 webview 对原生脚本对话框支持不可靠。
-  function renameTheme(name, nameEl) {
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = name;
-    input.className = 'rename-input';
-    input.setAttribute('aria-label', '重命名主题');
-    nameEl.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const commit = (save) => {
-      if (done) return;
-      done = true;
-      const next = input.value.trim();
-      if (save && next && next !== name) {
-        state.themes[next] = { ...state.themes[name], name: next };
-        if (state.active === name) state.active = next;
-        delete state.themes[name];
-        persist();
-      }
-      renderThemeList();
-    };
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') commit(true);
-      else if (e.key === 'Escape') commit(false);
-    });
-    input.addEventListener('blur', () => commit(true));
-  }
-
-  function deleteTheme(name) {
-    if (name === 'default') {
-      els.bgStatus.textContent = '默认主题不能删除';
-      els.bgStatus.className = 'note is-warn';
-      return;
-    }
+  function renameSkin(name) {
+    const next = prompt('新名称：', name);
+    const trimmed = (next || '').trim();
+    if (!trimmed || trimmed === name) return;
+    state.themes[trimmed] = { ...state.themes[name], name: trimmed };
+    if (state.skin === name) { state.skin = trimmed; state.active = trimmed; }
     delete state.themes[name];
-    if (state.active === name) {
-      // 删的是当前主题：立刻回落到 default 并应用，不能让界面停在被删配色上
-      state.active = 'default';
-      useTheme('default');
-    }
     renderThemeList();
+    renderSkinCards();
     persist();
   }
 
-  // ---------- 持久化（节流 300ms） ----------
+  function deleteSkin(name) {
+    delete state.themes[name];
+    if (state.skin === name) selectSkin('plain');
+    else { renderThemeList(); persist(); }
+  }
 
-  function persist() {
-    if (!storage) return Promise.resolve();
-    clearTimeout(persist._t);
-    return new Promise((resolve) => {
-      persist._t = setTimeout(() => { storage.save(state).then(resolve, resolve); }, 300);
-    });
+  // ---------- 滑块 ----------
+
+  function syncTuningLabels() {
+    els.opValue.textContent = parseFloat(els.opacity.value).toFixed(2);
+    els.scrimValue.textContent = parseFloat(els.scrim.value).toFixed(2);
+    // 不透明度和压暗是比例，模糊半径是长度，得带单位才知道量级
+    els.blurValue.textContent = `${els.blur.value} px`;
+  }
+
+  function pullSliders() {
+    state.panelOpacity = T.clamp(els.opacity.value, 0.82, 1);
+    state.bgBlur = Math.round(T.clamp(els.blur.value, 0, 40));
+    state.scrim = T.clamp(els.scrim.value, 0.2, 0.6);
+  }
+
+  function pushSliders() {
+    els.opacity.value = T.clamp(state.panelOpacity ?? 0.92, 0.82, 1);
+    els.blur.value = Math.round(T.clamp(state.bgBlur ?? 0, 0, 40));
+    els.scrim.value = T.clamp(state.scrim ?? 0.30, 0.2, 0.6);
+    syncTuningLabels();
+  }
+
+  // ---------- 持久化 ----------
+
+  async function persist() {
+    if (!storage) return;
+    try { await storage.save(state); } catch { /* 持久化失败不阻塞预览 */ }
   }
 
   // ---------- 事件绑定 ----------
 
+  els.skinCards.forEach((card) => {
+    card.addEventListener('click', () => selectSkin(card.dataset.skin));
+  });
+
   els.bgPick.addEventListener('click', () => els.bgFile.click());
-
-  for (const b of els.wallThumbs) {
-    b.addEventListener('click', () => setWallpaper(b.dataset.wall));
-  }
-
-  function readFileAsDataURL(file) {
-    return new Promise((res) => {
+  els.bgFile.addEventListener('change', async () => {
+    const file = els.bgFile.files[0];
+    if (!file) return;
+    const dataUrl = await new Promise((res) => {
       const fr = new FileReader();
       fr.onload = () => res(fr.result);
       fr.readAsDataURL(file);
     });
-  }
-
-  els.bgFile.addEventListener('change', async () => {
-    const file = els.bgFile.files[0];
-    if (!file) return;
     try {
-      const dataUrl = await readFileAsDataURL(file);
-      // 落盘到应用数据目录（SHA-256 前缀命名去重），主题里只存路径
-      const path = await storage.saveBackground(dataUrl);
-      await setWallpaper(path);
+      // 落盘到应用数据目录，避免配置 JSON 无限膨胀
+      state.backgroundImage = await storage.saveBackground(dataUrl);
+      bgDataUrl = dataUrl;
+      stdImage = await loadImageData(dataUrl);
+      updateBgThumb();
+      els.bgStatus.textContent = `已选择 ${file.name}`;
+      els.bgStatus.className = 'note truncate';
+      syncAiGate();
+      await runImageColor();
+      persist();
     } catch (err) {
       els.bgStatus.textContent = `背景加载失败：${err.message}`;
       els.bgStatus.className = 'note is-error';
     }
   });
 
-  els.bgClear.addEventListener('click', () => {
-    // 用户明确选择「无背景」就是做了决定：关掉留白区的邀请提示，不再反复问
-    state.bgHintDismissed = true;
-    return setWallpaper('');
+  els.bgClear.addEventListener('click', async () => {
+    state.backgroundImage = '';
+    state.imageDraft = null;
+    bgDataUrl = '';
+    stdImage = null;
+    updateBgThumb();
+    els.bgStatus.textContent = '未设置背景（使用面板底色）';
+    els.bgStatus.className = 'note truncate';
+    syncAiGate();
+    await applyCurrent();
+    fillSwatches(currentTokens());
+    persist();
   });
 
-  // 高级区展开 = 编辑态切换：隐藏壁纸/材质双列，编辑器独占整岛。
-  // details 展开内容 ~330px，数据岛净高只有 ~320px，原地展开会把双列顶出可视区。
-  const advPanel = document.querySelector('details.adv');
-  advPanel.addEventListener('toggle', () => {
-    advPanel.parentElement.classList.toggle('is-adv-open', advPanel.open);
-    if (!advPanel.open) advPanel.parentElement.scrollTop = 0;
-  });
-
-  for (const input of [els.stdOpacity, els.stdScrim, els.stdBlur]) {
+  for (const input of [els.opacity, els.scrim, els.blur]) {
     input.addEventListener('input', () => {
       syncTuningLabels();
-      // 滑杆只动材质，令牌不重生成——任何来源（取色/AI/手调）的配色都不会被冲掉
-      state.current.panelOpacity = parseFloat(els.stdOpacity.value);
-      state.current.blur = parseInt(els.stdBlur.value, 10);
-      state.current.scrim = parseFloat(els.stdScrim.value);
-      applyCurrent();
+      pullSliders();
+      applyBackdropOnly();
       persist();
     });
   }
-
-  els.followSystem.addEventListener('change', () => {
-    state.followSystem = els.followSystem.checked;
-    if (!state.current.background) regenerateFromImage();
-    persist();
-  });
-
-  if (window.matchMedia) {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    (mq.addEventListener || mq.addListener).call(mq, 'change', () => {
-      if (!state.current.background && state.followSystem) regenerateFromImage();
-    });
-  }
-
-  els.advToggle.addEventListener('change', () => {
-    state.advanced = els.advToggle.checked;
-    syncAdvanced();
-    persist();
-  });
-
-  SWATCH_IDS.forEach((id) => {
-    els[id].addEventListener('input', () => {
-      state.current.tokens[SWATCH_TO_TOKEN[id]] = els[id].value;
-      state.current.source = 'custom'; // 手调过就是定制，纯记录标签
-      applyCurrent();
-      persist();
-    });
-  });
-
-  els.presets.forEach((b) => {
-    b.addEventListener('click', () => {
-      state.current.tokens = { ...T.tokensFromPreset(b.dataset.preset).tokens };
-      state.current.source = 'custom';
-      applyCurrent();
-      persist();
-    });
-  });
 
   els.aiConsent.addEventListener('change', () => {
     state.ai.consented = els.aiConsent.checked;
@@ -540,56 +393,52 @@
     runAi().then(persist);
   });
 
-  els.themeSave.addEventListener('click', () => {
+  // 预设按钮：把内置皮肤整套倒进编辑器草稿，再逐键微调
+  els.presets.forEach((b) => {
+    b.addEventListener('click', () => {
+      const preset = T.SKINS[b.dataset.preset];
+      if (!preset) return;
+      state.custom = { tokens: cloneTokens(preset.tokens) };
+      fillSwatches(state.custom.tokens);
+      applyDraft();
+      persist();
+    });
+  });
+
+  SWATCH_IDS.forEach((id) => {
+    const locked = id === 'cDown' || id === 'cUp'; // 语义锁定：下载永远暖橙、上传永远钢蓝
+    els[id].disabled = locked;
+    els[id].addEventListener('input', () => {
+      const tokens = ensureCustomDraft();
+      tokens[SWATCH_TO_TOKEN[id]] = els[id].value;
+      applyDraft();
+      persist();
+    });
+  });
+
+  els.themeSave.addEventListener('click', async () => {
     const name = els.themeName.value.trim();
     if (!name) {
-      els.bgStatus.textContent = '请先给主题起个名字';
+      els.bgStatus.textContent = '请先给皮肤起个名字';
       els.bgStatus.className = 'note is-warn';
       return;
     }
-    state.themes[name] = {
-      name,
-      source: state.current.source,
-      tokens: { ...state.current.tokens },
-      background: state.current.background,
-      panelOpacity: state.current.panelOpacity,
-      blur: state.current.blur,
-      scrim: state.current.scrim,
-    };
-    state.active = name;
+    // 落库前校验一遍对比度；预览保持用户原值，应用另存皮肤时所见即所存
+    const tokens = T.validateSkin(cloneTokens(draftTokens()));
+    state.themes[name] = { name, tokens };
     els.themeName.value = '';
-    renderThemeList();
-    persist();
+    await selectSkin(name);
   });
 
   els.themeReset.addEventListener('click', async () => {
-    const def = T.tokensFromPreset('dark');
-    state.current = {
-      source: 'standard', tokens: { ...def.tokens }, background: '',
-      panelOpacity: 0.88, blur: 24, scrim: 0.30,
-    };
-    state.active = 'default';
-    state.themes = { default: { ...def, name: '默认深色', source: 'custom' } };
-    state.advanced = false;
-    stdImage = null;
-    thumbDataUrl = '';
-    bgDataUrl = '';
-    els.stdOpacity.value = 0.88;
-    els.stdBlur.value = 24;
-    els.stdScrim.value = 0.30;
-    syncAdvanced();
-    syncTuningLabels();
-    await applyCurrent();
-    renderThemeList();
-    await persist();
+    // 回到出厂皮肤；已另存的皮肤与背景图配置保留
+    state.custom = null;
+    await selectSkin('plain');
   });
 
   // ---------- 启动 ----------
 
   window.NetPeekThemeUI = {
-    // 留白区提示的「挑一张」直接借这条路径（跳到外观屏后由 main.js 调用）
-    pickBackground() { els.bgFile.click(); },
-
     async init() {
       const boot = await T.initTheme();
       state = boot.state;
@@ -599,24 +448,14 @@
       els.aiApiKey.value = state.ai.provider.apiKey || '';
       els.aiModel.value = state.ai.provider.model || '';
       els.aiConsent.checked = !!state.ai.consented;
-      els.stdOpacity.value = T.clamp(state.current.panelOpacity ?? 0.88, 0.82, 1);
-      els.stdBlur.value = Math.round(T.clamp(state.current.blur ?? 24, 0, 40));
-      els.stdScrim.value = T.clamp(state.current.scrim ?? 0.30, 0.2, 0.6);
-      els.followSystem.checked = !!state.followSystem;
-      syncTuningLabels();
-      syncAdvanced();
+      pushSliders();
 
-      if (boot.fresh) {
-        // 首启默认启用一张内置壁纸：浮岛构图首屏即完整，留白区不再是死黑
-        state.current.background = 'builtin:wall-1';
-        await loadStdImage();
-        await regenerateFromImage();
-        await persist();
-      } else {
-        await loadStdImage();
-        await applyCurrent();
-      }
+      if (state.skin === 'image') await ensureImageDraft();
+      await applyCurrent();
+      fillSwatches(currentTokens());
+      renderSkinCards();
       renderThemeList();
+      updateBgThumb();
       syncAiGate();
     },
   };

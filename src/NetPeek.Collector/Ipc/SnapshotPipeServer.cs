@@ -49,27 +49,12 @@ public sealed class SnapshotPipeServer
             // 复用同一块缓冲，避免每帧 SerializeToUtf8Bytes 新分配 byte[]（GC 压力）。
             var jsonBuffer = new ArrayBufferWriter<byte>(64 * 1024);
 
-            // 图标 base64 是静态数据（同一 IconId 永不变），每帧重发会让帧体积涨一个数量级。
-            // 这里按连接记录已发送过的 IconId，后续帧只留 IconId，UI 侧按 id 缓存复用。
-            // 作用域是单个连接：UI 重连后重新发一遍，无需额外协议协商。
-            var sentIcons = new HashSet<string>(StringComparer.Ordinal);
-
+            // 图标不在这一层去重：数据源已按路径做过增量（见 EtwSnapshotSource 的
+            // _iconPathsSent），首帧带全量、之后只带新出现的路径，帧里根本不会有重复的
+            // base64。连接级重置由 CollectorService.ResetIconStream 负责。
             while (!ct.IsCancellationRequested && server.IsConnected)
             {
                 var snapshot = produceSnapshot();
-
-                foreach (var process in snapshot.Processes)
-                {
-                    if (process.IconBase64.Length == 0)
-                    {
-                        continue;
-                    }
-
-                    if (!sentIcons.Add(process.IconId))
-                    {
-                        process.IconBase64 = "";
-                    }
-                }
 
                 jsonBuffer.Clear();
                 using (var jsonWriter = new Utf8JsonWriter(jsonBuffer))

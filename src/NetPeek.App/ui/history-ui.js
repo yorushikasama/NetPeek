@@ -1,35 +1,34 @@
-// 历史屏（§2.6，功能清单屏 3）。
+// 历史屏（§2.6，功能清单屏 3）。这一屏不放折线图：历史要回答的是「哪天用得多」，
+// 柱状图直接可比、可点；折线只是把同一份日聚合数据画得更含糊。
 //
-// 图表层用 vendored ECharts（ui/vendor/echarts.min.js，Apache-2.0，离线不走了 CDN）：
-// - 下载/上传拆两个 grid、各自量程 —— 30 天里上传只有下载的 ~15%，
-//   同量程下上传柱只剩贴地条，等于没画；
-// - 悬浮浮层、时间轴、空态文案都交给组件，不再手绘；
-// - 实时屏的 1Hz 折线仍是手绘 canvas（性能纪律 §4.2），这一屏是回看场景，交互与美观优先。
-//
-// 时间区间：预设（近 7/30/90 天）与自定义起止（「自定义」弹层，支持到小时）。
-// 数据都走 history_range 命令：≤48h 按小时聚合、>90d 按周聚合、其余按本地日聚合，
-// Rust 侧 GROUP BY 出桶，前端只做补零骨架（「哪天没用网」不被压缩掉）与展示。
-// 检查栏「30 天下载」（实时屏）仍走 history_daily 的 dailyFor，与本屏解耦。
+// 数据来自后端：预设档走 history_daily(days)，「自定义…」档走 history_range(start, end)，
+// 两者都返回按「本地日期 × 应用」聚合的行（自定义档过去只能靠天数近似，取回的数据
+// 和所选窗口零重叠，柱图整片是空的 —— 所以后端加了真正的起止边界）。
+// 不拉分钟级原始行 —— 30 天 × 1440 分钟 × N 进程的 JSON 前端解析不动，
+// 日聚合在 SQL 里做完再过线。同一份数据同时喂三处：日柱状图、区间合计、应用排行。
+// 检查栏的「30 天下载」窗口够用时复用，否则自己查一次 —— 它要的永远是最近 30 天，
+// 和这一屏当前的档位不是一回事，见 dailyFor。
 
 (function () {
   const $ = (id) => document.getElementById(id);
+  const C = window.NetPeekCharts;
   const TOP_N = 8;
-  const HOUR = 3600;
-  const DAY = 86400;
-  const WEEK = 7 * DAY;
-  const CUSTOM_MAX_DAYS = 365;
+  const WEEK_AGG_THRESHOLD = 60; // 超过这个天数按周聚合：90 根 3px 宽的柱读不出也点不中
+  // 自定义区间的长度上限。日期框里能敲出 1900 年，而 buildBuckets 会给区间里
+  // 每一天都排一根柱 —— 没有上限的话，一次误输入就能让画布去画几万根柱。
+  const MAX_RANGE_DAYS = 3660; // ≈10 年，按周聚合后约 523 组，画得动也读得出
 
   const els = {
     range: $('histRange'),
-    customBtn: $('histCustom'),
-    customPop: $('histCustomPop'),
-    customFrom: $('histFrom'),
-    customTo: $('histTo'),
-    customApply: $('histApply'),
-    customClose: $('histCustomClose'),
-    customErr: $('histCustomErr'),
+    aggNote: $('histAggNote'),
     exportBtn: $('histExport'),
-    chart: $('histChart'),
+    canvas: $('histChart'),
+    customToggle: $('histCustomToggle'),
+    customForm: $('histCustomRange'),
+    startDate: $('histStartDate'),
+    endDate: $('histEndDate'),
+    customCancel: $('histCustomCancel'),
+    rangeError: $('histRangeError'),
     rangeTitle: $('histRangeTitle'),
     rangeSub: $('histRangeSub'),
     sumDown: $('histSumDown'),
@@ -37,25 +36,32 @@
     sumAll: $('histSumAll'),
     rankTitle: $('histRankTitle'),
     rank: $('histRank'),
-    aggNote: $('histAggNote'),
   };
 
-  let chart = null;         // echarts 实例（惰性初始化）
-  let mode = 'preset';      // 'preset' | 'custom'
   let days = 30;
-  let custom = null;        // { start, end, bucket, anchor }
-  let buckets = [];         // { key, start, end, label, down, up }
-  let rowsKeyed = [];       // [{ key, name, down, up }]（Rust 侧已按桶聚合）
-  let selected = -1;        // 选中的桶索引，-1 = 看整个区间
+  let customRange = null; // { start, end }；生效时 rows 由 history_range 查回，不再是「最近 N 天」
+  let rows = [];          // [{ day, name, down, up }]
+  let windowDays = 0;     // rows 覆盖的「最近 N 天」天数；自定义区间时为 0
+  let inspectorRows = null; // 检查栏 30 天曲线的独立缓存，理由见 dailyFor
+  let inspectorSpan = 0;
+  let buckets = [];       // 图上每一组：{ key, label, down, up, days: [dayStr] }
+  let selected = -1;      // 选中的柱索引，-1 = 看整个区间
+  let hit = null;         // charts.bars 返回的命中测试
   let loaded = false;
+  let loading = false;    // loadRows 进行中，柱图降透明 + 排行空态显示读取中
+  let firstDay = null;    // 历史库最早有数据的本地日期（YYYY-MM-DD），打开浮层时从 history_stats 取
 
-  // 图标从最近一帧快照借：历史库只存名字，不存图标。
+  // 图标从最近一帧快照借：历史库只存名字，不存图标。解析走主界面那份
+  // iconOf —— 图标已改按路径缓存（IconUpdates 增量），进程数据里不再带图标本体。
   function iconFor(name) {
     const snap = window.NetPeekLive && window.NetPeekLive.lastSnapshot();
     if (!snap) return '';
     const key = String(name).toLowerCase();
     for (const p of snap.Processes || []) {
-      if ((p.Name || '').toLowerCase() === key && p.IconBase64) return p.IconBase64;
+      if ((p.Name || '').toLowerCase() === key) {
+        const icon = window.NetPeekLive.iconOf(p);
+        if (icon) return icon;
+      }
     }
     return '';
   }
@@ -64,6 +70,8 @@
     return window.NetPeekLive ? window.NetPeekLive.fmtBytes(bytes) : `${bytes} B`;
   }
 
+  // 未归因流量的名字以半角括号开头，切首字符会在徽标里画一个孤零零的括号，
+  // 读成渲染出错而不是占位 —— 首字母一律走 main.js 那份实现，两屏保持一致。
   function initial(name) {
     return window.NetPeekLive ? window.NetPeekLive.initialOf(name, 1) : '·';
   }
@@ -72,268 +80,139 @@
     return window.NetPeekLive ? window.NetPeekLive.UNATTR : '(系统/未归因)';
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function nowSecs() {
-    return Math.floor(Date.now() / 1000);
-  }
-
-  function localMidnight(ts) {
-    const d = new Date(ts * 1000);
-    d.setHours(0, 0, 0, 0);
-    return Math.floor(d.getTime() / 1000);
-  }
-
-  // 周桶锚点：ts 所在周的「本地周一零点」。Rust 侧以它为锚做整周对齐，
-  // 否则 UTC 周（1970 周四对齐）在 UTC+8 下每周从周四 08:00 开始，标签对不上。
-  function localMonday(ts) {
-    const d = new Date(ts * 1000);
-    const back = (d.getDay() + 6) % 7; // 周一 = 0
-    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back, 0, 0, 0, 0);
-    return Math.floor(monday.getTime() / 1000);
-  }
-
-  function pad2(n) {
-    return String(n).padStart(2, '0');
-  }
-
-  function dayLabelOf(ts) {
-    const d = new Date(ts * 1000);
-    return `${d.getMonth() + 1}月${d.getDate()}日`;
-  }
-
-  function hourLabelOf(ts) {
-    const d = new Date(ts * 1000);
-    return `${d.getMonth() + 1}月${d.getDate()}日 ${pad2(d.getHours())}时`;
-  }
-
-  function weekdayOf(ts) {
-    const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    return names[new Date(ts * 1000).getDay()] || '';
-  }
-
-  function fmtLocal(ts, withTime) {
-    const d = new Date(ts * 1000);
-    const base = `${d.getMonth() + 1}月${d.getDate()}日`;
-    return withTime ? `${base} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` : base;
-  }
-
-  function ymd(ts) {
-    const d = new Date(ts * 1000);
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-  }
-
-  // 当前查询区间。预设按本地零点回溯（含今天），自定义用用户输入。
-  function currentRange() {
-    if (mode === 'custom' && custom) return custom;
-    return {
-      start: localMidnight(nowSecs()) - (days - 1) * DAY,
-      end: nowSecs() + 60,
-      bucket: 0,
-      anchor: 0,
-    };
-  }
-
-  // 补零骨架：没有落库的桶也要占位，「那天没用网」是信息不是空白。
-  function buildBuckets(range) {
+  // 生成从 days 天前到今天的连续本地日期串，缺数据的那天也要占一根空柱，
+  // 否则「哪天没用网」这个信息会被压缩掉。
+  function dayKeys(n) {
     const out = [];
-    if (range.bucket === HOUR) {
-      const first = Math.floor(range.start / HOUR) * HOUR;
-      for (let ts = first; ts < range.end; ts += HOUR) {
-        out.push({ key: ts, start: ts, end: ts + HOUR, label: hourLabelOf(ts) });
-      }
-    } else if (range.bucket === WEEK) {
-      // 周桶从锚点（区间起点所在周的本地周一零点）出发，与 Rust 侧同签
-      const anchor = range.anchor || 0;
-      for (let ts = anchor; ts < range.end; ts += WEEK) {
-        out.push({ key: ts, start: ts, end: ts + WEEK, label: `${dayLabelOf(ts)} 起一周` });
-      }
-    } else {
-      // 本地日桶按 +86400 推进：中国无夏令时，边界稳定；跨夏令时时区是后续项。
-      for (let ts = localMidnight(range.start); ts < range.end; ts += DAY) {
-        out.push({ key: ts, start: ts, end: ts + DAY, label: dayLabelOf(ts) });
-      }
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (n - 1));
+    for (let i = 0; i < n; i++) {
+      out.push(dayKey(d));
+      d.setDate(d.getDate() + 1);
     }
-    for (const b of out) { b.down = 0; b.up = 0; }
     return out;
   }
 
-  async function loadRows() {
-    const range = currentRange();
-    // 聚合粒度提示：小时/周桶时亮出来，日桶不打扰
-    els.aggNote.textContent = range.bucket === HOUR ? '按小时聚合'
-      : (range.bucket === WEEK ? '按周聚合' : '');
-    els.aggNote.hidden = !els.aggNote.textContent;
-    try {
-      const raw = await window.__TAURI__.core.invoke('history_range',
-        { start: range.start, end: range.end, bucket: range.bucket, anchor: range.anchor || 0 });
-      const apiRows = JSON.parse(raw || '[]');
-      buckets = buildBuckets(range);
-      rowsKeyed = apiRows.map((r) => ({ key: r.ts, name: r.name, down: r.down, up: r.up }));
-      const byKey = new Map(buckets.map((b) => [b.key, b]));
-      for (const r of rowsKeyed) {
-        const b = byKey.get(r.key);
-        if (b) { b.down += r.down; b.up += r.up; }
-      }
-    } catch {
-      // 浏览器预览或库不可用：画补零空骨架，不报错弹窗
-      buckets = buildBuckets(range);
-      rowsKeyed = [];
+  // 本地日期串。必须自己拼，不能用 toISOString() —— 后者按 UTC 出串，
+  // UTC+8 的凌晨会被算成前一天，整排柱子错一格。
+  function dayKey(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  // 自定义区间：start..end，含两端。用带时间的字面量构造 ——
+  // 裸的 'YYYY-MM-DD' 会被 Date 当成 UTC 解析，同样会错一格。
+  // 上限判断在提交那侧按天数做，这里再兜一层，保证画布不会被喂进几万根柱。
+  function dayKeysBetween(start, end) {
+    const out = [];
+    const d = new Date(`${start}T00:00:00`);
+    const last = new Date(`${end}T00:00:00`);
+    if (Number.isNaN(d.getTime()) || Number.isNaN(last.getTime())) return out;
+    while (d <= last && out.length < MAX_RANGE_DAYS) {
+      out.push(dayKey(d));
+      d.setDate(d.getDate() + 1);
     }
-    loaded = true;
-    selected = -1;
-    render();
+    return out;
   }
 
-  // ---------- ECharts 图表层 ----------
-
-  function cssVar(name, fallback) {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return v || fallback;
+  // 区间天数（含两端）。直接数两个日期之间的毫秒数，夏令时切换那两天不是
+  // 86400000 的整数倍，取整兜住。
+  function spanDays(start, end) {
+    const a = new Date(`${start}T00:00:00`);
+    const b = new Date(`${end}T00:00:00`);
+    if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+    return Math.round((b - a) / 86_400_000) + 1;
   }
 
-  // y 轴紧凑字节：52~56px 的轴槽放不下「1024.00 MB」这种全长格式
-  function compactBytes(v) {
-    if (!(v > 0)) return '0';
-    const units = [[1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'K']];
-    for (const [scale, tag] of units) {
-      if (v >= scale) {
-        const n = v / scale;
-        return `${n >= 100 ? Math.round(n) : n.toFixed(n >= 10 ? 0 : 1)}${tag}`;
-      }
-    }
-    return `${Math.round(v)}`;
+  function labelOf(dayStr) {
+    const [, m, d] = dayStr.split('-');
+    return `${Number(m)} 月 ${Number(d)} 日`;
   }
 
-  function ensureChart() {
-    if (!chart && window.echarts) {
-      chart = echarts.init(els.chart);
-      chart.on('click', (params) => {
-        if (params.componentType === 'series') selectBucket(params.dataIndex);
-      });
-      // 点空白处取消选中：zr 事件在空白处 target 为空，落在系列上则已被上面的 handler 处理
-      chart.getZr().on('click', () => {
-        if (selected !== -1) { selected = -1; render(); }
-      });
-      window.addEventListener('resize', () => chart && chart.resize());
-    }
-    return chart;
+  function weekdayOf(dayStr) {
+    const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return names[new Date(`${dayStr}T00:00:00`).getDay()] || '';
   }
 
-  function dimOf(i) {
-    return selected >= 0 && i !== selected ? 0.45 : 1;
-  }
-
-  function barStyle(color) {
-    return {
-      color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-        { offset: 0, color },
-        { offset: 1, color: `${color}59` },
-      ]),
-      borderRadius: [3, 3, 0, 0],
-    };
-  }
-
-  function renderChart() {
-    const c = ensureChart();
-    if (!c) return; // ECharts 未加载（极端降级）：检查栏数字仍可用
-    // 实例尺寸与容器不符（init 落在布局完成前会拿到 0×0 → ECharts 回退 100×100）就重量测
-    if (c.getWidth() !== els.chart.clientWidth || c.getHeight() !== els.chart.clientHeight) {
-      c.resize();
+  // 按天或按周分组。按周时组标签用周起始日。
+  function buildBuckets() {
+    const keys = customRange ? dayKeysBetween(customRange.start, customRange.end) : dayKeys(days);
+    const perDay = new Map();
+    for (const k of keys) perDay.set(k, { down: 0, up: 0 });
+    for (const r of rows) {
+      const slot = perDay.get(r.day);
+      if (slot) { slot.down += r.down; slot.up += r.up; }
     }
 
-    const mut = cssVar('--text-muted', '#b4a99e');
-    const txt = cssVar('--text', '#f6efe8');
-    const line = 'rgba(255,255,255,0.08)';
-    const surface = cssVar('--surface', '#1e1a16');
-    const down = cssVar('--down', '#f0913f');
-    const up = cssVar('--up', '#7fa8c9');
-    const dataMax = buckets.reduce((m, b) => Math.max(m, b.down, b.up), 0);
-    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const t0 = buckets.length ? buckets[0].start * 1000 : 0;
-    const t1 = buckets.length ? buckets[buckets.length - 1].end * 1000 : 1;
-
-    c.setOption({
-      animation: !reduced,
-      animationDuration: 260,
-      title: loaded && dataMax === 0 ? {
-        text: '这个区间还没有落库的流量',
-        left: 'center', top: 'middle',
-        textStyle: { color: mut, fontSize: 13, fontWeight: 400 },
-      } : undefined,
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(255,255,255,0.06)' } },
-        backgroundColor: surface,
-        borderColor: 'rgba(255,255,255,0.12)',
-        textStyle: { color: txt, fontSize: 12 },
-        formatter: (params) => {
-          const first = Array.isArray(params) ? params[0] : params;
-          const b = buckets[first.dataIndex];
-          if (!b) return '';
-          const title = `<div style="color:${mut};margin-bottom:4px">${escapeHtml(b.label)}</div>`;
-          return `${title}<span style="color:${down}">▼ 下载 ${fmt(b.down)}</span><br/>` +
-            `<span style="color:${up}">▲ 上传 ${fmt(b.up)}</span>`;
-        },
-      },
-      axisPointer: { link: [{ xAxisIndex: 'all' }] },
-      grid: [
-        { left: 56, right: 14, top: 14, height: '56%' },
-        { left: 56, right: 14, top: '76%', height: '18%' },
-      ],
-      xAxis: [
-        { type: 'time', gridIndex: 0, min: t0, max: t1,
-          axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
-        { type: 'time', gridIndex: 1, min: t0, max: t1,
-          axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false },
-          axisLabel: { color: mut, fontSize: 11, hideOverlap: true } },
-      ],
-      yAxis: [
-        { type: 'value', gridIndex: 0, splitNumber: 3,
-          axisLabel: { color: mut, fontSize: 11, formatter: compactBytes },
-          splitLine: { lineStyle: { color: line, type: 'dashed' } } },
-        { type: 'value', gridIndex: 1, splitNumber: 2,
-          axisLabel: { color: mut, fontSize: 11, formatter: compactBytes },
-          splitLine: { show: false } },
-      ],
-      series: [
-        { name: '下载', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 22,
-          itemStyle: { ...barStyle(down), opacity: 1 },
-          data: buckets.map((b, i) => ({ value: [b.start * 1000, b.down], itemStyle: { opacity: dimOf(i) } })) },
-        { name: '上传', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, barMaxWidth: 22,
-          itemStyle: { ...barStyle(up), opacity: 1 },
-          data: buckets.map((b, i) => ({ value: [b.start * 1000, b.up], itemStyle: { opacity: dimOf(i) } })) },
-      ],
-    }, true);
+    const weekly = keys.length > WEEK_AGG_THRESHOLD;
+    els.aggNote.hidden = !weekly;
+    if (!weekly) {
+      return keys.map((k) => ({
+        key: k, label: labelOf(k), days: [k],
+        down: perDay.get(k).down, up: perDay.get(k).up,
+      }));
+    }
+    const out = [];
+    for (let i = 0; i < keys.length; i += 7) {
+      const chunk = keys.slice(i, i + 7);
+      let down = 0;
+      let up = 0;
+      for (const k of chunk) { down += perDay.get(k).down; up += perDay.get(k).up; }
+      out.push({ key: chunk[0], label: labelOf(chunk[0]), days: chunk, down, up });
+    }
+    return out;
   }
 
-  // ---------- 检查栏（合计 + 排行） ----------
+  // x 轴只标两端和每个月初那一根（§2.6）
+  function tickLabels() {
+    const ticks = [];
+    for (let i = 0; i < buckets.length; i++) {
+      const d = buckets[i].key.split('-')[2];
+      if (d === '01') ticks.push({ index: i, text: labelOf(buckets[i].key) });
+    }
+    return ticks;
+  }
+
+  function drawChart() {
+    if (!buckets.length) return;
+    hit = C.bars(els.canvas, {
+      groups: buckets.map((b) => ({ label: b.label, values: [b.down, b.up] })),
+      formatY: C.axisBytes,
+      xLabels: [buckets[0].label, buckets[buckets.length - 1].label],
+      tickLabels: tickLabels(),
+      selectedIndex: selected,
+      // 悬停小卡：两个系列的名称；周聚合时标题标「当周」，周合计不被读成单日
+      seriesNames: ['下载', '上传'],
+      tipTitle: (b) => (b.days.length > 1 ? `${b.label} 当周` : b.label),
+    });
+  }
 
   function renderSide() {
-    const b = selected >= 0 ? buckets[selected] : null;
-    const scope = b ? [b] : buckets;
+    const scope = selected >= 0 ? [buckets[selected]] : buckets;
+    const dayFilter = selected >= 0 ? new Set(buckets[selected].days) : null;
 
     let down = 0;
     let up = 0;
-    for (const it of scope) { down += it.down; up += it.up; }
+    for (const b of scope) { down += b.down; up += b.up; }
     setTotal(els.sumDown, down);
     setTotal(els.sumUp, up);
     setTotal(els.sumAll, down + up);
 
-    if (b) {
-      // 选中态标题：日桶带星期，小时/周桶直接用桶标签
-      els.rangeTitle.textContent = (b.end - b.start === DAY)
-        ? `${b.label} · ${weekdayOf(b.start)}`
-        : b.label;
+    if (selected >= 0) {
+      const b = buckets[selected];
+      const many = b.days.length > 1;
+      els.rangeTitle.textContent = many
+        ? `${b.label} 起一周`
+        : `${b.label} · ${weekdayOf(b.key)}`;
       els.rangeSub.textContent = '点柱状图空白处取消选中';
-      els.rankTitle.textContent = b.end - b.start === HOUR ? '该时段应用排行'
-        : (b.label.includes('一周') ? '本周应用排行' : '当日应用排行');
-    } else if (mode === 'custom' && custom) {
-      els.rangeTitle.textContent = `${fmtLocal(custom.start, custom.bucket === HOUR)} – ${fmtLocal(custom.end, true)}`;
-      els.rangeSub.textContent = '点柱状图上的某一格可只看那段时间';
+      els.rankTitle.textContent = many ? '本周应用排行' : '当日应用排行';
+    } else if (customRange) {
+      // 自定义区间不能再说「近 N 天」：区间可能整段在过去，而且它不是从今天倒数的。
+      els.rangeTitle.textContent = `${customRange.start} ~ ${customRange.end}`;
+      els.rangeSub.textContent = `共 ${buckets.reduce((n, b) => n + b.days.length, 0)} 天 · 点某一天可只看那天`;
       els.rankTitle.textContent = '应用排行';
     } else {
       els.rangeTitle.textContent = `近 ${days} 天`;
@@ -341,7 +220,21 @@
       els.rankTitle.textContent = '应用排行';
     }
 
-    renderRank();
+    // 应用排行：按下载量降序，行背景一条极淡的琥珀渐变表示占比（同 §2.5）。
+    // 未选中柱时按整个当前区间过滤 —— 不能直接遍历 rows：history_daily 的截断点是
+    // 「现在往前推 N 天」，跨天的那个窗口比 dayKeys(N) 多出小半天，排行会比柱图多算一截。
+    const pool = selected >= 0 ? rows.filter((r) => dayFilter.has(r.day)) : filteredRows();
+    const byApp = new Map();
+    for (const r of pool) {
+      const cur = byApp.get(r.name) || { down: 0, up: 0 };
+      cur.down += r.down;
+      cur.up += r.up;
+      byApp.set(r.name, cur);
+    }
+    const ranked = Array.from(byApp, ([name, v]) => ({ name, ...v }))
+      .sort((a, b) => b.down - a.down)
+      .slice(0, TOP_N);
+    renderRank(ranked, ranked.length ? ranked[0].down : 0);
   }
 
   // 合计数字：数值 20px、单位 12px。一列只有 116px，整串按 20px 排会溢出，
@@ -356,37 +249,31 @@
     );
   }
 
-  function renderRank() {
-    const b = selected >= 0 ? buckets[selected] : null;
-    const byApp = new Map();
-    for (const r of rowsKeyed) {
-      if (b && r.key !== b.key) continue;
-      const cur = byApp.get(r.name) || { down: 0, up: 0 };
-      cur.down += r.down;
-      cur.up += r.up;
-      byApp.set(r.name, cur);
-    }
-    const ranked = Array.from(byApp, ([name, v]) => ({ name, ...v }))
-      .sort((a, b2) => b2.down - a.down)
-      .slice(0, TOP_N);
+  // 排行数值：数字主体 + 小一号灰单位，与进程表速率列同一规则 ——
+  // 整串同大同色时，一列「830.9 MB / 130.0 MB」读起来是八段等重的字符串。
+  function valueHtml(bytes) {
+    const s = fmt(bytes);
+    const i = s.lastIndexOf(' ');
+    if (i < 0) return escapeHtml(s);
+    return `${escapeHtml(s.slice(0, i))}<span class="u">${escapeHtml(s.slice(i + 1))}</span>`;
+  }
 
-    if (!ranked.length) {
+  function renderRank(list, peak) {
+    if (!list.length) {
       els.rank.replaceChildren(Object.assign(document.createElement('div'), {
         className: 'hint-row',
-        textContent: loaded ? '这个区间还没有落库的流量' : '正在读取历史库…',
+        // 查询进行中先说读取中：大区间首查要跑一会儿，「还没有落库的流量」
+        // 在这个窗口期读起来像「查完了、确实没数据」。
+        textContent: loading || !loaded ? '正在读取历史库…' : '这个区间还没有落库的流量',
       }));
       return;
     }
-    const peak = ranked[0].down;
     const frag = document.createDocumentFragment();
-    for (const app of ranked) {
+    for (const app of list) {
       const row = document.createElement('div');
       row.className = 'rank-row';
       const share = peak > 0 ? Math.round((app.down / peak) * 100) : 0;
-      row.style.backgroundImage =
-        `linear-gradient(90deg, rgba(240,145,63,0.09), rgba(240,145,63,0) ${share}%)`;
-      // 行内只放主值（下载，排序键）；双向明细进悬浮提示，不挤 116px 的值列
-      row.title = `下载 ${fmt(app.down)} · 上传 ${fmt(app.up)}`;
+      row.style.setProperty('--share', `${share}%`);
       const icon = iconFor(app.name);
       const name = app.name || unattrName();
       row.innerHTML = `
@@ -394,7 +281,7 @@
           ? `<img class="rank-icon" src="${icon}" alt="" />`
           : `<span class="rank-icon is-placeholder">${escapeHtml(initial(app.name))}</span>`}
         <span class="rank-name">${escapeHtml(name)}</span>
-        <span class="rank-value">${escapeHtml(fmt(app.down))}</span>`;
+        <span class="rank-value">${valueHtml(app.down)}</span>`;
       frag.appendChild(row);
     }
     els.rank.replaceChildren(frag);
@@ -416,133 +303,70 @@
     list.style.height = `${Math.max(1, Math.floor(avail / rowH)) * rowH}px`;
   }
 
-  function render() {
-    renderChart();
+  const escapeHtml = window.NetPeekCommon.escapeHtml; // 统一走 common.js（U4）
+
+  function activeDayKeys() {
+    return customRange ? dayKeysBetween(customRange.start, customRange.end) : dayKeys(days);
+  }
+
+  function filteredRows() {
+    const keys = new Set(activeDayKeys());
+    return rows.filter((row) => keys.has(row.day));
+  }
+
+  async function loadRows() {
+    // 加载态：柱图降透明，排行区如果还空着就把提示换成「读取中」。
+    // 有旧数据时保留旧图不动 —— 换档期间闪一帧空图比沿用旧图更糟。
+    loading = true;
+    els.canvas.classList.add('is-loading');
+    if (!els.rank.querySelector('.rank-row')) renderRank([], 0);
+    // 自定义区间必须走 history_range：history_daily 只认「从今天往前数 N 天」，
+    // 拿它查一个过去的区间只会取回与所选窗口零重叠的数据，柱图整片是空的。
+    try {
+      const raw = customRange
+        ? await window.__TAURI__.core.invoke('history_range', {
+            start: customRange.start,
+            end: customRange.end,
+          })
+        : await window.__TAURI__.core.invoke('history_daily', { days });
+      rows = JSON.parse(raw || '[]').filter((row) => row && typeof row.day === 'string');
+      windowDays = customRange ? 0 : days;
+    } catch {
+      rows = []; // 浏览器预览或库不可用：画空坐标轴，不报错弹窗
+      windowDays = customRange ? 0 : days;
+    }
+    loading = false;
+    els.canvas.classList.remove('is-loading');
+    loaded = true;
+    buckets = buildBuckets();
+    selected = -1;
+    drawChart();
     renderSide();
   }
 
-  function selectBucket(i) {
-    selected = selected === i ? -1 : i;
-    render();
-  }
-
-  // ---------- 自定义时间区间 ----------
-
-  let fpFrom = null;
-  let fpTo = null;
-
-  const PICKER = {
-    enableTime: true,
-    time_24hr: true,
-    dateFormat: 'Y-m-d H:i',
-    locale: 'zh',
-    allowInput: false,        // 只用选择器输入，避免手打的畸形时间
-    minuteStep: 5,
-  };
-
-  function initPickers() {
-    if (fpFrom || !window.flatpickr) return;
-    fpFrom = flatpickr(els.customFrom, PICKER);
-    fpTo = flatpickr(els.customTo, PICKER);
-  }
-
-  function fmtInputValue(ts) {
-    const d = new Date(ts * 1000);
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
-
-  function setCustomError(msg) {
-    els.customErr.textContent = msg;
-    els.customErr.hidden = !msg;
-  }
-
-  function openCustom() {
-    initPickers();
-    els.customPop.hidden = false;
-    els.customBtn.classList.add('is-active');
-    els.customBtn.setAttribute('aria-expanded', 'true');
-    setCustomError('');
-    const end = nowSecs() + 60;
-    if (fpFrom && fpTo) {
-      fpFrom.setDate((custom ? custom.start : end - 24 * HOUR) * 1000, false);
-      fpTo.setDate((custom ? custom.end : end) * 1000, false);
-    }
-  }
-
-  function closeCustom() {
-    els.customPop.hidden = true;
-    // Flatpickr 日历挂在 body 上，不受弹层 hidden 影响，要显式收起
-    if (fpFrom) fpFrom.close();
-    if (fpTo) fpTo.close();
-    if (mode !== 'custom') els.customBtn.classList.remove('is-active');
-    els.customBtn.setAttribute('aria-expanded', 'false');
-  }
-
-  function applyCustom() {
-    const dFrom = fpFrom && fpFrom.selectedDates[0];
-    const dTo = fpTo && fpTo.selectedDates[0];
-    if (!dFrom || !dTo) {
-      setCustomError('请先选择开始和结束时间');
-      return;
-    }
-    const start = Math.floor(dFrom.getTime() / 1000);
-    const end = Math.floor(dTo.getTime() / 1000);
-    if (end <= start) {
-      setCustomError('结束时间要晚于开始时间');
-      return;
-    }
-    const spanDays = (end - start) / DAY;
-    if (spanDays > CUSTOM_MAX_DAYS) {
-      setCustomError(`区间最长 ${CUSTOM_MAX_DAYS} 天`);
-      return;
-    }
-    setCustomError('');
-    const bucket = spanDays <= 2 ? HOUR : (spanDays > 90 ? WEEK : 0);
-    custom = { start, end, bucket, anchor: bucket === WEEK ? localMonday(start) : 0 };
-    mode = 'custom';
-    // 自定义生效时预设不再高亮，当前区间以检查栏标题为准
-    els.range.querySelectorAll('button').forEach((b) => b.classList.remove('is-active'));
-    closeCustom();
-    loadRows();
-  }
-
-  function applyQuick(kind) {
-    if (!fpFrom || !fpTo) return;
-    const end = nowSecs() + 60;
-    let start;
-    if (kind === '24h') {
-      start = end - 24 * HOUR;
-    } else if (kind === 'today') {
-      start = localMidnight(nowSecs());
-    } else {
-      start = localMidnight(nowSecs()) - DAY;
-      end = localMidnight(nowSecs());
-    }
-    fpFrom.setDate(start * 1000, false);
-    fpTo.setDate(end * 1000, false);
-  }
-
-  // ---------- 导出 ----------
-
   function exportCsv() {
-    // 导出跟随当前视野：选中某桶时只导该桶的行，与检查栏口径一致
-    const b = selected >= 0 ? buckets[selected] : null;
-    const scoped = b ? rowsKeyed.filter((r) => r.key === b.key) : rowsKeyed;
-    const header = '时间,应用,下载字节,上传字节';
-    const labelByKey = new Map(buckets.map((it) => [it.key, it.label]));
-    const lines = scoped.map((r) => {
-      const t = labelByKey.get(r.key) || String(r.key);
-      return `"${t}","${String(r.name).replace(/"/g, '""')}",${r.down},${r.up}`;
-    });
-    const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}\r\n`], { type: 'text/csv' });
+    const exportRows = filteredRows();
+    const header = '日期,应用,下载字节,上传字节';
+    const lines = exportRows.map((r) => `${r.day},"${String(r.name).replace(/"/g, '""')}",${r.down},${r.up}`);
+    const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
+    const keys = activeDayKeys();
+    const suffix = customRange && keys.length ? `${keys[0]}_${keys[keys.length - 1]}` : `${days}d`;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    // 文件名带区间：预设用天数，自定义用起止日期，避免两次导出互相覆盖
-    const scope = b ? b.label.replace(/\s/g, '')
-      : (mode === 'custom' && custom ? `${ymd(custom.start)}_${ymd(custom.end)}` : `${days}d`);
-    a.download = `netpeek-history-${scope}.csv`;
+    a.download = `netpeek-history-${suffix}.csv`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function closeCustomRange() {
+    els.customForm.hidden = true;
+    els.customToggle.setAttribute('aria-expanded', 'false');
+    els.rangeError.hidden = true;
+  }
+
+  function showRangeError(message) {
+    els.rangeError.textContent = message;
+    els.rangeError.hidden = false;
   }
 
   // ---------- 事件绑定 ----------
@@ -551,26 +375,136 @@
     const btn = e.target.closest('button[data-days]');
     if (!btn) return;
     days = parseInt(btn.dataset.days, 10);
-    mode = 'preset';
+    customRange = null;
+    closeCustomRange();
     els.range.querySelectorAll('button').forEach((b) => b.classList.toggle('is-active', b === btn));
-    els.customBtn.classList.remove('is-active');
-    closeCustom();
     loadRows();
   });
 
-  els.customBtn.addEventListener('click', () => {
-    if (els.customPop.hidden) openCustom(); else closeCustom();
+  els.customToggle.addEventListener('click', () => {
+    const opening = els.customForm.hidden;
+    els.customForm.hidden = !opening;
+    els.customToggle.setAttribute('aria-expanded', String(opening));
+    els.rangeError.hidden = true;
+    if (opening) {
+      const keys = activeDayKeys();
+      els.startDate.value = customRange ? customRange.start : keys[0];
+      els.endDate.value = customRange ? customRange.end : keys[keys.length - 1];
+      applyDateBounds();
+      els.startDate.focus();
+    }
   });
-  els.customClose.addEventListener('click', closeCustom);
-  els.customApply.addEventListener('click', applyCustom);
-  els.customPop.querySelector('.hist-custom-quick').addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-quick]');
-    if (btn) applyQuick(btn.dataset.quick);
+
+  // 日期框的边界在框上拦，不靠提交后报错（U1）：
+  // max = 今天（end > today 原来只在提交时拦）；min = max(最早落库日, 今天-10 年)，
+  // 早于最早落库日的区间查出来必然是空柱，与其让人选完再读一遍错误文案，
+  // 不如日期选择器里就点不到。
+  async function applyDateBounds() {
+    const today = dayKeys(1)[0];
+    els.startDate.max = today;
+    els.endDate.max = today;
+    if (firstDay) {
+      els.startDate.min = firstDay;
+      els.endDate.min = firstDay;
+      return;
+    }
+    try {
+      const raw = await window.__TAURI__.core.invoke('history_stats');
+      const stats = JSON.parse(raw || '{}');
+      if (stats.firstTs > 0) {
+        firstDay = dayKey(new Date(stats.firstTs * 1000));
+        // min 取「最早落库日」和「今天 - 10 年上限」里更晚的那个。
+        const floor = dayKey(new Date(Date.now() - MAX_RANGE_DAYS * 86_400_000));
+        const min = firstDay > floor ? firstDay : floor;
+        els.startDate.min = min;
+        els.endDate.min = min;
+      }
+    } catch { /* 浏览器预览或库不可用：不设 min，提交侧校验兜底 */ }
+  }
+
+  els.customCancel.addEventListener('click', closeCustomRange);
+
+  // Esc 收起浮层。它盖在柱图上，键盘用户需要一个不等价的出口 ——
+  // 「取消」按钮要 Tab 三下才够得着。
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !els.customForm.hidden) {
+      closeCustomRange();
+      els.customToggle.focus();
+    }
+  });
+
+  els.customForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const start = els.startDate.value;
+    const end = els.endDate.value;
+    const today = dayKeys(1)[0];
+    if (!start || !end) {
+      showRangeError('请选择开始日期和结束日期。');
+      return;
+    }
+    if (start > end) {
+      showRangeError('开始日期不能晚于结束日期。');
+      return;
+    }
+    if (end > today) {
+      showRangeError('结束日期不能晚于今天。');
+      return;
+    }
+    // min 属性拦得住选择器，拦不住手敲；整段落在最早记录之前的区间必然空柱。
+    if (firstDay && end < firstDay) {
+      showRangeError(`历史库最早记录是 ${firstDay}，这个区间没有数据。`);
+      return;
+    }
+    const span = spanDays(start, end);
+    if (span > MAX_RANGE_DAYS) {
+      showRangeError(`区间最长 ${MAX_RANGE_DAYS} 天（约 10 年）。`);
+      return;
+    }
+    customRange = { start, end };
+    // 不动 days：它只表达「预设档的天数」。自定义区间有自己的 customRange，
+    // 所有读 days 的路径都以 customRange 为先决条件，混写只会埋语义坑。
+    // 三个预设胶囊都取消激活，把激活态交给「自定义…」——否则整组胶囊没有任何一个
+    // 高亮，读起来像「当前档位丢了」。点预设档时那个 forEach 会顺手摘掉它。
+    els.range.querySelectorAll('button').forEach((button) => button.classList.remove('is-active'));
+    els.customToggle.classList.add('is-active');
+    closeCustomRange();
+    loadRows();
   });
 
   els.exportBtn.addEventListener('click', exportCsv);
 
-  window.addEventListener('netpeek-themechange', () => render());
+  // 点柱选中某天，点空白处取消（§2.6）
+  els.canvas.addEventListener('click', (e) => {
+    if (!hit) return;
+    const idx = hit.indexAt(e.clientX);
+    selected = idx >= 0 && idx === selected ? -1 : idx;
+    drawChart();
+    renderSide();
+  });
+
+  // 键盘等价操作（U3）：canvas 带 tabindex 后方向键移选中、Esc 取消。
+  // Esc 在浮层开着时由上面的 document 级处理器优先收浮层，两不干扰。
+  els.canvas.addEventListener('keydown', (e) => {
+    if (!buckets.length) return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const step = e.key === 'ArrowRight' ? 1 : -1;
+      const next = selected < 0
+        ? (step > 0 ? 0 : buckets.length - 1)   // 未选中：右 = 第一根，左 = 最后一根
+        : Math.min(buckets.length - 1, Math.max(0, selected + step));
+      if (next === selected) return;
+      selected = next;
+      drawChart();
+      renderSide();
+    } else if (e.key === 'Escape' && selected >= 0) {
+      e.preventDefault();
+      selected = -1;
+      drawChart();
+      renderSide();
+    }
+  });
+
+  window.addEventListener('netpeek-themechange', () => { if (buckets.length) drawChart(); });
 
   window.NetPeekHistoryUI = {
     // 进入历史屏时拉一次；库每整分钟才落一次，不需要更勤
@@ -578,38 +512,43 @@
       await loadRows();
     },
     redraw() {
-      render();
+      if (buckets.length) drawChart();
+      snapRankHeight();
     },
-    // 检查栏「30 天下载」复用日聚合（独立小图，走 history_daily 按天路径）。
-    // 每次现查：库每整分钟落一次盘，过期缓存会让「今天」这根柱停在旧值。
+    // 检查栏「30 天下载」要的是最近 n 天，和历史屏当前的档位不是一回事，
+    // 所以不能无条件复用 rows：
+    //   - 历史屏切到「近 7 天」时 rows 只有 7 天，30 天曲线会剩 23 根空柱；
+    //   - 切到自定义区间时 rows 只覆盖用户挑的那一段，可能整段都在过去，
+    //     拿它画「最近 30 天」等于把曲线清空。
+    // 够用就复用（默认档位下零额外查询），不够用才自己查一次并缓存。
     async dailyFor(name, n) {
-      let rows = [];
-      try {
-        const raw = await window.__TAURI__.core.invoke('history_daily', { days: n });
-        rows = JSON.parse(raw || '[]');
-      } catch { rows = []; }
-      const keys = [];
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - (n - 1));
-      for (let i = 0; i < n; i++) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        keys.push(`${y}-${m}-${day}`);
-        d.setDate(d.getDate() + 1);
+      let source = null;
+      if (windowDays >= n) {
+        source = rows;
+      } else if (inspectorRows && inspectorSpan >= n) {
+        source = inspectorRows;
+      } else {
+        // fallback 固定按 30 天兜底，不掺当前档位：days 在自定义区间下是区间长度
+        // （最长 3660），拿它当查询跨度会拉全库日聚合，纯属浪费。
+        const span = Math.max(n, 30);
+        try {
+          const raw = await window.__TAURI__.core.invoke('history_daily', { days: span });
+          inspectorRows = JSON.parse(raw || '[]');
+          inspectorSpan = span;
+        } catch {
+          inspectorRows = []; // 查不动就先不用缓存，下次选中行再试
+          inspectorSpan = 0;
+        }
+        source = inspectorRows;
       }
+      const keys = dayKeys(n);
       const perDay = new Map(keys.map((k) => [k, 0]));
       const key = name ? String(name).toLowerCase() : null;
-      for (const r of rows) {
+      for (const r of source) {
         if (key && String(r.name).toLowerCase() !== key) continue;
         if (perDay.has(r.day)) perDay.set(r.day, perDay.get(r.day) + r.down);
       }
-      return keys.map((k) => ({
-        key: k,
-        label: `${Number(k.split('-')[1])}月${Number(k.split('-')[2])}日`,
-        value: perDay.get(k),
-      }));
+      return keys.map((k) => ({ key: k, label: labelOf(k), value: perDay.get(k) }));
     },
   };
 })();

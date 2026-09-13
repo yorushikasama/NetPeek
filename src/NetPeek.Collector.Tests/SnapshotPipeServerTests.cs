@@ -11,32 +11,35 @@ namespace NetPeek.Collector.Tests;
 
 /// <summary>
 /// 管道服务端行为测试：帧格式（4 字节小端长度前缀 + UTF-8 JSON）
-/// 与图标按连接去重（P1-3：同一 IconId 的 base64 只在本连接首帧出现）。
+/// 与图标增量下发（IconUpdates 只在图标首次出现的那一帧携带，进程行不带图标本体）。
 /// </summary>
 public class SnapshotPipeServerTests
 {
     private const string TestPipeName = "NetPeekTests.SnapshotPipe";
 
     [Fact]
-    public async Task Serves_frames_and_deduplicates_icons_per_connection()
+    public async Task Serves_frames_and_passes_icon_updates_through()
     {
         var frameIndex = 0;
         TrafficSnapshot Produce()
         {
-            // 每帧全新对象：与真实 GetSnapshot 的语义一致（去重会改写帧内对象）。
+            // 每帧全新对象，与真实 GetSnapshot 的语义一致。
+            // 图标增量由数据源决定：这里只让首帧带 IconUpdates，模拟「路径首次出现」。
             frameIndex++;
             return new TrafficSnapshot
             {
                 TimestampUnixMs = frameIndex,
                 Status = "ok",
+                IconUpdates = frameIndex == 1
+                    ? new Dictionary<string, string> { [@"C:\a.exe"] = "data:image/png;base64,AAAA" }
+                    : null,
                 Processes =
                 [
                     new ProcessTraffic
                     {
                         Pid = 7,
                         Name = "a.exe",
-                        IconId = "icon-1",
-                        IconBase64 = "data:image/png;base64,AAAA",
+                        Path = @"C:\a.exe",
                         DownloadBytes = 100,
                         DownloadTotal = (ulong)(frameIndex * 100),
                     },
@@ -57,15 +60,19 @@ public class SnapshotPipeServerTests
         var p1 = Assert.Single(frame1.Processes);
         var p2 = Assert.Single(frame2.Processes);
 
-        // 首帧携带 base64；后续帧只带 IconId（客户端按 id 缓存）。
-        Assert.Equal("data:image/png;base64,AAAA", p1.IconBase64);
-        Assert.Equal("icon-1", p1.IconId);
+        // 首帧带图标增量，按路径为键；后续帧不再重复搬运。
+        var updates = Assert.IsType<Dictionary<string, string>>(frame1.IconUpdates);
+        Assert.Equal("data:image/png;base64,AAAA", Assert.Contains(@"C:\a.exe", updates));
+        Assert.Null(frame2.IconUpdates);
 
-        Assert.Equal("icon-1", p2.IconId);
+        // 图标本体不再挂在进程行上。
+        Assert.Equal("", p1.IconBase64);
         Assert.Equal("", p2.IconBase64);
+
         // 静态字段照常传输
         Assert.Equal(7u, p2.Pid);
         Assert.Equal("a.exe", p2.Name);
+        Assert.Equal(@"C:\a.exe", p2.Path);
 
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => serverTask);
