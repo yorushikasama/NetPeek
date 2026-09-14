@@ -32,9 +32,17 @@ public sealed class CollectorService : BackgroundService
         {
             try
             {
-                // 每轮连接前重置图标增量流：UI（重新）连上的第一帧 IconUpdates 带全量，
-                // 之后只发新路径。在 ServeAsync 之前调用，与 GetSnapshot 严格串行。
+                // 每轮连接前重置**连接级状态**。两件事同一时机做，因为起因相同：
+                // 客户端换了一个，上一段会话的「增量基准」不再成立。
+                //   · 清空图标已发记录 → 重连首帧 IconUpdates 带全量；
+                //   · 置速率基线标志 → 重连首帧只记基线、不报速率。断开期间 ETW
+                //     照收、累计值照涨，而增量基线只在 UI 连着时才推进，不置这个
+                //     标志的话首帧会把攒下的存量当成 1 秒的速率报出去（实测
+                //     137.09 MB/s vs 次帧 10.70 KB/s，差 1.3 万倍）。
+                // 在 ServeAsync 之前调用是安全的：基线标志由管道线程在**连接之后**
+                // 的第一帧消费，不是在调用这一刻取样。
                 _source.ResetIconStream();
+                _source.ResetRateBaseline();
                 await _pipeServer.ServeAsync(
                     _source.GetSnapshot,
                     IpcConstants.SnapshotIntervalMs,

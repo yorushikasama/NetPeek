@@ -102,6 +102,22 @@ const probe = await pg.evaluate(() => ({
 console.log(`orb ui-opacity broadcast: var=${probe.root} orbOpacity=${probe.orb} ${probe.root === '0.6' && probe.orb === '1' ? 'OK' : 'FAIL'}`);
 console.log(`page errors: ${await pg.evaluate(() => window.__ERR) || '(none)'}`);
 
+// ---- 原生右键菜单抑制（§35 的模块在小窗也要生效）----
+// 小窗里没有任何可复制的值，所以不该弹出自定义菜单；要验的是**原生菜单被拦下**。
+// dispatchEvent 的返回值就是 preventDefault 的回执：false 表示被拦。
+// 少了这条，context-menu.js 从小窗的 script 列表里被删掉也不会有人发现 ——
+// 一个 108×108 的能量球上弹出「刷新 / 另存为」是最刺眼的那种疏漏。
+const ctxMini = await pg.evaluate(() => {
+  const orb = document.getElementById('orb');
+  const notCancelled = orb.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, button: 2,
+  }));
+  const m = document.querySelector('.ctx-menu');
+  return { suppressed: !notCancelled, customMenu: !!m && !m.hidden };
+});
+console.log(`mini ctxmenu suppressed=${ctxMini.suppressed} customMenu=${ctxMini.customMenu} `
+  + `${ctxMini.suppressed && !ctxMini.customMenu ? 'OK' : 'FAIL'}`);
+
 // ---- 迷你窗形态 ----
 await pg.setViewportSize({ width: 344, height: 324 });
 await pg.evaluate(() => { document.getElementById('orb').hidden = true; document.getElementById('panel').hidden = false; });

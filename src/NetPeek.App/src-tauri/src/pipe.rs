@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -23,11 +23,60 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// 通知节流思路；它按「数值回归正常再重新武装」节流，冷却窗实现更简单直观）。
 const ALERT_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// 反向握手的兜底超时：等前端就绪信号最多等这么久。正常情况下 main.js 在
+/// `listen('snapshot')` 登记完就发信号（约在启动后一两秒内），远早于上限；
+/// 真超时说明前端崩溃或加载失败，此时照常连接 —— 宁可丢首帧图标，也不能
+/// 因为前端起不来而永远不连采集服务。
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 网速提醒的每方向冷却状态。pipe 线程独占访问，但放 Mutex 便于 app.manage 共享。
 #[derive(Default)]
 pub struct AlertState {
     last_down: Mutex<Option<Instant>>,
     last_up: Mutex<Option<Instant>>,
+}
+
+/// 前端「快照监听已登记」的就绪信号（main.js 经 `frontend_ready` 命令点亮）。
+///
+/// 为什么要等：采集端连上就推首帧，而首帧是唯一带全量图标的一帧（图标只对
+/// 「没发过的路径」下发，每次接受连接前重置已发集合）；Tauri 事件即发即弃、
+/// 不缓冲 —— 管道线程若在前端登记监听之前就连上，首帧发出去没人接，已运行
+/// 进程的图标整会话只剩占位牌（`iconCache` 没有补发机制）。
+///
+/// 为什么是 Condvar 而不是轮询：管道线程本来就是阻塞式的（`read_exact` 挂住
+/// 等帧），多一次阻塞等待不增加任何线程，轮询反而引入最长一个周期的延迟。
+/// 信号只需要等一次（首次连接前）；之后页面重载再发 `frontend_ready` 无副作用。
+#[derive(Default)]
+pub struct FrontendReady {
+    ready: Mutex<bool>,
+    cond: Condvar,
+}
+
+impl FrontendReady {
+    fn signal(&self) {
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = true;
+        }
+        self.cond.notify_all();
+    }
+
+    /// 阻塞直到信号点亮或超时；返回是否在超时前收到了信号。
+    fn wait_for(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut ready = self.ready.lock().unwrap_or_else(|e| e.into_inner());
+        while !*ready {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .cond
+                .wait_timeout(ready, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+        }
+        true
+    }
 }
 
 /// 向采集服务发送反向控制命令（pause / resume / toggle）。
@@ -57,9 +106,33 @@ pub fn send_control(command: &str) -> Result<(), String> {
     file.flush().map_err(|e| format!("刷新控制管道失败：{e}"))
 }
 
+/// 前端把 `listen('snapshot')` 登记完就调用（main.js 的 boot 链，两个监听之后）：
+/// 点亮就绪信号，管道线程由此开始连接。多发无害（幂等）—— 页面重载会再调一次，
+/// 而信号本来就只在首次连接前等一次。
+#[tauri::command]
+pub fn frontend_ready(app: AppHandle) {
+    if let Some(ready) = app.try_state::<FrontendReady>() {
+        ready.signal();
+    }
+}
+
 /// 启动后台线程：连接管道并持续读取快照，断线后自动重连。
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
+        // 反向握手：等前端把 `listen('snapshot')` 挂上再连管道。不等的话，从
+        // 这里到前端登记之间的帧全部丢失，而首帧恰好是唯一带全量图标的那一帧
+        // （Tauri 事件即发即弃，iconCache 没有补发机制）。超时兜底见 READY_TIMEOUT：
+        // 信号永远不来也照常连，宁可丢首帧图标，也不能永远不连采集服务。
+        if let Some(ready) = app.try_state::<FrontendReady>() {
+            if !ready.wait_for(READY_TIMEOUT) {
+                log_pipe_error(
+                    &app,
+                    "前端就绪信号 10s 未到达，按兜底直接连接管道（前端可能崩溃或加载失败）",
+                );
+            }
+        }
+        // 就绪状态未注册（初始化顺序异常）时不等待直接连，行为等同旧版。
+
         // 服务未启动时每秒重连一次属常态，但不能静默到底 —— 故障会无从排查。
         // 同一条错误 60 秒内只记一次日志，避免采集服务离线时把日志刷爆。
         let mut last_err = String::new();
@@ -77,6 +150,10 @@ pub fn spawn(app: AppHandle) {
                     last_logged = Some(Instant::now());
                 }
             }
+            // 离线复位放在这一层，而不是只放在 read_session 的收尾：`File::open`
+            // 失败时它用 `?` 提前返回，收尾那段根本执行不到 —— 服务没启动时
+            // 托盘会一直停在上一次的在线状态（曾经就是这样）。
+            crate::set_collector_online(&app, false);
             std::thread::sleep(RECONNECT_DELAY);
         }
     });
@@ -91,9 +168,25 @@ fn log_pipe_error(app: &AppHandle, msg: &str) {
 
 fn read_session(app: &AppHandle) -> std::io::Result<()> {
     // 服务端未监听时 CreateFileW 会立即失败（ERROR_FILE_NOT_FOUND），由外层重连循环处理。
-    let mut file = File::open(PIPE_PATH)
-        .map_err(|e| Error::new(ErrorKind::NotFound, format!("采集服务命名管道不可用: {e}")))?;
+    // 注意 os error 231（ERROR_PIPE_BUSY）和「服务未运行」是两回事：管道存在、但
+    // 唯一的实例被别的客户端占着 —— 典型成因是安装版与开发版并存（单实例守卫按
+    // 可执行文件路径区分，拦不住），或任何别的程序打开了这条管道。单消费者设计
+    // 没有排队，只能等占位者退出。混报成「服务不可用」会引导用户去重启一个
+    // 活得好好的服务，所以这里必须分开说。
+    let mut file = File::open(PIPE_PATH).map_err(|e| {
+        if e.raw_os_error() == Some(231) {
+            Error::new(
+                ErrorKind::Other,
+                "采集管道被其他客户端占用（os error 231），采集服务本身在运行；可能是安装版与开发版同时开着",
+            )
+        } else {
+            Error::new(ErrorKind::NotFound, format!("采集服务命名管道不可用: {e}"))
+        }
+    })?;
 
+    // 托盘「暂停监控」的可用性跟着这个标志走：管道没通时它置灰，
+    // 免得用户点了半天没反应还不知道为什么。
+    crate::set_collector_online(app, true);
     let _ = app.emit("pipe-status", "connected");
 
     let result = (|| {
@@ -122,7 +215,7 @@ fn read_session(app: &AppHandle) -> std::io::Result<()> {
                 // 托盘菜单文案跟随采集服务的真实暂停状态：迷你窗 / 设置界面从别的
                 // 入口暂停时，快照 Status 变了，这里就是唯一的同步点。
                 if let Some(status) = value.get("Status").and_then(|v| v.as_str()) {
-                    crate::sync_tray_pause(app, status == "paused");
+                    crate::set_collector_paused(app, status == "paused");
                 }
                 check_rate_alerts(app, &value);
                 let _ = app.emit("snapshot", value);
@@ -130,9 +223,10 @@ fn read_session(app: &AppHandle) -> std::io::Result<()> {
         }
     })();
 
-    // 断开即视为采集服务退出：重启后的服务从「未暂停」起步，托盘文案一并复位，
-    // 避免「服务已重开、托盘还挂着『恢复监控』」的漂移。
-    crate::sync_tray_pause(app, false);
+    // 断开即视为采集服务退出：重启后的服务从「未暂停」起步，离线标志一并置下，
+    // 托盘的暂停文案与置灰状态都由同步线程按 online 收敛（不在这里直接改菜单 ——
+    // 菜单是 explorer 的原生对象，改它要走主线程，pipe 线程只写状态）。
+    crate::set_collector_online(app, false);
     let _ = app.emit("pipe-status", "disconnected");
     result
 }

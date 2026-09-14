@@ -50,6 +50,9 @@ window.NetPeekCommon = {
       'lock': '<rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />',
       'pencil': '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />',
       'trash': '<path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="m19 6-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" />',
+      // 告警：右键菜单的「复制失败」回执用它。界面上原本没有负面状态的图形符号，
+      // 缺了它失败回执只能是一行红字（§35）。
+      'alert': '<circle cx="12" cy="12" r="9" /><path d="M12 7.5V13" /><path d="M12 16.5v.01" />',
     };
     return `<svg class="ic ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor"`
       + ` stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;

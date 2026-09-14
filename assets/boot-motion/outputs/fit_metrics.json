@@ -1,0 +1,117 @@
+{
+  "svg": "logo.svg",
+  "source": "D:/NetPeek/图标.png",
+  "main": {
+    "band": {
+      "y0": 380,
+      "y1": 715,
+      "x0": 210,
+      "x1": 1035
+    },
+    "cols": 600,
+    "src_cols": 603,
+    "render_cols": 604,
+    "coverage": 0.995,
+    "dcy_mean": -1.005,
+    "dcy_rms": 1.067,
+    "dcy_max": 3.5,
+    "dthick_mean": -0.08,
+    "src_thick_median": 24,
+    "render_thick_median": 24,
+    "worst": [
+      {
+        "x": 719,
+        "src_cy": 690.0,
+        "render_cy": 686.5,
+        "d": -3.5
+      },
+      {
+        "x": 720,
+        "src_cy": 691.0,
+        "render_cy": 687.5,
+        "d": -3.5
+      },
+      {
+        "x": 722,
+        "src_cy": 689.5,
+        "render_cy": 686.0,
+        "d": -3.5
+      },
+      {
+        "x": 718,
+        "src_cy": 688.5,
+        "render_cy": 685.5,
+        "d": -3.0
+      },
+      {
+        "x": 721,
+        "src_cy": 690.0,
+        "render_cy": 687.0,
+        "d": -3.0
+      },
+      {
+        "x": 723,
+        "src_cy": 688.0,
+        "render_cy": 685.0,
+        "d": -3.0
+      }
+    ]
+  },
+  "echo": {
+    "band": {
+      "y0": 716,
+      "y1": 902,
+      "x0": 210,
+      "x1": 1035
+    },
+    "cols": 696,
+    "src_cols": 711,
+    "render_cols": 703,
+    "coverage": 0.979,
+    "dcy_mean": -0.504,
+    "dcy_rms": 0.642,
+    "dcy_max": 2.0,
+    "dthick_mean": -0.26,
+    "src_thick_median": 19,
+    "render_thick_median": 18,
+    "worst": [
+      {
+        "x": 559,
+        "src_cy": 796.5,
+        "render_cy": 794.5,
+        "d": -2.0
+      },
+      {
+        "x": 553,
+        "src_cy": 800.5,
+        "render_cy": 799.0,
+        "d": -1.5
+      },
+      {
+        "x": 557,
+        "src_cy": 798.0,
+        "render_cy": 796.5,
+        "d": -1.5
+      },
+      {
+        "x": 560,
+        "src_cy": 795.5,
+        "render_cy": 794.0,
+        "d": -1.5
+      },
+      {
+        "x": 561,
+        "src_cy": 794.5,
+        "render_cy": 793.0,
+        "d": -1.5
+      },
+      {
+        "x": 563,
+        "src_cy": 792.5,
+        "render_cy": 791.0,
+        "d": -1.5
+      }
+    ]
+  },
+  "overlay": "outputs/fit_iterations/04_final_overlay.png"
+}

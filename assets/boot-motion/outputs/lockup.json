@@ -1,0 +1,135 @@
+{
+  "view": [
+    1180.0,
+    720.0
+  ],
+  "centerX": 590.0,
+  "mark": {
+    "layout_bbox_src": [
+      225.25,
+      445.219,
+      1024.75,
+      840.933
+    ],
+    "all_bbox_src_with_glow": [
+      222.0,
+      441.969,
+      1028.0,
+      840.933
+    ],
+    "path_bboxes_src": {
+      "pulse-glow": [
+        222.0,
+        441.969,
+        1028.0,
+        705.317
+      ],
+      "pulse-line": [
+        225.25,
+        445.219,
+        1024.75,
+        702.067
+      ],
+      "pulse-echo": [
+        238.75,
+        713.736,
+        1012.25,
+        840.933
+      ]
+    },
+    "scale": 0.500313,
+    "draw_scale": 0.500313,
+    "translate": [
+      277.305,
+      -26.184
+    ],
+    "ink_w": 400.0,
+    "ink_h": 197.981,
+    "top": 196.565,
+    "bottom": 394.546,
+    "aspect": 2.0204
+  },
+  "wordmark": {
+    "ink_src": [
+      177,
+      -24,
+      7783,
+      1516
+    ],
+    "ink_w_src": 7606,
+    "ink_h_src": 1540,
+    "scale": 0.04733105,
+    "translate": [
+      401.6224,
+      522.2995
+    ],
+    "ink_w": 360.0,
+    "ink_h": 72.89,
+    "cap_height": 67.873,
+    "cap100_of_ink_w": 1.274,
+    "top": 450.546,
+    "baseline": 522.299,
+    "bottom": 523.435,
+    "advance_w": 368.141,
+    "glyphs": [
+      {
+        "char": "N",
+        "x": 0,
+        "advance": 1571
+      },
+      {
+        "char": "e",
+        "x": 1571,
+        "advance": 1088
+      },
+      {
+        "char": "t",
+        "x": 2659,
+        "advance": 740
+      },
+      {
+        "char": "P",
+        "x": 3399,
+        "advance": 1197
+      },
+      {
+        "char": "e",
+        "x": 4527,
+        "advance": 1088
+      },
+      {
+        "char": "e",
+        "x": 5615,
+        "advance": 1088
+      },
+      {
+        "char": "k",
+        "x": 6703,
+        "advance": 1075
+      }
+    ]
+  },
+  "gap": 56.00000000000001,
+  "block": {
+    "top": 196.565,
+    "bottom": 523.435,
+    "h": 326.871,
+    "margin_top": 196.565,
+    "margin_bottom": 196.565,
+    "margin_x": 390.0
+  },
+  "wipe": {
+    "x": 409.0,
+    "y": 436.546,
+    "w": 362.0,
+    "h": 100.89,
+    "distance": 362.0
+  },
+  "source": {
+    "logo": "assets/boot-motion/logo.svg",
+    "wordmark_font": "seguisb.ttf",
+    "wordmark_family": "Segoe UI Semibold",
+    "wordmark_version": "Version 5.71",
+    "wordmark_units_per_em": 2048
+  }
+}

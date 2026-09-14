@@ -270,7 +270,9 @@ html:not(.theme-ready) .panel { visibility: hidden; }
 }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn:hover { background: var(--panel-hi); color: var(--text); }
-.icon-btn:active { background: color-mix(in srgb, var(--panel-hi) 92%, #000); }
+/* 按下态统一走 --press（tokens.css）：主窗与小窗的按压深度是同一个值，
+   原来这里各写各的（92% / 88%），同一个动作在两个窗口里手感不一样。 */
+.icon-btn:active { background: var(--press); }
 /* 隐藏小窗 = 主界面「隐藏到托盘」的同义操作，用同一档危险色反馈 */
 .icon-btn.is-danger:hover { background: var(--error); color: color-mix(in srgb, black 82%, var(--error)); }
 .icon-btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
@@ -401,7 +403,7 @@ html:not(.theme-ready) .panel { visibility: hidden; }
 }
 .btn .ic { width: 14px; height: 14px; flex: none; }
 .btn:hover { border-color: color-mix(in srgb, var(--text-2) 55%, transparent); background: var(--panel-hi); }
-.btn:active { background: color-mix(in srgb, var(--panel-hi) 92%, #000); }
+.btn:active { background: var(--press); }
 .btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
 .btn:disabled { opacity: 0.4; pointer-events: none; }
 

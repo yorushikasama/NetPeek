@@ -63,6 +63,12 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private volatile bool _paused;
     private volatile bool _disposed;
 
+    /// <summary>
+    /// 下一帧是「基线帧」：只把 LastTotal 拉到当前值，不报速率。
+    /// 由连接切换线程置位（ResetRateBaseline），只由快照线程消费 —— 见 GetSnapshot。
+    /// </summary>
+    private volatile bool _rateBaselinePending;
+
     // 暂停状态的读-改-写需原子完成，否则并发的 toggle 命令会互相抵消。
     private readonly object _pauseGate = new();
 
@@ -319,6 +325,11 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     public TrafficSnapshot GetSnapshot()
     {
         var paused = _paused;
+        // 基线标志本帧读一次。它只被「真正算速率」的那条分支消费（见下）：
+        // starting / error 的早返回不消费（那时没有增量可言），paused 也不消费
+        // （paused 不推进 LastTotal，若在那里清掉，恢复监控的第一帧仍会把
+        // 暂停 + 断开期间攒下的存量当成速率报出去）。
+        var baseline = _rateBaselinePending;
         var state = _state;
         var snapshot = new TrafficSnapshot
         {
@@ -386,8 +397,20 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                     counter.Path = meta.Path;
                 }
 
-                downDelta = down - counter.LastDownloadTotal;
-                upDelta = up - counter.LastUploadTotal;
+                if (baseline)
+                {
+                    // 基线帧：只把基线拉到当前值，速率报 0。
+                    // 这一帧的「上一帧」可能是几分钟前（UI 断开期间），
+                    // 用它的增量当 1 秒的速率没有意义 —— 见 ResetRateBaseline。
+                    downDelta = 0;
+                    upDelta = 0;
+                }
+                else
+                {
+                    downDelta = down - counter.LastDownloadTotal;
+                    upDelta = up - counter.LastUploadTotal;
+                }
+
                 counter.LastDownloadTotal = down;
                 counter.LastUploadTotal = up;
 
@@ -453,6 +476,14 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             totalUp += (ulong)Math.Max(0, upDelta);
         }
 
+        // 基线帧到此消费完毕，从下一帧起正常报速率。
+        // 放在循环之后而不是开头：循环中途抛异常时标志仍然有效，
+        // 下一帧还会再走一次基线，宁可多一帧 0 速率，也不要漏报一次假尖峰。
+        if (baseline)
+        {
+            _rateBaselinePending = false;
+        }
+
         // 按累计流量降序，方便 UI 直接取 Top N。
         processes.Sort(static (a, b) =>
             (b.DownloadTotal + b.UploadTotal).CompareTo(a.DownloadTotal + a.UploadTotal));
@@ -466,6 +497,32 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
     /// <summary>UI 重连后清空已发记录，让下一帧 IconUpdates 重发全量图标。</summary>
     public void ResetIconStream() => _iconPathsSent.Clear();
+
+    /// <summary>
+    /// UI（重新）连接时调用：让下一帧「只记基线、不报速率」。
+    ///
+    /// 为什么非做不可：<c>DownloadBytes</c> 报的是「距上一帧的增量」，而
+    /// <c>LastDownloadTotal</c> 只在快照线程推进 —— 也就是**只有 UI 连着时才推进**。
+    /// UI 断开期间 ETW 事件照收、<c>DownloadTotal</c> 照涨，基线却冻在断开那一刻。
+    /// 于是重连的第一帧会把「断开期间攒下的全部存量」当成 1 秒的速率报出去。
+    ///
+    /// 实测（本机，界面关掉一段时间后再连上）：
+    ///   第 1 帧 下载 137.09 MB/s、上传 135.23 MB/s
+    ///   第 2 帧 下载 10.70 KB/s
+    /// 差 1.3 万倍。它会同时打坏三处：
+    ///   · 实时带宽图的 y 轴量程取「窗内最大值」，被这个假尖峰顶到 150 MB/s
+    ///     并锁死 60 秒，真实流量被压成绘图区 0.1% 高的贴底直线；
+    ///   · 历史库按分钟累加每帧的 DownloadBytes/UploadBytes（history.rs），
+    ///     这笔假增量会写进 30 天图与「近 24 小时」列；
+    ///   · 网速提醒只看首帧速率（pipe.rs 的 check_rate_alerts），会误报一次
+    ///     并吃掉 5 分钟冷却窗口，把真实告警压掉。
+    ///
+    /// 这里只置一个标志，不直接改 LastDownloadTotal —— 那两个字段的注释写明
+    /// 「仅在快照线程访问」，跨线程写会和 GetSnapshot 的读-改-写打架。
+    /// 交给快照线程在真正要算速率的那一帧消化，也让「在等待连接之前调用」是安全的：
+    /// 基线是在连接之后的那一帧才取的，而不是调用本方法的那一刻。
+    /// </summary>
+    public void ResetRateBaseline() => _rateBaselinePending = true;
 
     private int ReadEventsLost()
     {

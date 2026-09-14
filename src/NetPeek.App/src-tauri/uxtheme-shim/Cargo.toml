@@ -1,0 +1,16 @@
+# uxtheme 按序号导出的专用 shim：让本进程的原生弹出菜单跟随应用深浅。
+#
+# 单独成 crate 的唯一理由是 **unsafe 隔离**：`SetPreferredAppMode` / `FlushMenuThemes`
+# 在 uxtheme.dll 里只有序号没有名字，取它们必须 `GetProcAddress(135 as *const u8)`
+# + `transmute`。而 `netpeek-app` 的 `[lints.rust]` 写着 `unsafe_code = "forbid"`
+# （工程约束取自 Sniffnet），所以把这几行 unsafe 关在这里，主 crate 的 forbid
+# 一个字不动。见 src/lib.rs 的文件头注释与 docs/开发进度.md §37。
+[package]
+name = "netpeek-uxtheme"
+version = "0.1.0"
+description = "让本进程的原生弹出菜单（含托盘右键菜单）跟随应用深浅"
+edition = "2021"
+
+# 刻意零依赖：只有三个 kernel32 调用，不值得为它拉进 feature 化的巨型
+# windows-sys（还得跟 tauri 的版本对齐，而且离线环境要能 build）。
+[dependencies]

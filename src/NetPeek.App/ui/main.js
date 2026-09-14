@@ -30,6 +30,7 @@ const els = {
   viewToggle: $('viewToggle'),
   procCount: $('procCount'),
   search: $('search'),
+  sortReset: $('sortReset'),
   pidLabel: $('pidLabel'),
   rows: $('rows'),
   tableWrap: $('tableWrap'),
@@ -66,8 +67,11 @@ const els = {
 
 let lastSnapshot = null;
 let query = '';
-let sortKey = 'download';
-let sortDir = -1;              // 1 升序 / -1 降序
+// 排序状态。sortKey 为空串 = 「未排序」，表格走默认顺序（见 DEFAULT_SORT）且表头不标箭头。
+// 这一态是必须存在的：以前只有「按某列升/降序」两种，点完列头就再也回不到默认呈现，
+// 想按上传看过一眼再回到「谁在占带宽」得靠用户自己记住默认是按下载降序。
+let sortKey = '';
+let sortDir = -1;              // 1 升序 / -1 降序。sortKey 为空时无意义
 let viewMode = 'process';      // process 按进程明细 / app 按应用聚合
 let rateUnit = 'auto';         // 由设置屏更新
 let selected = null;           // { keyStr, mode, key, data }
@@ -204,6 +208,91 @@ async function loadTodayBase() {
   } catch { todayBase = { down: 0, up: 0 }; }
 }
 
+// ===== 近 24 小时汇总 =====
+// 历史库由 Rust 侧按「进程实例 × 分钟」落库（minute_stats），这里只把最近 24 小时的
+// 合计整理成两张表：进程视图按实例取，应用视图按名字取。
+// 不每秒查库：聚合本身就是整分钟翻转才落库的，当前这一分钟还在内存桶里，
+// 刷新对齐到下一分钟之后一次就够（scheduleDay24）。
+
+const DAY24_HOURS = 24;
+
+// byKey: "pid:启动秒" -> {down, up}；byName: 小写应用名 -> {down, up}
+let day24Tables = { byKey: new Map(), byName: new Map(), ready: false };
+
+/** 进程身份键，与历史库的 (pid, start_ts) 对齐 —— 注意 start_ts 是**秒**。 */
+function day24Key(p) {
+  return `${p.Pid}:${Math.floor((p.StartTimeUnixMs || 0) / 1000)}`;
+}
+
+/**
+ * 把 history_process_totals 的原始行整理成两张表。
+ *
+ * 空名字归一成 UNATTR：历史库里未归因进程的 name 是空串，而表格把它显示成
+ * 「(系统/未归因)」—— 不归一，那一行的近 24 小时永远是破折号。
+ * 同名同键的多行累加而不是覆盖：进程改名会让库里留下两行（后端把 name 也放进了
+ * 分组键），覆盖等于把改名之前的量整段丢掉。
+ */
+function buildDay24(rows) {
+  const byKey = new Map();
+  const byName = new Map();
+  const unattr = UNATTR.toLowerCase();
+  const add = (map, key, down, up) => {
+    const hit = map.get(key);
+    if (hit) { hit.down += down; hit.up += up; } else map.set(key, { down, up });
+  };
+  for (const r of rows || []) {
+    const down = Number(r.down) || 0;
+    const up = Number(r.up) || 0;
+    add(byKey, `${r.pid}:${r.startTs || 0}`, down, up);
+    add(byName, String(r.name || '').trim().toLowerCase() || unattr, down, up);
+  }
+  return { byKey, byName, ready: true };
+}
+
+/** 取某一行对应的近 24 小时合计；历史库里没有这个身份/应用就返回 null。 */
+function day24Of(tables, p, mode) {
+  if (!tables || !tables.ready) return null;
+  if (mode === 'app') {
+    const name = (p.Name || '').trim().toLowerCase() || UNATTR.toLowerCase();
+    return tables.byName.get(name) || null;
+  }
+  return tables.byKey.get(day24Key(p)) || null;
+}
+
+/**
+ * 单元格文案与悬浮说明。
+ *
+ * 没有记录时给破折号，不给「0 B」：0 B 是「记录到了零流量」的陈述，而这里更常见的
+ * 情形是这一分钟还没落库（进程刚启动）或历史库刚被清空 —— 那时我们根本没测到，
+ * 写 0 等于编一个读数出来（同顶栏断连时的破折号，见 blankRates）。
+ */
+function day24Cell(hit) {
+  if (!hit) {
+    return { text: '—', blank: true, title: '近 24 小时：暂无记录（进程刚启动，或历史库为空）' };
+  }
+  return {
+    text: fmtBytes(hit.down + hit.up),
+    blank: false,
+    title: `近 24 小时：下载 ${fmtBytes(hit.down)} · 上传 ${fmtBytes(hit.up)}`,
+  };
+}
+
+async function loadDay24() {
+  try {
+    const raw = await window.__TAURI__.core.invoke('history_process_totals', { hours: DAY24_HOURS });
+    day24Tables = buildDay24(JSON.parse(raw || '[]'));
+  } catch {
+    // 读库失败保留上一份表：这是一份 24 小时汇总，晚一轮不影响任何判断；
+    // 清成空会让整列同时变成破折号，看着像采集坏了 —— 而它只是这一次读库失败。
+  }
+}
+
+/** 对齐到「整分钟翻转 + 2 秒」再刷一次：落库在整分钟做，早查只会白查一轮。 */
+function scheduleDay24() {
+  const wait = 60_000 - (Date.now() % 60_000) + 2000;
+  setTimeout(async () => { await loadDay24(); scheduleDay24(); }, wait);
+}
+
 // ===== 顶栏 =====
 
 const STATUS = {
@@ -230,6 +319,19 @@ function setStatus(kind) {
   els.frame.classList.toggle('is-paused', kind === 'paused');
 }
 
+// 断线时把两个速率换成占位破折号，而不是留着上一帧的数字或归零。
+// 归零是「测得零流量」的陈述，而这时候我们根本没在测；留旧值是过期读数。
+// 破折号是唯一不撒谎、又不会让顶栏塌陷的选择（20px 等宽，宽度几乎等于数字）。
+function blankRates() {
+  for (const [v, u] of [[els.totalDownValue, els.totalDownUnit], [els.totalUpValue, els.totalUpUnit]]) {
+    v.textContent = '—';
+    u.textContent = '';
+    // 破折号不继承下载/上传的语义色 —— 它不是数据，是「没有数据」，
+    // 一横橙线读起来仍然像个读数。降到弱字阶，和空态里其它的「—」同一档。
+    v.parentElement.classList.add('is-blank');
+  }
+}
+
 function renderTopbar(snap) {
   const down = splitUnit(fmtRate(snap.TotalDownloadBytes || 0));
   const up = splitUnit(fmtRate(snap.TotalUploadBytes || 0));
@@ -237,7 +339,8 @@ function renderTopbar(snap) {
   els.totalDownUnit.textContent = down.unit;
   els.totalUpValue.textContent = up.value;
   els.totalUpUnit.textContent = up.unit;
-
+  els.totalDownValue.parentElement.classList.remove('is-blank');
+  els.totalUpValue.parentElement.classList.remove('is-blank');
   // 顶栏元信息承接原检查栏总览的「已采集 / N 个进程」：采集状态是常看项，
   // 放在视野里比收进详情卡字段里顺手
   const startedMs = snap.SessionStartedUnixMs || 0;
@@ -316,7 +419,37 @@ const sortAccessors = {
   pid: (p) => p.Pid,
   download: (p) => p.DownloadBytes || 0,
   upload: (p) => p.UploadBytes || 0,
+  // 近 24 小时列排的是下载 + 上传：一列只有一个数，拆开排会让「按这列排」
+  // 的结果和列里看到的数字对不上。
+  day24: (p) => (p.Day24Down || 0) + (p.Day24Up || 0),
 };
+
+/**
+ * 默认顺序：未排序时表格的呈现顺序 —— 下载从高到低，也就是「谁在占带宽」的答案。
+ * 取消排序（点列头第三次，或点「恢复默认排序」）回到的就是它。
+ * 单独拎出来是因为它同时被三处用到：排序取值、状态机落点、取消按钮的文案。
+ */
+const DEFAULT_SORT = { key: 'download', dir: -1 };
+
+const SORT_HINT = '点击列头排序：先按这列的首选方向 → 再点反向 → 第三次取消排序（回到默认的下载从高到低）';
+
+/**
+ * 表头点击的排序状态机，三态循环：
+ *   未排序 --点某列--> 该列首选方向 --再点--> 反向 --第三次点--> 回未排序
+ * 首选方向由列的性质定：六列里只有「应用」是文本（A→Z，升序），其余都是量（多→少，降序）。
+ *
+ * 为什么第三下是「取消」而不是继续翻方向：两态循环没有出口 —— 用户点完列头就再也回不到
+ * 默认呈现，只能自己记住默认是按下载降序。这就是这个函数存在的全部理由。
+ *
+ * 「下载」列从默认态点第一下行序不动（默认本来就是下载降序），只多出箭头表示
+ * 「现在是显式排序」。这不是死点击 —— 箭头亮灭是可见的状态变化。
+ */
+function nextSortState(key, currentKey, currentDir) {
+  const pref = key === 'name' ? 1 : -1;
+  if (currentKey !== key) return { key, dir: pref };
+  if (currentDir === pref) return { key, dir: -pref };
+  return { key: '', dir: DEFAULT_SORT.dir };
+}
 
 function visibleProcesses(snap) {
   let procs = (snap.Processes || []).slice();
@@ -362,12 +495,25 @@ function visibleProcesses(snap) {
     procs = Array.from(map.values());
   }
 
-  const get = sortAccessors[sortKey];
+  // 近 24 小时合计贴到每一行上：列渲染和「按这列排序」都要用，所以必须在排序之前算。
+  // 表里查不到的行留 0，靠 Day24Known 区分「记录了零」和「没记录」（见 day24Cell）。
+  for (const p of procs) {
+    const hit = day24Of(day24Tables, p, viewMode);
+    p.Day24Down = hit ? hit.down : 0;
+    p.Day24Up = hit ? hit.up : 0;
+    p.Day24Known = !!hit;
+  }
+
+  // sortKey 为空代表未排序：此时用默认顺序，而不是「不排」—— 快照里的顺序是采集端给的，
+  // 原样端上来会让默认视图每秒跟着采集顺序抖一次。
+  const effKey = sortKey || DEFAULT_SORT.key;
+  const effDir = sortKey ? sortDir : DEFAULT_SORT.dir;
+  const get = sortAccessors[effKey];
   procs.sort((a, b) => {
     const av = get(a);
     const bv = get(b);
-    if (av < bv) return -sortDir;
-    if (av > bv) return sortDir;
+    if (av < bv) return -effDir;
+    if (av > bv) return effDir;
     return 0;
   });
   return procs;
@@ -387,23 +533,26 @@ function buildRow(key) {
   tr.dataset.key = key;
   tr.tabIndex = 0;
   tr.innerHTML = `
-    <td><span class="cell-name">
+    <td data-copy-label="应用名"><span class="cell-name">
       <img class="proc-icon" alt="" hidden /><span class="proc-icon is-placeholder"></span>
       <span class="row-name"></span><span class="count-suffix"></span>
     </span></td>
-    <td class="td-peer"></td>
+    <td class="td-peer" data-copy-label="对端地址"></td>
     <td class="is-num td-pid"></td>
     <td class="is-num td-rate down"></td>
-    <td class="is-num td-rate up"></td>`;
+    <td class="is-num td-rate up"></td>
+    <td class="is-num td-day"></td>`;
   tr.refs = {
     img: tr.querySelector('img.proc-icon'),
     ph: tr.querySelector('.proc-icon.is-placeholder'),
     name: tr.querySelector('.row-name'),
     suffix: tr.querySelector('.count-suffix'),
     peer: tr.querySelector('.td-peer'),
+    nameCell: tr.children[0],
     pid: tr.children[2],
     down: tr.children[3],
     up: tr.children[4],
+    day: tr.children[5],
   };
   return tr;
 }
@@ -449,6 +598,9 @@ function updatePeerCell(cell, p) {
     cell.title = '';
     cell._peerIcon = undefined;
     cell._peerText = null;
+    // 清掉上一帧的复制值：行是按 key 复用的，对端从「有」变「无」时残留的 data-copy
+    // 会让右键菜单复制出一个几秒前就已经断开的 IP。
+    cell.dataset.copy = '';
     cell.classList.remove('has-peer');
     return;
   }
@@ -462,6 +614,9 @@ function updatePeerCell(cell, p) {
   }
   if (cell._peerText.nodeValue !== parts.text) cell._peerText.nodeValue = parts.text;
   if (cell.title !== parts.title) cell.title = parts.title;
+  // 复制走完整形态（IP:端口（服务名）），而不是格子里那份省略过的文本 ——
+  // 格子是给眼睛看的，剪贴板是给下一站（浏览器 / 终端 / 工单）用的。
+  if (cell.dataset.copy !== parts.detail) cell.dataset.copy = parts.detail;
   cell.classList.add('has-peer');
 }
 
@@ -473,6 +628,10 @@ function updateRow(tr, p, peakDown) {
     if (r.img.getAttribute('src') !== icon) r.img.src = icon;
     r.img.hidden = false;
     r.ph.hidden = true;
+    // hidden 只挡渲染，不挡 textContent —— 图标是后到的（首帧没有图标，下一帧才有），
+    // 留着上一帧写的首字母，右键「复制应用」与整行 TSV 就会把这个看不见的字母
+    // 一起带上（"V verge-mihomo"）。凡是按 textContent 取值的地方都躲不过。
+    r.ph.textContent = '';
   } else {
     r.img.hidden = true;
     r.ph.hidden = false;
@@ -480,10 +639,22 @@ function updateRow(tr, p, peakDown) {
   }
   if (r.name.textContent !== name) r.name.textContent = name;
   r.suffix.textContent = viewMode === 'app' ? `×${p.Pid}` : '';
+  // 应用列自己声明复制值：格子里除了名字还有首字母徽标（取不到图标时显示）与聚合计数，
+  // 按 textContent 取会把它们一起带走（"V verge-mihomo" / "msedge×3"）——
+  // 徽标是图标的替身、计数是编码，都不是名字的一部分。与对端列同一条规矩：
+  // 单元格声明了 data-copy 就用它，没声明才退回显示文本。
+  if (r.nameCell.dataset.copy !== name) r.nameCell.dataset.copy = name;
   updatePeerCell(r.peer, p);
   r.pid.textContent = viewMode === 'app' ? `${p.Pid} 个进程` : p.Pid;
   setRateCell(r.down, fmtRate(p.DownloadBytes || 0));
   setRateCell(r.up, fmtRate(p.UploadBytes || 0));
+
+  // 近 24 小时（历史库）：与右边两列不同，这是「累计量」不是「速率」——
+  // 单位里没有 /s，量级也大两三个档，两者靠单位就能分开读。
+  const day = day24Cell(p.Day24Known ? { down: p.Day24Down, up: p.Day24Up } : null);
+  setRateCell(r.day, day.text);
+  r.day.classList.toggle('is-blank', day.blank);
+  if (r.day.title !== day.title) r.day.title = day.title;
 
   // 占比不占列宽：整行背景一条从左起的极淡下载色渐变（§2.5）。
   // 渐变本身写在 styles.css 的 .proc-table tbody tr 里，这里只喂百分比 ——
@@ -519,6 +690,9 @@ function renderTable(snap) {
   return procs;
 }
 
+/** 把排序状态刷到界面上：当前列的箭头 + 读屏用的 aria-sort + 取消按钮的显隐。
+ *  单一出口 —— 状态机的每个分支都只调它，免得三处显示各自漂移。
+ *  sortKey 为空（未排序）时没有任何一列匹配，箭头和 is-sorted 自然全灭。 */
 function renderSortMarks() {
   const icon = window.NetPeekCommon.icon;
   for (const th of document.querySelectorAll('.proc-table th[data-sort]')) {
@@ -528,6 +702,9 @@ function renderSortMarks() {
     // 读屏用户靠 aria-sort 知道当前按哪列、什么方向排序，光标图形它读不到
     th.setAttribute('aria-sort', on ? (sortDir === -1 ? 'descending' : 'ascending') : 'none');
   }
+  // 「恢复默认排序」按钮只在排序生效时露面。它是排序状态在表外的唯一线索，
+  // 也是唯一一个不靠「再点一次当前列」就能取消排序的入口（见 §36）。
+  els.sortReset.hidden = !sortKey;
 }
 
 // 空态 / 异常态（§2.8）。骨架条只在「连接中」出现，转圈一律不用。
@@ -738,7 +915,9 @@ function setFieldsOffline() {
 function chartOpts(extra) {
   return Object.assign({
     window: WINDOW_SECS,
-    xLabels: [`-${WINDOW_SECS}s`, '现在'],
+    // 与悬浮读数同一套措辞（悬浮卡里写的是「37 秒前」），
+    // 原来是「-60s」——一屏里两种时间写法，而且负号在中文语境里像减法。
+    xLabels: [`${WINDOW_SECS} 秒前`, '现在'],
     formatY: C.axisRate,
     tipSuffix: '/s',   // 悬停读数的单位后缀（y 轴走紧凑 formatY，读数走全精度）
   }, extra);
@@ -750,7 +929,7 @@ let pausedIndex = -1;
 function drawBandwidth() {
   if (!els.bandwidthChart) return;
   if (!lastSnapshot) {
-    C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
+    C.line(els.bandwidthChart, chartOpts({ axesOnly: true }));
     return;
   }
   C.line(els.bandwidthChart, chartOpts({
@@ -788,7 +967,7 @@ function drawProcChart(p) {
   if (!els.inspLiveChart || els.inspLiveSec.hidden) return;
   const s = seriesFor(p);
   if (!s.down.length) {
-    C.line(els.inspLiveChart, chartOpts({ axesOnly: true, yMax: 1 }));
+    C.line(els.inspLiveChart, chartOpts({ axesOnly: true }));
     return;
   }
   C.line(els.inspLiveChart, chartOpts({
@@ -839,6 +1018,20 @@ function renderAll(snap) {
 
   renderInspector(snap, procs);
   drawBandwidth();
+  syncTableScrollEdges();
+}
+
+// 表格的两个滚动装饰态（表头投影 / 底部渐隐，样式在 styles.css）：
+// 行数随进程数每秒变，滚动高度也跟着变，所以不能只在 scroll 事件里更新 ——
+// 每帧渲染完也刷一次。读 scrollHeight 会强制布局，但一帧只此一次，
+// 且 renderTable 本来就已经在写 DOM 了。
+function syncTableScrollEdges() {
+  const el = els.tableWrap;
+  if (!el || el.hidden) return;
+  const max = el.scrollHeight - el.clientHeight;
+  el.classList.toggle('is-scrollable', max > 1);
+  el.classList.toggle('is-scrolled', max > 1 && el.scrollTop > 1);
+  el.classList.toggle('is-end', max > 1 && el.scrollTop >= max - 1);
 }
 
 function onSnapshot(snap) {
@@ -863,7 +1056,8 @@ function onDisconnected() {
   setStatus('offline');
   setProcState('offline');
   setFieldsOffline();
-  C.line(els.bandwidthChart, chartOpts({ axesOnly: true, yMax: 1 }));
+  blankRates();
+  C.line(els.bandwidthChart, chartOpts({ axesOnly: true }));
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateServiceOffline();
 }
 
@@ -929,13 +1123,29 @@ async function bindWindowFrame() {
 
 // ===== 事件绑定 =====
 
+/** 当前是否有非折叠的文本选区。
+ *  表格里的对端 / 应用名是可选中的（§35 让 IP 这类值能复制出去），而在可选文本上
+ *  拖选一次，mouseup 会补一个 click —— 那一下不该顺手把行的选中态也翻过来。
+ *  单击时选区是折叠的（mousedown 会先收起旧选区），所以正常点选不受影响。 */
+function hasTextSelection() {
+  const sel = document.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().trim() !== '';
+}
+
 function bindTable() {
+  // 表头投影 / 底部渐隐跟着滚动位置翻转。每帧渲染后也会再刷一次
+  // （行数在变，滚动高度跟着变，只靠 scroll 事件会停在上一帧的判断上）。
+  els.tableWrap.addEventListener('scroll', syncTableScrollEdges, { passive: true });
+
   for (const th of document.querySelectorAll('.proc-table th[data-sort]')) {
     th.tabIndex = 0;
+    // 循环说明写进列头的悬浮提示：改三态之后「怎么取消排序」在这块区域没有任何静态线索，
+    // 而点之前一定会先悬浮一下。已有 title 的列（近 24 小时写着口径）追加而不是覆盖。
+    th.title = th.title ? `${th.title}；${SORT_HINT}` : SORT_HINT;
     const toggle = () => {
-      const key = th.dataset.sort;
-      if (sortKey === key) sortDir = -sortDir;
-      else { sortKey = key; sortDir = key === 'name' ? 1 : -1; }
+      const next = nextSortState(th.dataset.sort, sortKey, sortDir);
+      sortKey = next.key;
+      sortDir = next.dir;
       renderSortMarks();
       if (lastSnapshot) renderAll(lastSnapshot);
     };
@@ -945,8 +1155,18 @@ function bindTable() {
     });
   }
 
+  // 表外的取消入口。隐藏时不必先判：默认态下它是 hidden，点不到。
+  els.sortReset.addEventListener('click', () => {
+    sortKey = '';
+    sortDir = DEFAULT_SORT.dir;
+    renderSortMarks();
+    if (lastSnapshot) renderAll(lastSnapshot);
+  });
+
   // 选中同一行再点一次就取消，回到总览态
   els.rows.addEventListener('click', (e) => {
+    // 在可选中的单元格文本上拖选，mouseup 会补一个 click —— 那一下不该翻动行选中
+    if (hasTextSelection()) return;
     const tr = e.target.closest('tr[data-key]');
     if (!tr) return;
     selected = selected && selected.keyStr === tr.dataset.key ? null : { keyStr: tr.dataset.key };
@@ -1066,6 +1286,10 @@ async function boot() {
       if (e.payload === 'connected') setProcState('connecting');
       else onDisconnected();
     });
+    // 反向握手：两个监听都挂上了，才允许 Rust 侧去连管道。采集端连上就推首帧，
+    // 而首帧是唯一带全量图标的一帧，发在监听登记之前就永远丢了（事件不缓冲，
+    // iconCache 也没有补发机制）。不 await：信号是通知不是请求，失败不该拖住启动链。
+    try { window.__TAURI__.core.invoke('frontend_ready').catch(() => {}); } catch { /* 忽略 */ }
   } else {
     // 浏览器里直接开 index.html 时没有管道，停在异常态而不是空白
     onDisconnected();
@@ -1079,6 +1303,9 @@ async function boot() {
   if (window.NetPeekThemeUI) { try { await window.NetPeekThemeUI.init(); } catch { /* 用默认令牌 */ } }
   if (window.NetPeekSettingsUI) { try { await window.NetPeekSettingsUI.init(); } catch { /* 用默认设置 */ } }
   await loadTodayBase();
+  // 近 24 小时列表：先取一次（首帧就该有数），之后每分钟翻转后自刷
+  await loadDay24();
+  scheduleDay24();
 
   drawBandwidth();
   render30Day(null, true);
@@ -1086,6 +1313,14 @@ async function boot() {
   // 放在所有 init 之后：theme-ui / settings-ui / history-ui 的 $() 是在各自
   // init 里跑的，早报会把它们还没查的节点算成「不缺」。
   window.NetPeekCommon.reportMissingIds();
+
+  // 启动动效收尾：这里才允许揭幕。
+  // 位置很关键 —— 必须在上面每一行之后。早报（比如放在 loadDay24 之前）会让
+  // 用户看到「今天的数还没到、近 24 小时列表是空的」那种界面，
+  // 而这正是启动层本来的职责：把没就绪的样子挡住。
+  // 注意第一帧快照不在这一串里（它由管道异步推来），所以揭幕时可能仍是「未连接」——
+  // 那是真实状态，界面自己有对应的提示，不该为了好看再压住。
+  if (window.NetPeekBoot) window.NetPeekBoot.ready();
 }
 
 boot();

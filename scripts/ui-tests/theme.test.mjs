@@ -497,4 +497,57 @@ section('显示方式与背景亮度：迁移与守卫');
   ok(fBright >= f, '提亮后浓度地板不降');
 }
 
+section('有效深浅上报给后端（§37 托盘原生菜单跟随主题）');
+{
+  // 托盘菜单是系统画的 HMENU，只吃「应用是深是浅」这一个进程级开关；
+  // 而有效深浅只有皮肤引擎知道（皮肤能把方向钉死，与系统设置无关）。
+  // 这一节钉住的就是这条线：applyTokens 上屏的那个深浅，必须原样上报给后端。
+  const invokes = [];
+  const ctx = loadScripts(['vendor/chroma.min.js', 'vendor/color-thief.min.js', 'theme.js'], {
+    document: {
+      documentElement: { style: { setProperty() {} }, classList: { add() {}, remove() {} } },
+    },
+    matchMedia: () => ({ matches: false }),
+  });
+  ctx.__TAURI__ = { core: { invoke: (cmd, args) => { invokes.push([cmd, args]); return Promise.resolve(); } } };
+  const TT = ctx.NetPeekTheme;
+
+  // 朴素（深底浅字）→ 深色；浅色皮肤 → 浅色
+  TT.applyTokens(TT.SKINS.plain.tokens, { silent: true });
+  eq(invokes.length, 1, '上屏一次令牌上报一次');
+  eq(invokes[0][0], 'set_tray_theme', '上报的是托盘主题命令');
+  eq(invokes[0][1].dark, true, '深底皮肤 → 告诉后端是深色');
+
+  // 同一个值重复上屏不再过一次 IPC：拖不透明度滑杆会让 applyTokens 每帧跑一次
+  TT.applyTokens(TT.SKINS.plain.tokens, { silent: true });
+  eq(invokes.length, 1, '深浅没变就不重复上报（滑杆每帧上屏也不能刷 IPC）');
+
+  TT.applyTokens(TT.SKINS.light.tokens, { silent: true });
+  eq(invokes.length, 2, '换到浅色皮肤：必须上报');
+  eq(invokes[1][1].dark, false, '浅底皮肤 → 告诉后端是浅色');
+
+  // 没有 __TAURI__（浏览器里直接开 index.html、预览脚本）时不能抛
+  const plainCtx = loadScripts(['vendor/chroma.min.js', 'vendor/color-thief.min.js', 'theme.js'], {
+    document: {
+      documentElement: { style: { setProperty() {} }, classList: { add() {}, remove() {} } },
+    },
+    matchMedia: () => ({ matches: false }),
+  });
+  let threw = '';
+  try { plainCtx.NetPeekTheme.applyTokens(plainCtx.NetPeekTheme.SKINS.plain.tokens, { silent: true }); } catch (e) { threw = String(e); }
+  eq(threw, '', '无 __TAURI__ 时静默跳过，不抛');
+
+  // invoke 失败（旧后端没这个命令 / IPC 挂了）也不能冒泡出来
+  const failCtx = loadScripts(['vendor/chroma.min.js', 'vendor/color-thief.min.js', 'theme.js'], {
+    document: {
+      documentElement: { style: { setProperty() {} }, classList: { add() {}, remove() {} } },
+    },
+    matchMedia: () => ({ matches: false }),
+  });
+  failCtx.__TAURI__ = { core: { invoke: () => { throw new Error('no such command'); } } };
+  let threw2 = '';
+  try { failCtx.NetPeekTheme.applyTokens(failCtx.NetPeekTheme.SKINS.plain.tokens, { silent: true }); } catch (e) { threw2 = String(e); }
+  eq(threw2, '', 'invoke 同步抛错时吞掉，不影响上屏');
+}
+
 process.exit(report('theme.test'));

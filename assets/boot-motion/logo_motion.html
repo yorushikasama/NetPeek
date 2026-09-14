@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NetPeek 启动动效 · 审阅页</title>
+
+<!-- 这个页面是「设计面」，不是交付物本身。
+     交付物是两份：src/NetPeek.App/ui/boot.css（编排）+ 注入 index.html 的锁定版式片段。
+     本页把它们按真实窗口尺寸拼起来，用来审阅 / 截帧 / 做终帧契约校验。
+
+     两份 CSS 都链过去，不复制一份：预览与应用如果各持一套样式，
+     审阅就退化成「看另一个东西」，再像也没意义。 -->
+<link rel="stylesheet" href="../../src/NetPeek.App/ui/tokens.css" />
+<link rel="stylesheet" href="../../src/NetPeek.App/ui/boot.css" />
+
+<style>
+  /* ---------- 审阅页自己的外壳（不参与交付，不进应用） ---------- */
+
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: #14161a;
+    color: #c9ced6;
+    font-family: var(--font-ui);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    user-select: none;
+  }
+
+  /* 棋盘格：启动层的四角是透的（窗口 transparent:true），
+     纯色背景看不出圆角是否真的透出去，棋盘格一眼可辨。 */
+  .pv-stage {
+    padding: 22px;
+    background-color: #0e1013;
+    background-image:
+      linear-gradient(45deg, #191c21 25%, transparent 25%, transparent 75%, #191c21 75%),
+      linear-gradient(45deg, #191c21 25%, transparent 25%, transparent 75%, #191c21 75%);
+    background-size: 22px 22px;
+    background-position: 0 0, 11px 11px;
+    border-radius: 16px;
+  }
+
+  /* 复刻 .frame 的表面：1px --line-soft 描边 + 10px 圆角 + --bg 底。
+     启动层挂在 .frame 内部，靠 .frame 的 overflow:hidden 拿到圆角裁剪，
+     所以这里也必须真的裁一次，否则审阅看到的圆角是假的。
+
+     box-sizing 必须显式写成 border-box：应用侧 styles.css 有全局 `* { box-sizing:
+     border-box }`，而本页只链了 tokens.css + boot.css。少了这一条，1180×720 会变成
+     「内容 1180 + 两侧各 1px 边框」，画布比应用大 2px，截帧的像素坐标全部偏 1。 */
+  .pv-window {
+    box-sizing: border-box;
+    position: relative;
+    width: 1180px;
+    height: 720px;
+    background: var(--bg);
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  /* ---------- 控制条 ---------- */
+
+  .pv-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    background: #1b1e23;
+    border: 1px solid #2a2e35;
+    border-radius: 10px;
+    font-size: 12px;
+    color: #9aa1aa;
+  }
+  .pv-bar button,
+  .pv-bar select {
+    font: inherit;
+    color: #dfe3e8;
+    background: #24282e;
+    border: 1px solid #343941;
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  .pv-bar input[type="range"] { width: 300px; accent-color: #f0963f; }
+  .pv-bar .pv-num {
+    font-family: var(--font-num);
+    font-variant-numeric: tabular-nums;
+    color: #e6e9ed;
+    min-width: 62px;
+    display: inline-block;
+  }
+  .pv-bar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .pv-sep { width: 1px; height: 20px; background: #2f343b; }
+  .pv-hint { color: #6f767f; }
+
+  /* ---------- 裸模式：给截帧用 ---------- */
+  /* 舞台贴到窗口左上、无内衬、无圆角外壳，视口尺寸 == 窗口尺寸时
+     截出来就是一枚地道的窗口（圆角处透明，配 --bg transparent 可叠在任何底上）。 */
+  body.is-bare { background: transparent; display: block; }
+  body.is-bare .pv-stage {
+    position: fixed;
+    inset: 0;
+    padding: 0;
+    border-radius: 0;
+    background: none;
+  }
+  body.is-bare .pv-window { margin: 0; }
+  body.is-bare .pv-bar { display: none; }
+</style>
+</head>
+<body>
+
+<div class="pv-stage" id="stage">
+  <div class="pv-window" id="pvWindow">
+
+    <!-- 启动动效层。在应用里它是 .frame 的最后一个子元素，
+         .frame 的 overflow:hidden + 10px 圆角负责裁剪，这里同构。 -->
+    <div class="np-boot" id="boot">
+      <!-- viewBox 固定 1180×720 = 主窗口设计尺寸（tauri.conf.json）。
+           窗口可缩（最小 940×620），preserveAspectRatio 负责等比适配，版式比例不破。 -->
+      <svg id="np-lockup" viewBox="0 0 1180 720" preserveAspectRatio="xMidYMid meet"
+           role="img" aria-label="NetPeek">
+<!-- @lockup:start -->
+<style id="np-lockup-vars">
+  /* 由 tools/compose_lockup.py 生成，勿手改——改版式常量后重跑脚本 */
+  #np-lockup {
+    --np-word-x: 409.0px;        /* 字标裁剪矩形左边界（屏幕坐标） */
+    --np-word-w: 362.0px;        /* 裁剪矩形宽 */
+    --np-word-wipe: 362.0px;    /* 擦除推移距离 = 裁剪矩形宽 */
+    --np-mark-h: 197.981px;
+    --np-block-h: 326.871px;
+  }
+</style>
+
+<defs>
+  <!-- 主波沿路径渐变：两端偏橘、峰顶最亮（源图线芯实测 #F49D49 → #FBD77F → #F0A14A）。
+       stop-color 走 CSS 变量，换配色只改外层变量，几何不受影响。
+       x1/x2 是**源图坐标**（237..1013）——渐变挂在标记组内，跟着同一个 scale 走。 -->
+  <linearGradient id="np-g-main" gradientUnits="userSpaceOnUse"
+                  x1="237" y1="0" x2="1013" y2="0">
+    <stop offset="0"   style="stop-color: var(--np-main-a)"/>
+    <stop offset="0.5" style="stop-color: var(--np-main-b)"/>
+    <stop offset="1"   style="stop-color: var(--np-main-c)"/>
+  </linearGradient>
+
+  <!-- 外发光：主波的加宽模糊复制。它是伴生部件，动效上滞后主波 140ms。
+       模糊半径 11 是**源图坐标**，随标记语系一起缩放（标记 400 宽时屏幕上约 5.5px）。 -->
+  <filter id="np-bloom" x="-30%" y="-30%" width="160%" height="160%"
+          color-interpolation-filters="sRGB">
+    <feGaussianBlur stdDeviation="11"/>
+  </filter>
+
+  <!-- 字标擦除揭示：让裁剪矩形自己左移一段，而不是动它的 width。
+       动 SVG 几何属性（x/y/width/height）各引擎支持度不一，动 transform 处处都稳。 -->
+  <clipPath id="np-word-clip" clipPathUnits="userSpaceOnUse">
+    <rect id="np-word-clip-rect" x="409.0" y="436.546"
+          width="362.0" height="100.89"/>
+  </clipPath>
+</defs>
+
+<!-- ================= 标记：两条波形线 =================
+     版式由 compose_lockup.py 从路径 d 真算，不是手凑的：
+     源墨迹盒 [225.25, 445.219, 1024.75, 840.933] → ×0.500313 → 屏幕 400.0×197.981
+     定位 translate(277.305, -26.184)，墨迹顶边 y=196.565
+     注意：外发光路径**不参与**上面这个盒——拿发光算会让标记整体缩小并偏上。 -->
+<g id="np-mark" transform="translate(277.305,-26.184) scale(0.500313)">
+  <g class="np-glow-wrap">
+    <path id="pulse-glow" pathLength="1"
+          d="M237 632 L532.487 631.969 Q555.3 632 563.717 610.779 L621.719 465.015 Q628.2 448.8 634.001 465.262 L709.071 678.492 Q716.9 700.7 730.052 681.2 L754.159 645.6 Q763.5 631.9 780.066 631.888 L1013 632.3"
+          fill="none" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#np-bloom)"/>
+  </g>
+  <path id="pulse-line" pathLength="1"
+        d="M237 632 L532.487 631.969 Q555.3 632 563.717 610.779 L621.719 465.015 Q628.2 448.8 634.001 465.262 L709.071 678.492 Q716.9 700.7 730.052 681.2 L754.159 645.6 Q763.5 631.9 780.066 631.888 L1013 632.3"
+        fill="none" stroke-width="23.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="pulse-echo" pathLength="1"
+        d="M248 802 L542.129 801.973 Q556.8 802 565.846 790.361 L610.626 732.705 Q626.1 712.7 640.035 733.871 L699.047 823.72 Q708 837.3 721.151 827.722 L755.316 802.734 Q756.3 802 757.485 802.026 L1003 802"
+        fill="none" stroke-width="18.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+
+<!-- ================= 字标：NetPeek =================
+     字形取 Segoe UI Semibold Version 5.71（seguisb.ttf）矢量描边。
+     为什么不直接写 <text>：动效资产必须确定性，<text> 的最终宽度取决于渲染机装了什么字体；
+     而且逐字形元素才能做揭示动效。
+
+     坐标系仍是 font units 且 **y 向上**；翻转与缩放只发生在下面这一层，
+     再往里就都是 TrueType 原生方向了。
+     墨迹盒 [177, -24, 7783, 1516] → ×0.04733105 → 屏幕 360.0×72.89
+     （CapHeight 折算 67.873px；注意它 < 墨迹高 72.89px，
+      因为 k 的上升部比 CapHeight 还高 5.7%，e 的弧底还往下溢 1.7%）
+     墨迹顶边 y=450.546，基线 y=522.299，墨迹底边 y=523.435 -->
+<g clip-path="url(#np-word-clip)">
+  <g id="np-wordmark" transform="translate(401.6224,522.2995) scale(0.04733105,-0.04733105)">
+    <path class="np-wm-glyph" data-char="N" transform="translate(0,0)" d="M1393 0H1133L448 1054Q422 1094 405 1137H399Q407 1091 407 940V0H177V1434H454L1116 405Q1158 341 1170 317H1174Q1164 374 1164 510V1434H1393Z"/>
+    <path class="np-wm-glyph" data-char="e" transform="translate(1571,0)" d="M1018 449H320Q324 307 407.5 230.0Q491 153 637 153Q801 153 938 251V64Q798 -24 568 -24Q342 -24 213.5 115.5Q85 255 85 508Q85 747 226.5 897.5Q368 1048 578 1048Q788 1048 903.0 913.0Q1018 778 1018 538ZM794 613Q793 738 735.0 807.5Q677 877 575 877Q475 877 405.5 804.0Q336 731 320 613Z"/>
+    <path class="np-wm-glyph" data-char="t" transform="translate(2659,0)" d="M691 11Q623 -23 512 -23Q214 -23 214 263V842H43V1024H214V1261L446 1327V1024H691V842H446V330Q446 239 479.0 200.0Q512 161 589 161Q648 161 691 195Z"/>
+    <path class="np-wm-glyph" data-char="P" transform="translate(3399,0)" d="M414 520V0H177V1434H612Q859 1434 995.0 1319.0Q1131 1204 1131 995Q1131 786 989.0 653.0Q847 520 605 520ZM414 1238V714H568Q721 714 801.0 785.0Q881 856 881 985Q881 1238 587 1238Z"/>
+    <path class="np-wm-glyph" data-char="e" transform="translate(4527,0)" d="M1018 449H320Q324 307 407.5 230.0Q491 153 637 153Q801 153 938 251V64Q798 -24 568 -24Q342 -24 213.5 115.5Q85 255 85 508Q85 747 226.5 897.5Q368 1048 578 1048Q788 1048 903.0 913.0Q1018 778 1018 538ZM794 613Q793 738 735.0 807.5Q677 877 575 877Q475 877 405.5 804.0Q336 731 320 613Z"/>
+    <path class="np-wm-glyph" data-char="e" transform="translate(5615,0)" d="M1018 449H320Q324 307 407.5 230.0Q491 153 637 153Q801 153 938 251V64Q798 -24 568 -24Q342 -24 213.5 115.5Q85 255 85 508Q85 747 226.5 897.5Q368 1048 578 1048Q788 1048 903.0 913.0Q1018 778 1018 538ZM794 613Q793 738 735.0 807.5Q677 877 575 877Q475 877 405.5 804.0Q336 731 320 613Z"/>
+    <path class="np-wm-glyph" data-char="k" transform="translate(6703,0)" d="M1080 0H786L388 492H384V0H151V1516H384V555H388L764 1024H1043L620 530Z"/>
+  </g>
+</g>
+<!-- @lockup:end -->
+      </svg>
+    </div>
+
+  </div>
+</div>
+
+<div class="pv-bar" id="bar">
+  <button id="pvReplay" type="button">重播</button>
+  <span class="pv-sep"></span>
+  <label>时间轴 <input id="pvScrub" type="range" min="0" max="2400" step="10" value="0" /></label>
+  <span class="pv-num" id="pvT">0 ms</span>
+  <span class="pv-sep"></span>
+  <label>配色
+    <select id="pvPreset">
+      <option value="">品牌琥珀</option>
+      <option value="chrome">中性反白</option>
+    </select>
+  </label>
+  <span class="pv-sep"></span>
+  <label><input id="pvStatic" type="checkbox" /> 静态终帧</label>
+  <label><input id="pvLoop" type="checkbox" /> 循环</label>
+  <span class="pv-sep"></span>
+  <span class="pv-hint">?t=毫秒 · ?static=1 · ?preset=chrome · ?bare=1 · ?loop=1</span>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const boot = document.getElementById("boot");
+  const q = new URLSearchParams(location.search);
+  // 总时长：2000ms 动效 + 400ms 定格。审查页的滑杆上限、静态模式的显示值、
+  // 循环模式的重播间隔都从这里来 —— 与 boot.css 的 ANIM/HOLD 是同一组数，
+  // 改那边必须改这里（唯一会「看着对但其实是旧时间线」的地方）。
+  const TOTAL = 2400;
+  const scrub = document.getElementById("pvScrub");
+  const tOut = document.getElementById("pvT");
+  const preset = document.getElementById("pvPreset");
+  const chkStatic = document.getElementById("pvStatic");
+  const chkLoop = document.getElementById("pvLoop");
+  const btnReplay = document.getElementById("pvReplay");
+
+  // --- URL 参数：优先于控件，方便命令行截帧 ---
+  if (q.get("preset")) { boot.classList.add("preset-" + q.get("preset")); preset.value = q.get("preset"); }
+  if (q.get("bare") === "1") document.body.classList.add("is-bare");
+
+  let capture = false;
+
+  /* 定位到时间线时刻 t（毫秒，绝对时刻，含各元素的 delay）。
+     走 Web Animations 的 currentTime 而不是「把 t 写进 animation-delay」：
+     后者在「暂停一个已经在跑的动画」时，停表时间取决于暂停那一刻已经走了多久，
+     于是会混进几十毫秒、且每次冷启动都不同的启动偏移。
+     currentTime 是时间线上的绝对时刻，跟页面何时加载、何时暂停都没关系。 */
+  function seek(t) {
+    for (const a of boot.getAnimations({ subtree: true })) {
+      a.pause();
+      a.currentTime = t;
+    }
+  }
+
+  function setT(ms) {
+    tOut.textContent = ms + " ms";
+    if (scrub.value !== String(ms)) scrub.value = String(ms);
+  }
+
+  // 暴露给截图脚本：连拍时按时刻定位，走的就是下面这条路径，
+  // 而不是另写一份「给测试用的」逻辑 —— 两份逻辑迟早会不一致。
+  window.__npSeek = seek;
+
+  function enterCapture(ms) {
+    capture = true;
+    chkStatic.checked = false;
+    boot.classList.remove("is-static");
+    boot.classList.add("is-capture");
+    seek(ms);
+    setT(ms);
+  }
+
+  function leaveCapture() {
+    capture = false;
+    boot.classList.remove("is-capture");
+    setT(0);
+  }
+
+  function replay() {
+    leaveCapture();
+    for (const a of boot.getAnimations({ subtree: true })) {
+      a.currentTime = 0;
+      a.play();
+    }
+  }
+
+  // --- 控件 ---
+  btnReplay.addEventListener("click", replay);
+
+  scrub.addEventListener("input", () => {
+    enterCapture(parseInt(scrub.value, 10) || 0);
+  });
+
+  preset.addEventListener("change", () => {
+    boot.classList.remove("preset-chrome");
+    if (preset.value) boot.classList.add("preset-" + preset.value);
+  });
+
+  chkStatic.addEventListener("change", () => {
+    capture = false;
+    boot.classList.remove("is-capture");
+    boot.classList.toggle("is-static", chkStatic.checked);
+    if (!chkStatic.checked) replay();
+  });
+
+  let loopTimer = null;
+  chkLoop.addEventListener("change", () => {
+    chkLoop.blur();
+    if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
+    if (chkLoop.checked) {
+      replay();
+      loopTimer = setInterval(replay, TOTAL + 420);
+    }
+  });
+
+  // --- 启动模式 ---
+  // 顺序要紧：先按 ?static=1 落终态，否则动画会先跑一遍再被抹掉（看得见的闪）。
+  if (q.get("static") === "1") {
+    boot.classList.add("is-static");
+    chkStatic.checked = true;
+    setT(TOTAL);
+  } else if (q.has("t")) {
+    seek(parseFloat(q.get("t")) || 0);   // 先定位，再挂 is-capture（挂类会加 paused 兜底）
+    boot.classList.add("is-capture");
+    capture = true;
+    setT(parseFloat(q.get("t")) || 0);
+  } else if (q.get("loop") === "1") {
+    chkLoop.checked = true;
+    chkLoop.dispatchEvent(new Event("change"));
+  } else {
+    setT(0);
+  }
+
+  // --- 就绪信号：光栅化脚本用 --p2m-ready 等它 ---
+  // 等两帧再置位：第一帧样式刚算完，字体/渐变/滤镜可能还没上屏，
+  // 早截一帧就会拍到一个「线宽对但没发光」的半成品。
+  const ready = () => requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.__p2mReady = true;
+  }));
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(ready);
+  else ready();
+})();
+</script>
+</body>
+</html>

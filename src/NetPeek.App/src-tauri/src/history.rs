@@ -477,6 +477,58 @@ pub fn history_range(
     serde_json::to_string(&rows).map_err(|e| format!("区间聚合序列化失败: {e}"))
 }
 
+/// 近 N 小时按**进程实例**聚合的结果行。pid + start_ts 就是进程身份键，
+/// 与库里的主键、前端的行 key 是同一套（见文件头「表结构」）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTotalRow {
+    name: String,
+    pid: i64,
+    start_ts: i64,
+    down: i64,
+    up: i64,
+}
+
+/// 近 N 小时按进程实例聚合。SQL 抽成独立函数供单测直接打内存库。
+///
+/// 为什么不只按 name 分组：监控屏每一行就是一个进程实例（行 key 也是
+/// `pid:启动时刻`），按名字合并会让同一应用的多个实例显示同一个数 ——
+/// 看起来像「每个 chrome 进程都用了 3 GB」。
+/// name 仍留在分组键里：进程改名（少见）时两个名字各留一行，前端按身份键
+/// 把同键行累加，不会因为换个名字就丢掉前半段数据。
+fn query_process_totals(conn: &Connection, since: i64) -> rusqlite::Result<Vec<ProcessTotalRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, pid, start_ts, SUM(down) AS down, SUM(up) AS up
+         FROM minute_stats WHERE ts >= ?1
+         GROUP BY name, pid, start_ts
+         ORDER BY down DESC",
+    )?;
+    let rows = stmt.query_map(params![since], |r| {
+        Ok(ProcessTotalRow {
+            name: r.get(0)?,
+            pid: r.get(1)?,
+            start_ts: r.get(2)?,
+            down: r.get(3)?,
+            up: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 监控屏「近 24 小时」列的数据源：最近 `hours` 小时里每个进程实例的合计流量。
+/// 口径与 `history_daily` 完全一致（同一张 minute_stats、同一批 SUM），
+/// 只是分组键从「天 × 名字」换成「进程身份」—— 两处对不上时，同一份数据在
+/// 表格和 30 天图里会给出不同的数，那是这个项目里最难查的一类 bug。
+#[tauri::command]
+pub fn history_process_totals(app: AppHandle, hours: i64) -> Result<String, String> {
+    let (conn, _) = open_db(&app)?;
+    // 夹到 [1 小时, 30 天]：传 0 会退化成「全部历史」，传一个巨大的数会算出
+    // 未来的下界（结果恒为空，界面看起来像「历史库没数据」）。
+    let since = now_secs() - hours.clamp(1, 24 * 30) * HOUR;
+    let rows = query_process_totals(&conn, since).map_err(|e| format!("查询进程聚合失败: {e}"))?;
+    serde_json::to_string(&rows).map_err(|e| format!("进程聚合序列化失败: {e}"))
+}
+
 /// 清空全部历史并 VACUUM 回收空间。
 #[tauri::command]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
@@ -741,5 +793,106 @@ mod range_tests {
                 .unwrap();
             assert_eq!(hh, "00", "日桶键必须落在本地零点（本地小时 00）");
         }
+    }
+}
+
+#[cfg(test)]
+mod process_total_tests {
+    use super::*;
+
+    /// 建表 + 灌入 (ts, pid, start_ts, name, down, up)，返回可用的 state。
+    fn seeded(rows: &[(i64, i64, i64, &str, i64, i64)]) -> Arc<HistoryState> {
+        let state = HistoryState::new();
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            for &(ts, pid, start_ts, name, down, up) in rows {
+                conn.execute(
+                    "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![ts, pid, start_ts, name, down, up],
+                )
+                .unwrap();
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn query_process_totals_accumulates_across_minutes() {
+        let state = seeded(&[
+            (1_700_000_040, 7, 100, "a.exe", 10, 1),
+            (1_700_000_100, 7, 100, "a.exe", 20, 2),
+            (1_700_000_160, 7, 100, "a.exe", 30, 3),
+            (1_700_000_160, 8, 200, "b.exe", 5, 5),
+        ]);
+        let conn = state.conn.lock().unwrap();
+        let rows = query_process_totals(&conn, 0).unwrap();
+        assert_eq!(rows.len(), 2, "两个进程身份两行");
+        // 按下载降序：合成一个数才是「近 24 小时用了多少」
+        assert_eq!(
+            (rows[0].name.as_str(), rows[0].pid, rows[0].start_ts),
+            ("a.exe", 7, 100)
+        );
+        assert_eq!((rows[0].down, rows[0].up), (60, 6), "同一实例跨分钟累加");
+        assert_eq!((rows[1].down, rows[1].up), (5, 5));
+    }
+
+    #[test]
+    fn query_process_totals_keeps_reused_pid_apart() {
+        // 窗口内同一个 PID 先后被两个进程用过：必须给两行。合并了就是把
+        // 后一个进程的流量算到前一个头上，而「谁是罪魁祸首」正是这张表要回答的。
+        let state = seeded(&[
+            (1_700_000_040, 7, 100, "old.exe", 10, 0),
+            (1_700_000_640, 7, 200, "new.exe", 20, 0),
+        ]);
+        let conn = state.conn.lock().unwrap();
+        let rows = query_process_totals(&conn, 0).unwrap();
+        assert_eq!(rows.len(), 2, "PID 复用按启动时间拆成两个身份");
+        let sum: i64 = rows.iter().map(|r| r.down).sum();
+        assert_eq!(sum, 30, "拆行后总量守恒");
+    }
+
+    #[test]
+    fn query_process_totals_respects_window() {
+        // 「近 24 小时」是滚动窗口，不是累计：窗口外的行一字节都不能进来，
+        // 否则这个数会悄悄变成「自安装以来的总量」。
+        let base = 1_700_000_000;
+        let state = seeded(&[
+            (base - 3600, 7, 100, "a.exe", 999, 0),
+            (base, 7, 100, "a.exe", 10, 1),
+        ]);
+        let conn = state.conn.lock().unwrap();
+        let rows = query_process_totals(&conn, base).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].down, 10, "只统计 ts >= since 的行");
+    }
+
+    #[test]
+    fn query_process_totals_agrees_with_range_totals() {
+        // 同一份数据按「进程身份」和按「小时桶」分组，总量必须相等。
+        // 对不上时表格里的近 24 小时会和历史屏的合计打架，
+        // 而用户没有任何办法判断哪边是对的。
+        let base = 1_700_000_000;
+        let mut seed_rows = Vec::new();
+        for i in 0..40i64 {
+            seed_rows.push((base + i * 60, 7, 100, "a.exe", 10, 1));
+            seed_rows.push((base + i * 60, 8, 200, "b.exe", 7, 2));
+        }
+        let state = seeded(&seed_rows);
+        let conn = state.conn.lock().unwrap();
+        let end = base + 40 * 60;
+        let by_proc: i64 = query_process_totals(&conn, base)
+            .unwrap()
+            .iter()
+            .map(|r| r.down)
+            .sum();
+        let by_hour: i64 = query_range_buckets(&conn, base, end, HOUR, 0)
+            .unwrap()
+            .iter()
+            .map(|r| r.down)
+            .sum();
+        assert_eq!(by_proc, by_hour, "两种分组的总量必须相等");
+        assert_eq!(by_proc, 40 * 17, "40 分钟 × 17 字节/分钟");
     }
 }

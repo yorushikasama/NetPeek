@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="1254" height="1254"
+     id="logo-root" role="img" aria-label="NetPeek">
+  <!--
+    NetPeek 波形标记 —— motion-ready（pixel2motion Phase 2 产物）
+
+    范围：只做源图里的**两条波形线**（主波 + 次级暗波），不含圆角底片、不含字标。
+    字标 "NetPeek" 是另一份资产（outputs/wordmark_seguisb.svg.frag），
+    两者在 logo_motion.html 里按 lockup 版式合成。
+
+    坐标刻意保持与源图 1:1（1254×1254），这样几何 QA 可以把渲染结果直接叠回源图，
+    逐列误差就是像素级可读的。
+
+    三条路径全部带 pathLength="1"：描线动画只需 stroke-dasharray:1 + dashoffset:1→0，
+    不必依赖运行时的 getTotalLength()（那条路在动效开始前会闪一下）。
+
+    配色走 CSS 自定义属性，两套预设（见 <style>）：
+      默认         品牌琥珀 —— 取自源图实测（主波沿路径渐变，峰顶最亮）
+      .preset-chrome 中性反白 —— 对齐 tokens.css「琥珀不进 chrome」的约束
+    -->
+  <defs>
+    <!-- 主波沿路径渐变：两端偏橘、峰顶最亮（源图线芯 13 点实测 #F49D49 → #FBD77F → #F0A14A） -->
+    <linearGradient id="g-main-brand" gradientUnits="userSpaceOnUse" x1="237" y1="0" x2="1013" y2="0">
+      <stop offset="0" stop-color="#F49D49"/>
+      <stop offset="0.5" stop-color="#FBD77F"/>
+      <stop offset="1" stop-color="#F0A14A"/>
+    </linearGradient>
+
+    <!-- 次级暗波：源图实测是「极低对比的暖中性灰」，峰处略偏暖 -->
+    <linearGradient id="g-echo-brand" gradientUnits="userSpaceOnUse" x1="248" y1="0" x2="1003" y2="0">
+      <stop offset="0" stop-color="#2A2F2F"/>
+      <stop offset="0.5" stop-color="#3E372E"/>
+      <stop offset="1" stop-color="#272A2C"/>
+    </linearGradient>
+
+    <!-- 中性反白预设：保留「峰顶最亮」的亮度结构，但整体走无彩度灰 -->
+    <linearGradient id="g-main-chrome" gradientUnits="userSpaceOnUse" x1="237" y1="0" x2="1013" y2="0">
+      <stop offset="0" stop-color="#c9cdd4"/>
+      <stop offset="0.5" stop-color="#f4f5f7"/>
+      <stop offset="1" stop-color="#d7dade"/>
+    </linearGradient>
+    <linearGradient id="g-echo-chrome" gradientUnits="userSpaceOnUse" x1="248" y1="0" x2="1003" y2="0">
+      <stop offset="0" stop-color="#4a4f57"/>
+      <stop offset="0.5" stop-color="#5c626b"/>
+      <stop offset="1" stop-color="#454a52"/>
+    </linearGradient>
+
+    <filter id="np-bloom" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="11"/>
+    </filter>
+  </defs>
+
+  <style>
+    /* 默认 = 品牌琥珀（源图本色）。预设类挂在 #logo-root 上，id+class 的权重高于单独 id。 */
+    #logo-root { --np-main: url(#g-main-brand); --np-echo: url(#g-echo-brand); --np-glow: #F08A2A; }
+    #logo-root.preset-chrome { --np-main: url(#g-main-chrome); --np-echo: url(#g-echo-chrome); --np-glow: #f4f5f7; }
+
+    #pulse-line { stroke: var(--np-main); }
+    #pulse-echo { stroke: var(--np-echo); }
+    #pulse-glow { stroke: var(--np-glow); }
+  </style>
+
+  <g id="mark">
+    <!-- 两条路径的 d 由 tools/fit_centerline.py 从源图逐列/逐行实测中心线拟合而来，
+         不是手凑的：5 段直线（最小二乘，残差 RMS 0.06–0.26px）+ 4 个圆角
+         （由墨迹包络/偏离量反解切点长度）。完整数字见 outputs/centerline_fit.json。 -->
+
+    <!-- 辉光：主波的加宽模糊复制，它是"伴生"部件，动效上比主波滞后一点点 -->
+    <path id="pulse-glow" pathLength="1"
+          d="M237 632 L532.487 631.969 Q555.3 632 563.717 610.779 L621.719 465.015 Q628.2 448.8 634.001 465.262 L709.071 678.492 Q716.9 700.7 730.052 681.2 L754.159 645.6 Q763.5 631.9 780.066 631.888 L1013 632.3"
+          fill="none" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#np-bloom)" opacity="0.55"/>
+
+    <!-- 主波：描线主角 -->
+    <path id="pulse-line" pathLength="1"
+          d="M237 632 L532.487 631.969 Q555.3 632 563.717 610.779 L621.719 465.015 Q628.2 448.8 634.001 465.262 L709.071 678.492 Q716.9 700.7 730.052 681.2 L754.159 645.6 Q763.5 631.9 780.066 631.888 L1013 632.3"
+          fill="none" stroke-width="23.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- 次级暗波：与主波同构、小一号；峰（平台）与谷底都是圆角 -->
+    <path id="pulse-echo" pathLength="1"
+          d="M248 802 L542.129 801.973 Q556.8 802 565.846 790.361 L610.626 732.705 Q626.1 712.7 640.035 733.871 L699.047 823.72 Q708 837.3 721.151 827.722 L755.316 802.734 Q756.3 802 757.485 802.026 L1003 802"
+          fill="none" stroke-width="18.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -19,21 +19,37 @@ const sortAccessors = {
   pid: (p) => p.Pid,
   download: (p) => p.DownloadBytes || 0,
   upload: (p) => p.UploadBytes || 0,
+  day24: (p) => (p.Day24Down || 0) + (p.Day24Up || 0),
 };
+
+// 近 24 小时的两张表：默认空。测试要验「附加与排序」时用 day24Table() 造一份真的，
+// 让这段走的是 buildDay24 / day24Of 本身，而不是一个替身 —— 替身测不出键格式漂移。
+const emptyDay24 = () => ({ byKey: new Map(), byName: new Map(), ready: false });
+const UNATTR = '(系统/未归因)';
+
+// 默认顺序也是 const 对象，同样按原样注入（sortKey 为空时的落点）
+const DEFAULT_SORT = { key: 'download', dir: -1 };
 
 /** 按给定的界面状态取一份 visibleProcesses / rowKey。 */
 function withState(state) {
   return makeWith(
     'main.js',
-    ['parseQuery', 'searchFields', 'matchesQuery', 'histKey', 'visibleProcesses', 'rowKey'],
+    [
+      'parseQuery', 'searchFields', 'matchesQuery', 'histKey',
+      'day24Key', 'buildDay24', 'day24Of', 'visibleProcesses', 'rowKey',
+    ],
     {
       window: ctx,
       sortAccessors,
+      DEFAULT_SORT,
       iconOf: () => '',
       query: '',
       viewMode: 'process',
-      sortKey: 'download',
+      // 与运行时的初值一致：空 sortKey = 未排序（表格走 DEFAULT_SORT 的顺序）
+      sortKey: '',
       sortDir: -1,
+      day24Tables: emptyDay24(),
+      UNATTR,
       ...state,
     },
   );
@@ -81,6 +97,59 @@ section('visibleProcesses 排序');
   // 原始快照不能被就地排序：lastSnapshot 会被右栏、图表、历史屏共用，
   // 在这里 sort 掉会让别处读到的顺序莫名其妙地跟着表头变。
   eq(snap.Processes.map((p) => p.Pid).join(','), '1,2,3', '不改动入参快照的顺序');
+}
+
+section('未排序（sortKey 为空）：走默认顺序，不是采集顺序');
+{
+  // 默认顺序是「下载从高到低」，和 sortKey='download'/dir=-1 同序 —— 但这两者不是
+  // 一回事：空 sortKey 不标箭头、露出「恢复默认排序」的反面（按钮收起来）。
+  // 单独测一遍是因为 sortKey='' 会走 sortAccessors[effKey] 这条解析路径，
+  // 漏了它就会拿 undefined 当取值器，每秒抛一次异常而页面看着只是「没排序」。
+  const snap = {
+    Processes: [
+      proc({ Pid: 1, Name: 'b.exe', DownloadBytes: 100 }),
+      proc({ Pid: 2, Name: 'a.exe', DownloadBytes: 300 }),
+      proc({ Pid: 3, Name: 'c.exe', DownloadBytes: 200 }),
+    ],
+  };
+  const off = withState({ sortKey: '' }).visibleProcesses(snap);
+  eq(off.map((p) => p.Pid).join(','), '2,3,1', '空 sortKey 按默认（下载降序）排');
+  // 采集端给的顺序是 1,2,3，若哪天「未排序」被理解成「原样端上」，这条会先炸
+  eq(off.map((p) => p.Pid).join(','), withState({ sortKey: 'download', sortDir: -1 })
+    .visibleProcesses(snap).map((p) => p.Pid).join(','), '与显式「按下载降序」同序');
+}
+
+section('排序状态机：三态循环，第三次点回默认（§36 修的是没有出口）');
+{
+  const sm = makeWith('main.js', ['nextSortState'], { DEFAULT_SORT });
+
+  // 数值列：首选降序（多 → 少）
+  const u1 = sm.nextSortState('upload', '', -1);
+  eq(`${u1.key}/${u1.dir}`, 'upload/-1', '未排序点上传 → 上传降序');
+  const u2 = sm.nextSortState('upload', 'upload', -1);
+  eq(`${u2.key}/${u2.dir}`, 'upload/1', '再点上传 → 翻成升序');
+  const u3 = sm.nextSortState('upload', 'upload', 1);
+  eq(u3.key, '', '第三次点上传 → 取消排序（回默认态）');
+  eq(u3.dir, -1, '取消后的方向回到默认方向，不是沿用上一列的方向');
+
+  // 文本列：首选升序（A → Z）
+  const n1 = sm.nextSortState('name', '', -1);
+  eq(`${n1.key}/${n1.dir}`, 'name/1', '未排序点应用 → 应用升序');
+  eq(sm.nextSortState('name', 'name', 1).dir, -1, '再点应用 → 翻成降序');
+  eq(sm.nextSortState('name', 'name', -1).key, '', '第三次点应用 → 取消排序');
+
+  // 换列：走新列的首选方向，不受上一列方向的影响
+  eq(`${sm.nextSortState('pid', 'upload', 1).key}/${sm.nextSortState('pid', 'upload', 1).dir}`,
+    'pid/-1', '从上传（升序）切到 PID → PID 降序，不沿用升序');
+  eq(`${sm.nextSortState('name', 'pid', -1).key}/${sm.nextSortState('name', 'pid', -1).dir}`,
+    'name/1', '从 PID 切到应用 → 应用升序');
+
+  // 下载列特例：默认顺序本来就是下载降序，从默认态点它第一下行序不动，
+  // 但状态变成「显式排序」（箭头亮起）。这一下不是死点击，也不是漏洞。
+  const d1 = sm.nextSortState('download', '', -1);
+  eq(`${d1.key}/${d1.dir}`, 'download/-1', '未排序点下载 → 下载降序（与默认同序，只多出箭头）');
+  eq(sm.nextSortState('download', 'download', -1).dir, 1, '再点下载 → 升序');
+  eq(sm.nextSortState('download', 'download', 1).key, '', '第三次点下载 → 取消排序');
 }
 
 section('visibleProcesses 空与异常输入');
@@ -151,6 +220,74 @@ section('visibleProcesses 应用聚合');
   eq(unattr[0].Name, '(系统/未归因)', '空名字归入未归因');
 }
 
+// ---------- 近 24 小时列 ----------
+
+section('近 24 小时：按进程身份取，取不到标成「不知道」而不是「零」');
+{
+  const tables = withState({}).buildDay24([
+    { name: 'chrome.exe', pid: 7, startTs: 1_700_000_000, down: 900, up: 100 },
+  ]);
+  const rows = withState({ day24Tables: tables, sortKey: 'name', sortDir: 1 }).visibleProcesses({
+    Processes: [
+      proc({ Pid: 7, Name: 'chrome.exe', StartTimeUnixMs: 1_700_000_000_000 }),
+      proc({ Pid: 8, Name: 'steam.exe', StartTimeUnixMs: 1_700_000_000_000 }),
+    ],
+  });
+  const chrome = rows.find((r) => r.Name === 'chrome.exe');
+  eq(chrome.Day24Down, 900, '命中：下载取到');
+  eq(chrome.Day24Up, 100, '命中：上传取到');
+  eq(chrome.Day24Known, true, '命中标记');
+
+  // 库里没有这个身份时必须是「没记录」，不能悄悄变成「用了 0 字节」——
+  // 两者在界面上长得一样，只有前者该显示破折号。
+  const steam = rows.find((r) => r.Name === 'steam.exe');
+  eq(steam.Day24Known, false, '没记录的进程标成不知道');
+  eq(steam.Day24Down, 0, '数值兜底 0');
+}
+
+section('近 24 小时：应用视图按名字把多个实例相加');
+{
+  // 库里按进程实例存（(pid,start_ts) 各一行），应用视图那一行要的是名字的合计。
+  const tables = withState({}).buildDay24([
+    { name: 'msedge', pid: 10, startTs: 5, down: 100, up: 10 },
+    { name: 'msedge', pid: 11, startTs: 3, down: 400, up: 20 },
+    { name: 'chrome', pid: 12, startTs: 1, down: 50, up: 5 },
+  ]);
+  const rows = withState({ viewMode: 'app', day24Tables: tables, sortKey: 'name', sortDir: 1 })
+    .visibleProcesses({
+      Processes: [
+        proc({ Pid: 10, Name: 'msedge', StartTimeUnixMs: 5000 }),
+        proc({ Pid: 11, Name: 'msedge', StartTimeUnixMs: 3000 }),
+        proc({ Pid: 12, Name: 'chrome', StartTimeUnixMs: 1000 }),
+      ],
+    });
+  eq(rows.find((r) => r.Name === 'msedge').Day24Down, 500, '两个 msedge 实例的下载相加');
+  eq(rows.find((r) => r.Name === 'msedge').Day24Up, 30, '上传相加');
+  eq(rows.find((r) => r.Name === 'chrome').Day24Down, 50, '另一应用不受影响');
+}
+
+section('近 24 小时：排序按「下载 + 上传」，与列里显示的数一致');
+{
+  // 一列只有一个数，排序就必须按那一个数来。按下载排会出现「这列看着更大却排在下面」，
+  // 用户没法判断是排序错了还是自己看错了。
+  const tables = withState({}).buildDay24([
+    { name: 'a.exe', pid: 1, startTs: 0, down: 10, up: 10 },  // 合计 20
+    { name: 'b.exe', pid: 2, startTs: 0, down: 100, up: 1 },  // 合计 101
+    { name: 'c.exe', pid: 3, startTs: 0, down: 1, up: 100 },  // 合计 101（下行最小）
+  ]);
+  const snap = {
+    Processes: [
+      proc({ Pid: 1, Name: 'a.exe', StartTimeUnixMs: 0 }),
+      proc({ Pid: 2, Name: 'b.exe', StartTimeUnixMs: 0 }),
+      proc({ Pid: 3, Name: 'c.exe', StartTimeUnixMs: 0 }),
+    ],
+  };
+  const desc = withState({ day24Tables: tables, sortKey: 'day24', sortDir: -1 })
+    .visibleProcesses(snap);
+  eq(desc[0].Name !== 'a.exe', true, '合计最小的不排第一');
+  eq(desc[2].Name, 'a.exe', '合计 20 的排在最后（不是按下载 1 排后）');
+}
+
 section('rowKey 随视图切换');
 {
   const p = proc({ Pid: 42, Name: 'MsEdge', StartTimeUnixMs: 999 });
@@ -186,7 +323,10 @@ function makeRenderTable(state) {
 
   const api = makeWith(
     'main.js',
-    ['parseQuery', 'searchFields', 'matchesQuery', 'histKey', 'visibleProcesses', 'rowKey', 'renderTable'],
+    [
+      'parseQuery', 'searchFields', 'matchesQuery', 'histKey',
+      'day24Key', 'buildDay24', 'day24Of', 'visibleProcesses', 'rowKey', 'renderTable',
+    ],
     {
       window: ctx,
       sortAccessors,
@@ -196,6 +336,8 @@ function makeRenderTable(state) {
       sortKey: 'download',
       sortDir: -1,
       rowNodes,
+      day24Tables: emptyDay24(),
+      UNATTR,
       els: { rows, pidLabel },
       buildRow: (key) => {
         built.push(key);

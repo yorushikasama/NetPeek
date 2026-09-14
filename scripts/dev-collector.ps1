@@ -145,6 +145,15 @@ if ($Stop) {
     return
 }
 
+# ---------------- 重启：先停，再构建，最后启动 ----------------
+# 顺序不能反。构建产物 bin\<cfg>\net8.0-windows\NetPeek.Collector.exe
+# 被运行中的实例独占锁定，先构建会以
+#   MSB3021 / MSB3027「文件被 NetPeek.Collector (pid) 锁定」
+# 失败。这个坑只在采集端**真的改过**时才暴露 —— 没改动时 MSBuild 判定
+# 输出是最新的、跳过拷贝，看起来一切正常，所以很容易被当成偶发。
+# 先停后建的另一个好处：万一构建失败，手上还留着一个能 -NoBuild 启动的旧产物。
+Stop-Collector
+
 # ---------------- 构建 ----------------
 if (-not $NoBuild) {
     Write-Step "构建采集服务（$Configuration）"
@@ -158,9 +167,7 @@ if (-not (Test-Path $Exe)) {
     throw "找不到产物：$Exe`n先去掉 -NoBuild 跑一次构建。"
 }
 
-# ---------------- 重启 ----------------
-Stop-Collector
-
+# ---------------- 启动 ----------------
 Write-Step '启动采集服务（会弹 UAC；ETW 会话必须管理员）'
 # 工作目录设到产物目录，appsettings.json 与 Development 覆盖文件才能被 Host 找到。
 $startArgs = @{

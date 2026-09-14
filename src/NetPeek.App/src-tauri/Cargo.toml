@@ -15,12 +15,22 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+# 单实例守卫。Windows 上不注册这个，每次运行都会起一个**独立进程**：
+# 而 NetPeek 关窗只是 hide 到托盘、进程不退，于是「再点一次图标」会变成
+# 两个窗口 + 两个托盘图标 + 两份采集管道连接。开发时最明显（npm run dev
+# 每次编译完都新起一个），但打包后同样会发生。
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 maxminddb = "0.24"
+
+# 托盘原生菜单的深浅：Windows 只给了 uxtheme 的按序号导出这一条路，而取序号导出
+# 必须 unsafe。本 crate 写着 unsafe_code = "forbid"，所以那几行关在同仓库的
+# 零依赖小 crate 里（见 §37 与 uxtheme-shim/src/lib.rs 的文件头）。
+netpeek-uxtheme = { path = "uxtheme-shim" }
 
 # 发布档瘦身（Tauri 官方推荐组合）：二进制更小、启动内存略降。
 # 与 Sniffnet 的差异：它用 opt-level=3 求吞吐；NetPeek 的 Rust 侧只做帧转发与查询，

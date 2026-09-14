@@ -282,6 +282,9 @@ body.wrap-mode input[type='date'] {
 .rate .u { font-size: 11px; color: var(--text-3); }
 .rate.is-down { color: var(--down); }
 .rate.is-up { color: var(--up); }
+/* 断线占位：破折号不是数据，退回弱字阶（见 main.js blankRates）。
+   写在语义色之后，同特异性按先后取胜。 */
+.rate.is-blank { color: var(--text-3); }
 
 .winbtns { display: flex; gap: 2px; margin: 0 6px 0 10px; flex: none; }
 .winbtns .icon-btn { width: 34px; height: 30px; border-radius: 6px; }
@@ -289,6 +292,9 @@ body.wrap-mode input[type='date'] {
    深墨」——在出厂两套 error（浅红/深红）上都可读，且跟随皮肤换色。
    此前主窗写死 Windows 关闭钮红 #c42b1c + 白字，与 mini 的 var(--error) 是两套逻辑。 */
 .winbtns .icon-btn.is-danger:hover { background: var(--error); color: color-mix(in srgb, black 82%, var(--error)); }
+/* 按下态要写在 :hover 之后并保持同特异性，否则鼠标按下去时 :hover 仍然命中、
+   :active 被它压掉，窗口钮按下没有任何反馈。 */
+.winbtns .icon-btn.is-danger:active { background: color-mix(in srgb, var(--error) 84%, #000); }
 
 /* ---------- 导航 rail（52px） ---------- */
 
@@ -321,6 +327,7 @@ body.wrap-mode input[type='date'] {
 }
 .ri svg { width: 18px; height: 18px; }
 .ri:hover { background: var(--panel-hi); color: var(--text); }
+.ri:active { background: var(--press); }
 /* 选中态：中性抬起 + 中性指示条（皮肤可换色）——不借用下载琥珀 */
 .ri.is-on { background: var(--panel-hi); color: var(--text); }
 .ri.is-on::before {
@@ -472,6 +479,34 @@ body.has-bg .sidebar {
 }
 .table-wrap { flex: 1; min-height: 0; overflow: auto; }
 
+/* 滚动边缘：表头浮起 + 列表见底渐隐。
+   两个状态由 main.js 在滚动与重绘时挂在 #tableWrap 上（is-scrolled / is-scrollable /
+   is-end），这里只负责画。缺了它们，表格读起来是「一叠贴死的行」——看不出表头是浮在
+   内容之上的（说明下面还有），也看不出列表已经到底。
+   :has() 只用在一处：渐隐层必须挂在滚动容器**外面**的卡片上，挂在自己身上会被行盖住。
+   不支持 :has() 的宿主这两条整体失效，退化成改动前的样子，不影响功能与布局。 */
+.table-card { position: relative; }
+.table-card::after {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 22px;
+  border-radius: 0 0 var(--r-l) var(--r-l);
+  background: linear-gradient(to bottom,
+    transparent,
+    color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent));
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+  pointer-events: none;
+}
+.table-card:has(.table-wrap.is-scrollable:not(.is-end))::after { opacity: 1; }
+/* 表头投影只在「已经滚下去」时出现：一行都没滚就走投影，等于凭空多一道横影 */
+.table-wrap.is-scrolled .proc-table thead th {
+  box-shadow: 0 8px 14px -10px rgb(0 0 0 / 0.75);
+}
+
 /* ---------- 进程表 ---------- */
 
 .proc-table {
@@ -484,6 +519,7 @@ body.has-bg .sidebar {
 .proc-table col.col-pid { width: 92px; }
 .proc-table col.col-down { width: 112px; }
 .proc-table col.col-up { width: 112px; }
+.proc-table col.col-day { width: 104px; }
 
 .proc-table thead th {
   position: sticky;
@@ -504,6 +540,13 @@ body.has-bg .sidebar {
 .proc-table .sort-mark { display: inline-block; width: 12px; }
 .proc-table .sort-mark .ic { width: 11px; height: 11px; vertical-align: -2px; }
 .proc-table thead th .ic { width: 11px; height: 11px; vertical-align: -2px; }
+/* 排序列的列头：文字提亮，箭头随 currentColor 一起变亮。
+   以前 is-sorted 只是个没有样式的钩子，箭头跟目标列一样是 text-3 —— 点了列头
+   几乎看不出是哪一列在排（§36 顺手补上）。不上 --down/--up：排序是列表状态不是数据，
+   而且上传列戴上下载色是错的。 */
+.proc-table thead th.is-sorted { color: var(--text); }
+/* 取消排序的出口（§36）：跟搜索框同高，否则 30px 的通用 icon-btn 会把卡头顶高 2px */
+.card-head .sort-reset { width: 28px; height: 28px; flex: none; }
 
 .proc-table tbody td {
   padding: 7px 12px;
@@ -518,6 +561,10 @@ body.has-bg .sidebar {
     color-mix(in srgb, var(--down) 9%, transparent),
     transparent var(--share, 0%));
   background-repeat: no-repeat;
+  /* 整行可点（选中/取消选中），给手型。此前只有表头是 pointer —— 表头能点、
+     行也能点，但行的光标是箭头，读者得先试一次才知道行是活的。 */
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
 }
 .proc-table tbody tr:hover { background-color: color-mix(in srgb, var(--panel-hi) 55%, transparent); }
 /* 选中行：中性浅底 + 中性指示条（v2：不借用下载琥珀） */
@@ -556,9 +603,20 @@ span.proc-icon {
 }
 
 .td-rate { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 13.5px; font-weight: 500; }
-.td-rate .u { font-size: 10.5px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
+/* 单位降级到 11px —— 全应用的单位字号下限统一在 11px。此前表格/排行/合计三处
+   各写 10 / 10.5px，比正文小两档还不一致：同一屏里几个「MB/s」大小不同，
+   是最容易被眼睛抓到、又最难说出哪里不对的那种不齐。 */
+.td-rate .u { font-size: 11px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
 .td-rate.down { color: var(--down); }
 .td-rate.up { color: var(--up); }
+
+/* 近 24 小时：累计量而不是速率，所以刻意低一档 —— 常规字重 + --text-2，
+   把「这一秒谁在说话」两列留在视觉重心上。口径靠单位区分：这里没有 /s。
+   与表格其余单位同一档 11px，避免同一行里两个单位大小不同。 */
+.td-day { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 13.5px; color: var(--text-2); }
+.td-day .u { font-size: 11px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
+/* 破折号不是数据，是「没有数据」：降到弱字阶，别让它和真实读数一样重 */
+.td-day.is-blank { color: var(--text-3); }
 
 /* 加载骨架：只在「连接中」出现，转圈一律不用 */
 .skeleton-rows { position: absolute; inset: 0; padding: 4px 0; }
@@ -614,7 +672,7 @@ span.proc-icon {
     background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .btn:hover { border-color: color-mix(in srgb, var(--sel-bar) 55%, var(--line)); }
-.btn:active { background: color-mix(in srgb, var(--panel-hi) 88%, var(--bg)); }
+.btn:active { background: var(--press); border-color: color-mix(in srgb, var(--sel-bar) 70%, var(--line)); }
 .btn .ic { width: 13px; height: 13px; }
 .btn:disabled { opacity: 0.45; pointer-events: none; }
 /* 主按钮：中性反白，不用品牌彩色 —— 朴素基底的关键（皮肤可整体换色） */
@@ -648,7 +706,11 @@ span.proc-icon {
 }
 .icon-btn svg { width: 15px; height: 15px; }
 .icon-btn:hover { background: var(--panel-hi); color: var(--text); }
+.icon-btn:active { background: var(--press); }
 .icon-btn.is-danger:hover { background: var(--error); color: #fff; }
+/* 危险钮按下：比悬停再深一档。用混黑而不是换色相，
+   红的语义在按下瞬间不丢。 */
+.icon-btn.is-danger:active { background: color-mix(in srgb, var(--error) 84%, #000); }
 
 .segmented {
   display: inline-flex;
@@ -671,6 +733,7 @@ span.proc-icon {
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .segmented button:hover { color: var(--text); }
+.segmented button:not(.is-active):active { background: var(--press); color: var(--text); }
 .segmented button.is-active { background: var(--panel-hi); color: var(--text); }
 
 .search {
@@ -758,7 +821,18 @@ select option { background: var(--panel); color: var(--text); }
   margin-bottom: 8px;
   flex: none;
 }
-.rc-head h5 { font-size: 12px; font-weight: 500; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 卡片标题（「今日」「30 天下载」「应用排行」）从 --text-3 提到 --text-2。
+   --text-3 在 --panel 上只有 2.99:1，一个卡的标题比卡里的说明字还暗，
+   层级是反的：标题该至少和正文一样实。--text-3 保留给单位、坐标、元数据
+   这些「可扫过」的字。 */
+.rc-head h5 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .rc-head .sp { flex: 1; }
 .rc-aside { font-size: 11px; color: var(--text-3); white-space: nowrap; }
 
@@ -775,6 +849,7 @@ select option { background: var(--panel); color: var(--text); }
   border-radius: var(--r-s);
 }
 .linkish:hover { color: var(--text); background: var(--panel-hi); }
+.linkish:active { color: var(--text); background: var(--press); }
 .linkish .ic { width: 11px; height: 11px; }
 
 .big {
@@ -797,7 +872,7 @@ select option { background: var(--panel); color: var(--text); }
   font-weight: 500;
   margin-top: 2px;
 }
-.duorow .it b .u { font-size: 10px; font-weight: 400; color: var(--text-3); }
+.duorow .it b .u { font-size: 11px; font-weight: 400; color: var(--text-3); }
 .duorow .it.is-down b { color: var(--down); }
 .duorow .it.is-up b { color: var(--up); }
 
@@ -927,7 +1002,7 @@ span.app-badge {
   font-size: 13.5px;
   font-weight: 600;
 }
-.hist-sum b .u { font-size: 10.5px; font-weight: 400; color: var(--text-3); margin-left: 1px; }
+.hist-sum b .u { font-size: 11px; font-weight: 400; color: var(--text-3); margin-left: 1px; }
 .hist-sum .is-down b { color: var(--down); }
 .hist-sum .is-up b { color: var(--up); }
 .hist-sum .is-total b { color: var(--text); }
@@ -1005,7 +1080,7 @@ span.rank-icon {
   font-weight: 500;
   color: var(--down);
 }
-.rank-value .u { font-size: 10px; font-weight: 400; color: var(--text-3); }
+.rank-value .u { font-size: 11px; font-weight: 400; color: var(--text-3); }
 .hint-row { padding: 10px 2px; font-size: 12px; color: var(--text-3); }
 
 /* ---------- 设置屏 ---------- */
@@ -1031,6 +1106,7 @@ span.rank-icon {
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .snav button:hover { background: var(--panel-hi); color: var(--text); }
+.snav button:not(.is-on):active { background: var(--press); color: var(--text); }
 .snav button.is-on { background: var(--panel-hi); color: var(--text); font-weight: 500; }
 
 .sbody {
@@ -1065,6 +1141,7 @@ span.rank-icon {
 }
 .seg button + button { border-left: 1px solid var(--line-soft); }
 .seg button:hover { color: var(--text); background: var(--panel-hi); }
+.seg button:not(.is-on):active { background: var(--press); }
 .seg button.is-on { background: var(--panel-hi); color: var(--text); font-weight: 500; }
 
 /* 强调色色板（image 皮肤）：取色候选圆点，点选换交互强调；
@@ -1281,19 +1358,75 @@ input[type="number"]:hover, input[type="date"]:hover {
   transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
 }
 .skin-card:hover { border-color: color-mix(in srgb, var(--sel-bar) 55%, var(--line)); }
+.skin-card:active { border-color: color-mix(in srgb, var(--sel-bar) 75%, var(--line)); }
 .skin-card.is-on { border-color: var(--sel-bar); box-shadow: 0 0 0 1px var(--sel-bar) inset; }
+/* 预览必须真的**预览**。原来每张卡只是一块底色 + 一条 3px 色条，四张卡放一起
+   就是把「空盒子」排了一排 —— 选皮肤等于闭着眼抽，唯一能分辨的信息是色条颜色。
+   这里按主界面的真骨架画一枚微缩图：左 rail（panel-2）、两张面板（panel）、
+   一条下载条和一条上传条（语义双色）。等于把界面缩到 1/13，四张卡一眼可辨。
+   配色写死在各自的皮肤块里（--pv-* 局部变量），证件照不随当前皮肤变。 */
 .skin-card .pv {
+  position: relative;
   display: block;
   height: 52px;
   border-radius: 8px;
   border: 1px solid var(--line-soft);
   margin-bottom: 10px;
+  overflow: hidden;
 }
-/* 皮肤预览是各皮肤的「证件照」，写死各自配色，不随当前皮肤变 */
-.pv-plain { background: linear-gradient(135deg, #22252a 55%, #2c2f36); border-bottom: 3px solid #c9cdd4; }
-.pv-light { background: linear-gradient(135deg, #f5f6f7 55%, #e8eaee); border-bottom: 3px solid #d97c2b; }
-.pv-amber { background: linear-gradient(135deg, #1d1712 55%, #31251a); border-bottom: 3px solid #f0963f; }
-.pv-image { background: linear-gradient(120deg, #3a4a5c, #6b5a48); border-bottom: 3px solid #e8c08a; }
+.skin-card .pv::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 16%;
+  background: var(--pv-rail);
+  border-right: 1px solid var(--pv-line);
+}
+.skin-card .pv::after {
+  content: '';
+  position: absolute;
+  left: calc(16% + 7px);
+  right: 7px;
+  top: 7px;
+  bottom: 11px;
+  background-image:
+    linear-gradient(var(--pv-panel), var(--pv-panel)),
+    linear-gradient(var(--pv-down), var(--pv-down)),
+    linear-gradient(var(--pv-panel), var(--pv-panel)),
+    linear-gradient(var(--pv-up), var(--pv-up));
+  background-repeat: no-repeat;
+  background-size: 100% 32%, 62% 9%, 100% 30%, 34% 9%;
+  background-position: left top, left 44%, left 60%, left bottom;
+}
+/* 皮肤预览是各皮肤的「证件照」，写死各自配色，不随当前皮肤变。
+   面板块比真界面里的 --panel 再抬一档：真界面的 card / bg 只差 1.16:1（满屏看得见），
+   压到 52px 的缩略图里就糊成一块 —— 证件照允许夸张，它要传达的是「这套皮肤长什么样」，
+   不是像素级还原。左 rail 反过来取最深的那档，两端拉开才有骨架。 */
+.pv-plain {
+  background: #1b1d21;
+  border-bottom: 3px solid #c9cdd4;
+  --pv-rail: #17191d; --pv-panel: #2e323a; --pv-line: #3a3f48;
+  --pv-down: #f0963f; --pv-up: #62a9e8;
+}
+.pv-light {
+  background: #e8eaee;
+  border-bottom: 3px solid #d97c2b;
+  --pv-rail: #dfe2e6; --pv-panel: #ffffff; --pv-line: #d6dade;
+  --pv-down: #b45a10; --pv-up: #2e6f9e;
+}
+.pv-amber {
+  background: #201b16;
+  border-bottom: 3px solid #f0963f;
+  --pv-rail: #1a1510; --pv-panel: #3a2f22; --pv-line: #4a3d2c;
+  --pv-down: #f0963f; --pv-up: #62a9e8;
+}
+.pv-image {
+  background: linear-gradient(120deg, #3a4a5c, #6b5a48);
+  border-bottom: 3px solid #e8c08a;
+  --pv-rail: rgb(0 0 0 / 0.34); --pv-panel: rgb(255 255 255 / 0.2);
+  --pv-line: rgb(255 255 255 / 0.26);
+  --pv-down: #e8c08a; --pv-up: #8fb6d8;
+}
 .skin-card b { display: block; font-size: 12.5px; }
 .skin-card small { display: block; color: var(--text-3); font-size: 11px; line-height: 1.45; margin-top: 3px; }
 
@@ -1352,6 +1485,7 @@ input[type="number"]:hover, input[type="date"]:hover {
   transition: border-color var(--t-fast) var(--ease);
 }
 .wall-card:hover { border-color: color-mix(in srgb, var(--sel-bar) 60%, var(--line)); }
+.wall-card:active { border-color: color-mix(in srgb, var(--sel-bar) 80%, var(--line)); }
 /* 选中态与皮肤卡同一套语言（--sel-bar 描边 + 内阴影补一圈），
    不用勾标：勾标压在缩略图上会盖掉正要看的那块画面。 */
 .wall-card.is-on {
@@ -1507,6 +1641,114 @@ input[type="number"]:hover, input[type="date"]:hover {
   flex: none;
 }
 
+/* ---------- 可复制的值与右键菜单（context-menu.js 的呈现层） ----------
+
+   两件事：数据文本开放选择，原生右键菜单换成应用自己的浮层（§35）。
+
+   为什么不能直接在 body 上取消 user-select：那会把图标、按钮、状态文案一起卷进
+   选区 —— 拖过一行会选中半屏控件文字，而真正想复制的 IP 反而混在中间。所以按元素
+   点名放行：只放数据，不放界面。 */
+
+/* 表格里的数据格整片开放选择：拖动横跨一行能连起来选中，而右键菜单给的是
+   逐列的干净值 —— 两条路各有各的用途。行本身的 pointer 光标不受影响，
+   见下面「I 形光标只给真正的值」那条。 */
+.proc-table tbody td,
+.rc-name, .rc-path, .rc-meta, .rc-aside,
+.insp-live, .insp-fields dd,
+.duorow .it b, .top-meta,
+.hist-sum b, .rank-value {
+  user-select: text;
+}
+
+/* I 形光标只给「值」里最典型的那一格：对端。全表都换成 I 形会把「点这一行看详情」
+   这条信息一起抹掉（行是 pointer），而全不换又没人知道 IP 能选。检查栏没有点击语义，
+   那几处可以放心给 I 形。 */
+.proc-table .td-peer,
+.rc-path, .rc-meta, .insp-fields dd, .top-meta { cursor: text; }
+
+/* ---- 浮层 ---- */
+
+/* 底漆与阴影的口径完全对齐 .sel-pop：面板色 × --paint-op 淡出、阴影随 --ui-opacity
+   淡出。右键菜单和下拉菜单是同一类东西，半透明界面下两者必须一致地「浮」。 */
+.ctx-menu, .ctx-toast {
+  position: fixed;
+  z-index: var(--z-menu);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: color-mix(in srgb, var(--panel-hi) calc(var(--paint-op) * 100%), transparent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / calc(0.32 * var(--ui-opacity)));
+  animation: sel-pop-in var(--t-fast) var(--ease);
+}
+.ctx-menu {
+  min-width: 200px;
+  max-width: 320px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 4px;
+}
+.ctx-menu:focus { outline: none; }
+
+.ctx-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ctx-item:hover, .ctx-item:focus-visible {
+  background: color-mix(in srgb, var(--sel-bar) 12%, transparent);
+  color: var(--text);
+  outline: none;
+}
+.ctx-item:active { background: var(--press); }
+.ctx-label { overflow: hidden; text-overflow: ellipsis; }
+/* 右列是「即将复制到的内容」：只用来确认，复制出去的始终是完整值。
+   等宽字族 —— 这一列全是 IP / 路径 / 数字，混排会让上下两行对不齐。 */
+.ctx-sub {
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-item:hover .ctx-sub, .ctx-item:focus-visible .ctx-sub { color: var(--text-2); }
+
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--line-soft); }
+
+/* 复制回执。菜单已经关了才出现，所以它是独立的浮层，不是菜单的一部分 ——
+   菜单项原地变字再消失，会让人怀疑自己点错了。 */
+.ctx-toast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 6px 10px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.ctx-toast-ic { display: inline-flex; color: var(--ok); }
+.ctx-toast-ic .ic { width: 13px; height: 13px; }
+.ctx-toast.is-error { color: var(--error); }
+.ctx-toast.is-error .ctx-toast-ic { color: var(--error); }
+.ctx-toast > :last-child {
+  font-family: var(--font-num);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- 无边框窗口缩放热区 ---------- */
 
 .resize-edge { position: fixed; z-index: var(--z-edge); }
@@ -1547,15 +1789,23 @@ input[type="number"]:hover, input[type="date"]:hover {
 
 @media (max-width: 1180px) {
   .screen { grid-template-columns: minmax(0, 1fr) 272px; }
-  .proc-table col.col-peer { width: 180px; }
+  .proc-table col.col-peer { width: 168px; }
 }
 
 @media (max-width: 1060px) {
   .screen { grid-template-columns: minmax(0, 1fr) 252px; }
   .sidebar { padding: 10px; gap: 10px; }
   .center { padding: 10px; gap: 10px; }
-  .proc-table col.col-peer { width: 148px; }
-  .proc-table col.col-down, .proc-table col.col-up { width: 98px; }
+  /* 第六列（近 24 小时）要挤进同一档宽度里，按「宁可委屈谁」的顺序让位：
+     对端 → PID → 24 小时 → 下载/上传（基本不动，它们是这一屏的主角）。
+     对端让到 92px（实际内容 ~70px，只剩旗标 + IP 开头），代价最小 ——
+     它是每秒都在变的「谁在说话」，选中后检查栏里有完整的一份，还有悬浮提示；
+     应用名是整行的身份，被压到一百零几像素会连 "msedgewebview2" 都读不全。 */
+  .proc-table col.col-peer { width: 92px; }
+  .proc-table col.col-pid { width: 80px; }
+  .proc-table col.col-down, .proc-table col.col-up { width: 92px; }
+  .proc-table col.col-day { width: 92px; }
+  .proc-table thead th, .proc-table tbody td { padding-left: 9px; padding-right: 9px; }
   .chart-card { flex-basis: 224px; }
   .search { width: 170px; }
   .top-rates { gap: 12px; }

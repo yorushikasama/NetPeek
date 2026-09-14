@@ -72,6 +72,9 @@
   --r-l: 12px;
   --r-m: 8px;
   --r-s: 6px;
+  /* 按下态：把悬停底再压一档。统一往黑里混而不是「混向 --bg」——浅色皮肤的 --bg 比
+     面板还亮，混过去会变成「按下去反而变亮」，而按压在所有皮肤里都该是收窄的。 */
+  --press: color-mix(in srgb, var(--panel-hi) 88%, #000);
   --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --font-num: "Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace;
   --t-fast: 120ms;
@@ -81,4 +84,11 @@
   --z-backdrop: 0;
   --z-shell: 1;
   --z-edge: 40;
+  /* 右键菜单浮层：压过窗口缩放热区（--z-edge）。热区是贴在窗口四边的隐形 4px 条，
+     菜单若被它压住，贴着边右键时点不动菜单项。 */
+  --z-menu: 60;
+  /* 启动动效层：压过一切，包括右键菜单。它只在启动到首绘之间存在，
+     期间不应该有任何东西能盖在它上面（能盖上来就说明那东西在启动期就渲染了，
+     那本身就是 bug）。卸下后整层被移除，不占用层级。 */
+  --z-boot: 100;
 }

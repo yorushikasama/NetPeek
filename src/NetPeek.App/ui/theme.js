@@ -704,6 +704,31 @@ function extractImagePalette(imgData, imgEl) {
 
 // ---------- 应用令牌 ----------
 
+// 上一次上报给后端的深浅。拖动「界面不透明度」这类滑杆会让 applyTokens 每帧跑一次，
+// 每次都过一次 IPC 是白扔的 —— 同一个值只报一次。
+let reportedNativeDark = null;
+
+/**
+ * 把有效深浅告诉后端，让托盘的原生弹出菜单跟着变（§37）。
+ *
+ * 托盘菜单是系统画的 HMENU，没有「上色」接口，能影响的只有进程级的
+ * 「应用是深还是浅」这一个开关；皮肤配色（琥珀、玻璃、底图）进不去，这是那条路的天花板。
+ *
+ * 浏览器里直接开 index.html 时没有 __TAURI__（预览脚本也走这条路），静默跳过。
+ * invoke 失败也不上报错：这是纯外观同步，失败的表现就是「菜单还是系统默认色」，
+ * 比在控制台里制造一条谁都看不懂的错误好。
+ */
+function reportNativeMenuTheme(dark) {
+  if (dark === reportedNativeDark) return;
+  reportedNativeDark = dark;
+  const tauri = window.__TAURI__;
+  if (!tauri || !tauri.core || typeof tauri.core.invoke !== 'function') return;
+  try {
+    const p = tauri.core.invoke('set_tray_theme', { dark });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (_) { /* 后端没有这个命令（旧版本）：保持系统默认色 */ }
+}
+
 // 纯色系：17 键全量覆写到 documentElement。皮肤切换走这里。
 function applyTokens(tokens, opts = {}) {
   const root = document.documentElement;
@@ -727,7 +752,12 @@ function applyTokens(tokens, opts = {}) {
   set('--accent-ink', t.accentInk);
   set('--sel-bar', t.selBar);
   // colorScheme 跟着原生控件（滚动条、date input、勾选框）走
-  root.style.colorScheme = luminance(hexToRgb(t.text)) > 0.5 ? 'dark' : 'light';
+  const dark = luminance(hexToRgb(t.text)) > 0.5;
+  root.style.colorScheme = dark ? 'dark' : 'light';
+  // 托盘右键菜单是系统画的原生菜单，它只吃「应用是深是浅」这一个开关（§37）。
+  // 有效深浅的判断就在这里，所以由这里告诉后端 —— 后端自己读系统设置是不对的：
+  // 皮肤能把深浅方向钉死，跟系统设置无关。
+  reportNativeMenuTheme(dark);
   // 换肤的 220ms 色彩过渡窗口：DOM 的颜色全部取自 CSS 变量，变量一改整站瞬变，
   // 而图表（ECharts 自己带 190ms 过渡）会滑过去 —— 一半滑一半跳，割裂感就在这。
   // 首次上屏不开窗口：启动时从 tokens.css 默认值到用户皮肤的那次变化必须瞬切，

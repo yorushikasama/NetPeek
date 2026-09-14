@@ -20,6 +20,9 @@
 (function () {
   // 绘图区几何（px）。固定值是有意的：hitTest（bars 返回的 indexAt）按这套
   // 几何反推行下标，跟着 ECharts 内部布局走反而要翻私有 API。
+  // left 是**下限**不是定值：真实槽宽由 yGutter() 按三档标注实测后撑开，
+  // 这样「6.0 MB/s」拿到 63px、30 天图的「40 GB」仍然只占 52px，
+  // 不必为了最长的那种标注把每张图都留一条空槽。
   const GRID = { left: 52, right: 8, top: 8, bottom: 20 };
   const FONT_NUM = '"Cascadia Mono", "JetBrains Mono", Consolas, ui-monospace, monospace';
   const FONT_SIZE = 11;
@@ -53,17 +56,31 @@
     return 10 * base;
   }
 
-  // 坐标标注专用的紧凑格式。52px 的 y 轴槽在 11px 等宽下只放得下约 6 个字符。
+  // 空态 / 待机量程。没有采样时坐标轴不能只给「0 到 1 字节」：那会让
+  // interval 落到 0.5，而 0.5 和 1 恰好格式化成同一个字符串，两个刻度叠字。
+  // 这里给的是各量级里读起来像仪表的待机范围 —— 曲线为空，刻度仍然成立。
+  const IDLE_RATE = 1e6;    // 折线（速率）→ 0 / 500 KB/s / 1.0 MB/s
+  const IDLE_BYTES = 1e9;   // 柱图（累计量）→ 0 / 500 MB / 1.00 GB
+
+  // 坐标标注专用的紧凑格式。
+  //
+  // 单位必须和界面其它地方（fmtBytes / fmtRate 的「1.00 MB/s」）用同一套写法。
+  // 这里曾经缩写成 K / M / G，于是实时图的轴标注是「6.0M/s」——没有 B，
+  // 读起来是「六米每秒」，而且同一屏里顶栏写「5.12 MB/s」、坐标写「6.0M/s」，
+  // 两套单位并排出现，是最典型的「差一口气」。
+  // 槽宽由 yGutter() 按实际标注实测后撑开，所以这里不必再为省字符牺牲可读性。
   function axisNum(v, suffix) {
     if (!(v > 0)) return '0';
-    const units = [[1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'K']];
+    const units = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
     for (const [scale, tag] of units) {
       if (v >= scale) {
         const n = v / scale;
-        return `${n >= 100 ? Math.round(n) : n.toFixed(n >= 10 ? 0 : 1)}${tag}${suffix}`;
+        return `${n >= 100 ? Math.round(n) : n.toFixed(n >= 10 ? 0 : 1)} ${tag}${suffix}`;
       }
     }
-    return `${Math.round(v)}${suffix}`;
+    // 不足 1 KB 的量级只可能是空态占位，带上 B 才不会被当成无量纲的数字
+    const n = v < 10 && !Number.isInteger(v) ? v.toFixed(1) : Math.round(v);
+    return `${n} B${suffix}`;
   }
 
   const axisBytes = (v) => axisNum(v, '');
@@ -150,8 +167,10 @@
     return measureCtx.measureText(String(s)).width;
   }
 
-  function gridFor(opt) {
+  function gridFor(opt, yLeft) {
     const grid = { ...GRID };
+    // y 轴槽先撑开：下面按 x 端标注撑开的写不回去（只增不减），顺序无关，但要在这里合并
+    if (yLeft) grid.left = Math.max(grid.left, yLeft);
     if (!opt) return grid;
     const first = opt.groups && opt.groups.length
       ? opt.groups[0].label
@@ -165,6 +184,14 @@
     return grid;
   }
 
+  // y 轴槽宽度：把三个刻度真格式化一遍再量宽，而不是按「最多 6 个字符」估。
+  // 轴标注走的是等宽字族，量得准；加 10px 是 tick 与文字之间的呼吸位。
+  function yGutter(yMax, formatY) {
+    const fmt = formatY || axisRate;
+    const w = [0, yMax / 2, yMax].reduce((m, v) => Math.max(m, textW(fmt(v))), 0);
+    return Math.ceil(w) + 10;
+  }
+
   function yAxisOpt(yMax, formatY) {
     return {
       type: 'value',
@@ -174,7 +201,11 @@
       interval: yMax / 2,
       axisLine: { show: false },
       axisTick: { show: false },
-      splitLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30', type: 'dashed' } },
+      // 网格线用 --line 而不是 --line-soft：后者在 --panel 上只有 1.06:1，
+      // 等于没画 —— 图里少了横向基准，曲线浮在一片空底上，读数只能靠猜。
+      // --line 是 1.26:1（浅色皮肤下同样量级），刚好「看得见但不抢线」。
+      // 两档 token 都随皮肤覆写，所以换肤后网格线自动跟着换。
+      splitLine: { lineStyle: { color: cssVar('--line') || '#32363e', type: 'dashed' } },
       axisLabel: { ...axisLabelOpt(), formatter: formatY },
     };
   }
@@ -218,15 +249,17 @@
     for (const s of series) for (const v of s.values) if (v > dataMax) dataMax = v;
     // 量程加 6% 余量再取整：峰值正好落在 nice 刻度上时（6.0M 配 6.0M 上限），
     // 曲线会整段贴着绘图区顶边走，看着像被裁掉。留一档呼吸空间。
-    const yMax = niceMax(opt.axesOnly ? (opt.yMax || 1) : dataMax * 1.06);
+    // 没有采样（含 offline 的 axesOnly）时退回待机量程，见 IDLE_RATE。
+    const yMax = niceMax(opt.yMax || (dataMax > 0 ? dataMax * 1.06 : IDLE_RATE));
+    const fmtY = opt.formatY || axisRate;
 
     if (empty) {
       setShape(entry, 'L|empty', {
         animation: false,
-        grid: gridFor(opt),
+        grid: gridFor(opt, yGutter(yMax, fmtY)),
         tooltip: { show: false },
         xAxis: emptyXAxis(slots, opt.xLabels),
-        yAxis: yAxisOpt(yMax, opt.formatY || axisRate),
+        yAxis: yAxisOpt(yMax, fmtY),
         series: [],
       });
       return;
@@ -280,7 +313,7 @@
 
     setShape(entry, `L|${seriesOpt.length}|${dash}|${slots}`, {
       ...animOpt(),
-      grid: gridFor(opt),
+      grid: gridFor(opt, yGutter(yMax, fmtY)),
       tooltip: {
         ...tooltipBase(),
         trigger: 'axis',
@@ -301,7 +334,7 @@
         },
       },
       xAxis: lineXAxis(slots, opt.xLabels),
-      yAxis: yAxisOpt(yMax, opt.formatY || axisRate),
+      yAxis: yAxisOpt(yMax, fmtY),
       series: seriesOpt,
     });
     entry.played = true;
@@ -331,7 +364,8 @@
       type: 'category',
       boundaryGap: false,
       data: labels,
-      axisLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30' } },
+      // 与网格线同一档：折线脚底那根基线要能看见，曲线落底时才读得出是 0。
+      axisLine: { lineStyle: { color: cssVar('--line') || '#32363e' } },
       axisTick: { show: false },
       axisLabel: { ...axisLabelOpt(), interval: (i) => i === 0 || i === slots - 1 },
     };
@@ -356,15 +390,16 @@
 
     let dataMax = 0;
     for (const g of groups) for (const v of g.values) if (v > dataMax) dataMax = v;
-    const yMax = niceMax(dataMax * 1.06);
+    const yMax = niceMax(dataMax > 0 ? dataMax * 1.06 : IDLE_BYTES);
+    const fmtY = opt.formatY || axisBytes;
 
     if (empty) {
       setShape(entry, 'B|empty', {
         animation: false,
-        grid: gridFor(opt),
+        grid: gridFor(opt, yGutter(yMax, fmtY)),
         tooltip: { show: false },
         xAxis: { ...lineXAxis(2, opt.xLabels), boundaryGap: true },
-        yAxis: yAxisOpt(yMax, opt.formatY || axisBytes),
+        yAxis: yAxisOpt(yMax, fmtY),
         series: [],
       });
       return null;
@@ -373,7 +408,7 @@
     const seriesCount = Math.max(1, groups[0].values.length);
     const sel = typeof opt.selectedIndex === 'number' ? opt.selectedIndex : -1;
     const tickSet = new Set((opt.tickLabels || []).map((t) => t.index));
-    const grid = gridFor(opt);
+    const grid = gridFor(opt, yGutter(yMax, fmtY));
 
     const seriesOpt = [];
     for (let si = 0; si < seriesCount; si++) {
@@ -416,7 +451,9 @@
       xAxis: {
         type: 'category',
         data: groups.map((g) => g.label),
-        axisLine: { lineStyle: { color: cssVar('--line-soft') || '#272a30' } },
+        // 基线同样从 --line-soft 提到 --line：柱脚总得有一条落地线，
+        // 否则柱子在岛底凭空截断，读不出「这就是 0」。
+        axisLine: { lineStyle: { color: cssVar('--line') || '#32363e' } },
         axisTick: { show: false },
         // 两端标注 + 月初刻度（tickLabels），贴太近的让 hideOverlap 裁掉
         axisLabel: {
@@ -425,7 +462,7 @@
           hideOverlap: true,
         },
       },
-      yAxis: yAxisOpt(yMax, opt.formatY || axisBytes),
+      yAxis: yAxisOpt(yMax, fmtY),
       series: seriesOpt,
     });
     entry.played = true;

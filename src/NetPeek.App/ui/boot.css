@@ -1,0 +1,327 @@
+/* NetPeek 启动动效 —— 编排层（pixel2motion Phase 3 产物）。
+
+   资产与编排是分开的：
+     几何/字标路径  → assets/boot-motion/logo.svg + outputs/lockup.frag
+                      （由 tools/compose_lockup.py 生成并注入本目录的 index.html）
+     时间线与缓动  → 本文件
+   所以调时序不用碰几何，重拟合波形也不用碰时序。
+
+   三条硬约束，改之前先读：
+   1) 最终帧 == 基础样式。
+      所有 @keyframes 只描述「过程」；动画结束/被禁用（reduced-motion、?static=1、
+      首帧 JS 还没跑）时元素必须落在最终帧上。所以：
+        #pulse-line 基础 stroke-dashoffset: 0（画完），keyframes 里 0% 才是 1（未画）。
+      反过来的写法（基础=隐藏、动画去揭示）会让任何一次动画失败都变成「一片空白」。
+   2) 时间线只有一份，就是各条规则里的 animation-delay 字面量。
+      截帧/拖动时间轴走 Web Animations 的 currentTime（见 logo_motion.html 的 JS），
+      不引入第二套并行的时间源。曾经用过「--np-t 参与 animation-delay 计算」的写法，
+      看着很优雅，实际是错的：暂停一个**已经在跑**的动画，它的停表时间是
+      「暂停那一刻已经走了多久」，这个值取决于页面加载时序 —— 于是 t=100ms 的帧
+      里混进了几十毫秒的启动偏移，且每次冷启动都不一样。数字对不上的 bug 最难查，
+      因为它每次复现的结果都不同。改成 currentTime 后，t 就是时间线上的绝对时刻。
+
+   时间预算 2400ms（2000ms 动效 + 400ms 定格）
+     0–520     前奏：版式淡入、上浮 10px、从 98.5% 放大到位
+     300–1260  主波描线 960ms（前奏还没落定就起笔，两段是搭着的）
+     440–1400  外发光同长跟随，滞后 140ms
+     720–1560  次级回波滞后 420ms，略短（路径也短）
+     1020–1700 发光呼吸一次，峰值落在主波收笔那一刻
+     1380–2000 字标自左向右擦除揭示
+     2000–2400 定格：什么都不动，让这个标记被看清一次
+     2400–     卸幕（is-out，是一次状态切换、不属于时间线，见下面的「卸下」一节）
+
+   为什么有一段时间什么都不发生（2000–2400）：
+     上一版是「字标 1330ms 擦完、1400ms 就开始卸幕」，中间只有 70ms。
+     人眼要 200~400ms 才能把「刚刚成形的东西」登记下来，没有这段留白，
+     用户看到的就是「一闪而过，没看清长什么样」—— 也就是「死快」。
+     定格不是浪费，它才是这个动效唯一的落点。
+
+   实测量纲见 assets/boot-motion/outputs/motion_metrics.json 与 motion_sheet.png。
+
+   3) 底色不参与动画。
+      曾经给整层挂过一条 opacity 0→1 的淡入。去掉的原因不是好看不好看，是**不安全**：
+      淡入的 0% 是「全透明」，而全透明意味着底下的界面会透出来 ——
+      而启动层存在的全部意义就是「在界面还没就绪时把没就绪的样子挡住」。
+      只要动画还没跑到、或者被暂停在起点，这层就变成了「露出半成品」的帮凶。
+      现在的做法：底色从第一帧就是实的不透明的，动效只发生在内容上。 */
+
+/* ---------- 幕布：铺满窗口，压住底层界面 ---------- */
+
+.np-boot {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-boot);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  /* 底色与 .frame 逐字一致（含 --ui-opacity）：启动层淡出时两者必须无差，
+     否则会在交接的那几帧看到一圈色差。 */
+  background: color-mix(in srgb, var(--bg, #1b1d21) calc(var(--ui-opacity, 1) * 100%), transparent);
+}
+
+/* ---------- 卸下：先收内容，再撤幕布 ---------- */
+
+/* 淡出用 transition 而不是 animation：它是一次性的状态切换，不属于时间线。
+   动画列表里多挂一条终结动画，会让「这条动画跑完了吗」这个判断变复杂，
+   而这里真正需要的只是「半秒后可以把这个节点删掉」。
+
+   两段式，不是一次淡出：
+     0–220ms   标记缩小到 97.2% 并淡掉（内容先走）
+     100–460ms 幕布淡掉（晚 100ms 起、晚 240ms 收）
+   原来是 260ms 把两者一起淡掉，读起来是「整块画面被擦掉」。分开之后
+   标记是「退后一步淡出」、底色随后「揭开」，交接有主次，像收场而不是切断。
+   退场用加速曲线（M3 emphasized-accelerate）—— 离场要越走越快，
+   用进场那条减速曲线会显得黏。 */
+.np-boot.is-out {
+  animation: none !important;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 360ms var(--np-e-accel) 100ms;
+}
+
+/* `animation: none` 会把这棵子树上的动画摘掉，元素立刻落回基础样式 ——
+   而基础样式就是终帧（见文件头约束 1），所以这一步不会有任何跳变，
+   正好把 transform/opacity 让给下面的 transition。
+   （若不摘掉，np-rise 的 fill-mode: both 会一直占着这两个属性，
+   transition 根本插不进去 —— 和文件头约束 3 记的是同一个特异性坑。） */
+.np-boot.is-out #np-lockup {
+  animation: none !important;
+  opacity: 0;
+  transform: scale(0.972);
+  transition:
+    opacity 220ms var(--np-e-accel),
+    transform 220ms var(--np-e-accel);
+}
+
+/* ---------- 缓动 ----------
+
+   这几条曲线不是自己编的，全部取自 Material 3 的 motion token（业界被验证最多的
+   一套「看得舒服」的曲线）。为什么不自编：描线的起手快慢差 0.05，观感就从
+   「有笔锋」滑到「弹出去」，手调没有判据，只能来回试；而这些曲线是被几十亿次
+   交互检验过的，直接抄比自己发明可靠得多。
+
+   三条的分工：
+     decel  进场（开始快、结束慢）—— 元素「进来并落定」
+     inout  描线 —— 起手慢、中段匀、收笔慢，最接近真实书写
+     accel  退场（开始慢、结束快）—— 元素「离开」，越走越快才不黏 */
+.np-boot {
+  --np-e-decel: cubic-bezier(0.05, 0.7, 0.1, 1);   /* M3 emphasized-decelerate */
+  --np-e-inout: cubic-bezier(0.42, 0, 0.58, 1);    /* 经典 ease-in-out */
+  --np-e-accel: cubic-bezier(0.3, 0, 0.8, 0.15);   /* M3 emphasized-accelerate */
+}
+
+/* ---------- 锁定版式：标记 + 字标 ---------- */
+
+/* viewBox 固定 1180×720（= 主窗口设计尺寸），靠 preserveAspectRatio 等比适配。
+   上下限都要卡：
+     窗口最小 940×620 → 按高缩到约 0.86 倍；
+     窗口最大化到 2560×1440 → 若无上限，整块版式会被拉成两倍多，
+     变成一张「放大到糊的 logo」，而不是启动页。
+   所以取 min(容器, 设计尺寸)：小窗口等比缩，大窗口保持原尺寸居中。
+   所有版式数字来自 outputs/lockup.json，别在这里手调坐标。 */
+#np-lockup {
+  width: min(100%, 1180px);
+  height: min(100%, 720px);
+  display: block;
+  overflow: visible;
+
+  /* 缩放的中心。50% 50% 之所以就是「画面正中」：preserveAspectRatio 是默认的
+     xMidYMid，无论容器比例和 1180×720 差多少，viewBox 都居中放在容器里，
+     所以容器中心 == viewBox 中心 == 版式中心。显式写出来是为了让退场那句
+     scale() 不依赖「默认值刚好对」这件事。 */
+  transform-origin: 50% 50%;
+
+  opacity: 1;
+  animation: np-rise 520ms var(--np-e-decel) both;
+}
+
+/* 淡入 + 上浮 10px + 从 98.5% 放大到位。
+   位移刻意压得小：启动动效的位移一旦超过一个字高就会变成「动画表演」，
+   而这里要的是「装备就绪」。加 scale 是因为纯位移在深色大留白下显得单薄 ——
+   1.5% 的缩放几乎看不出来，但它让「落位」有了纵深。
+   缓动用 decel：进场元素该是「冲进来然后稳住」，而不是匀速平移。
+   opacity 挂在这里而不是整层：见文件头约束 3。 */
+@keyframes np-rise {
+  from { transform: translateY(10px) scale(0.985); opacity: 0; }
+  to   { transform: translateY(0)    scale(1);     opacity: 1; }
+}
+
+/* ---------- 配色 ---------- */
+
+/* 默认 = 品牌琥珀（与应用图标 / 安装包 / 任务栏图标同一套颜色）。
+   启动页是全应用唯一一个「品牌可以带色」的位置：tokens.css 的「琥珀不进 chrome」
+   约束管的是界面内的控件与选中态，而品牌露出就是这一刻。
+   要完全合规就把 preset-chrome 类挂到 .np-boot 上（中性反白，跟随后台皮肤）。 */
+.np-boot {
+  --np-main-a: #f49d49;   /* 主波渐变左端 */
+  --np-main-b: #fbd77f;   /* 峰顶最亮处 */
+  --np-main-c: #f0a14a;   /* 渐变右端 */
+  --np-glow-c: #f08a2a;   /* 外发光（描边本体，模糊由 feGaussianBlur 做） */
+}
+
+.np-boot.preset-chrome {
+  --np-main-a: #c9cdd4;
+  --np-main-b: #f4f5f7;
+  --np-main-c: #d7dade;
+  --np-glow-c: #f4f5f7;
+}
+
+/* ---------- 浅底皮肤（is-light-bg，由 boot.js 按 --bg 的实际亮度挂上） ----------
+
+   深底那套在浅底上不是「弱一点」，是**坏掉**。两个具体问题：
+
+   1) 峰顶 #fbd77f 对浅底 #f2f3f5 的对比度只有 1.25:1 —— 那条峰整个化掉，
+      只剩两端还看得见，形状读起来变成「断掉的线」。
+      修法不换色相，只压明度，并且保住「峰顶最亮」这个亮度结构：
+        左端 #a35a08 (4.70:1) / 峰顶 #c8751a (3.14:1) / 右端 #9d560a (5.02:1)
+      最低 3.14:1 卡在 WCAG 非文本对比度 3:1 之上（这是 16px 宽的线，不是正文）。
+
+   2) 次级暗波按 --text 派生，在浅底上会掉到 1.4:1（--text 在浅底是深色，
+      混 32% 太淡）。但「把百分比调大」这条路走不通 ——
+      深底要 16% 才到 2:1、浅底要 72%，同一个百分比跨底色根本不成立，
+      因为 sRGB 混色不保感知线性，两边差着四倍多。
+      所以浅底直接给一个实测过的具体值，不再用百分比推。
+        #a8aeb7 = 2.01:1，与深底实测的 2.02:1 对齐 —— 两种底下次波的「分量感」一致。
+
+   这两条都是量出来的，不是调出来的。改色前先算对比度，别凭手感。 */
+.np-boot.is-light-bg {
+  --np-main-a: #a35a08;
+  --np-main-b: #c8751a;
+  --np-main-c: #9d560a;
+  --np-glow-c: #b96a12;
+  --np-echo-c: #a8aeb7;
+}
+
+#pulse-line { stroke: url(#np-g-main); fill: none; }
+#pulse-glow { stroke: var(--np-glow-c); fill: none; }
+/* 次级暗波走「相对文字色的低对比中性」而不是源图那个 #2A2F2F：
+   源图是深色线条压在深色底片上，搬到深色皮肤上会直接消失。
+   它的语义是「主波的伴生回波」——比底色亮一档、比主波弱得多，
+   所以按 --text 派生（深色皮肤=浅灰回波，浅色皮肤=深灰回波），
+   任何皮肤下都保持「可见但从属」。32% 是试出来的：再高就抢主波的视线。 */
+#pulse-echo {
+  stroke: var(--np-echo-c, color-mix(in srgb, var(--text, #e3e5e9) 32%, transparent));
+  fill: none;
+}
+
+/* 字标是**实心字形**，颜色必须显式给。
+   漏了这条不会报错、也不会显示成透明——SVG 里没写 fill 的路径一律按黑色填充，
+   在深色底上就是一块「看着像阴影的黑字」，很容易被当成「位置算错了」去查版式。 */
+.np-wm-glyph { fill: var(--np-word-c, var(--text, #e3e5e9)); }
+
+/* ---------- 描线（主波 / 发光 / 次波） ---------- */
+
+/* pathLength="1" 让三条路径都用同一套 0→1 的进度，
+   不必在运行时调 getTotalLength()（那条路会在动效起来前闪一帧全亮的线）。
+   基础值 = 画完；keyframes 的 0% = 未画。见文件头约束 1。 */
+#pulse-line,
+#pulse-glow,
+#pulse-echo {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+@keyframes np-draw {
+  from { stroke-dashoffset: 1; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* ---------- 描线（主波 / 发光 / 次波） ----------
+
+   三条线的**扫速**是这里唯一要盯的量：标记宽 / 时长。
+     上一版 560px / 620ms = 0.90 px/ms —— 快到眼睛跟不上笔画的前沿，
+     读出来就是「唰一下没了」。这一版 400px / 960ms = 0.42 px/ms，
+     还不到原来的一半，加上缓动换了曲线，才有「被画出来」的过程感。
+     改标记宽度（compose_lockup.py 的 MARK_W）时，这里必须同步重算扫速。
+
+   缓动为什么从「快起减速」换成 ease-in-out：
+     原来用的 cubic-bezier(0.25,0.7,0.35,1) 是条减速曲线 —— 前 30% 的时长
+     就走完约 50% 的路程，起手那一下是**弹出去**的。这正是「死快」的第二个来源：
+     总时长看着不短，但最该被看清的起笔一闪而过，剩下大半时间反而是慢的。
+     ease-in-out 慢起、匀走、慢收，起笔有个「落笔」的瞬间，收笔也不撞墙。
+
+   相位差刻意拉开（140ms / 420ms）：上一版三条线挤在 240ms 内先后起跑，
+   视觉上并成一个爆发；拉开之后才读得出「主波 → 发光跟着 → 回波补上」的次序。 */
+#pulse-line {
+  animation: np-draw 960ms var(--np-e-inout) 300ms both;
+}
+
+/* 外发光：滞后 140ms、同长。它是主波的加宽模糊复制，
+   滞后让它看起来是「被主波拖着走」而不是另一个独立图层。 */
+#pulse-glow {
+  animation: np-draw 960ms var(--np-e-inout) 440ms both;
+}
+
+/* 次级回波：滞后 420ms、略短（它的路径也短）。 */
+#pulse-echo {
+  animation: np-draw 840ms var(--np-e-inout) 720ms both;
+}
+
+/* ---------- 发光呼吸：画完之后过曝一次再落回 ---------- */
+
+/* 分成外层 <g> 承担不透明度、内层 <path> 承担描线，是为了让「一条元素一条动画」。
+   两个动画挤在同一个元素上，截帧时按 currentTime 定位就要按动画分别算，没必要。
+
+   峰值时刻是算出来的，不是试出来的：delay 1020 + 680×45% ≈ 1326ms，
+   正落在主波收笔（1260ms）与发光收笔（1400ms）之间 —— 呼吸的顶点必须
+   压在笔画刚成形的那一刻，早于它像「没画完就闪」，晚于它像「事后补闪」。
+   起止都回到基础值 0.55：动画结束后不留末帧残留，否则每次重播都从更高处开始。 */
+.np-glow-wrap {
+  opacity: 0.55;
+  animation: np-bloom 680ms var(--np-e-inout) 1020ms both;
+}
+
+@keyframes np-bloom {
+  0%   { opacity: 0.55; }
+  45%  { opacity: 0.86; }
+  100% { opacity: 0.55; }
+}
+
+/* ---------- 字标：自左向右擦除揭示 ---------- */
+
+/* 距离取 --np-word-wipe（= 字标墨迹宽，由 compose_lockup.py 写进 #np-lockup 的变量块），
+   不写字面量是为了让版式常量只有一个来源：波形重拟合改变了墨迹宽，这里自动跟上。
+
+   扫速同样要对齐波形：360px / 620ms = 0.58 px/ms。
+   上一版是 504px / 400ms = 1.26 px/ms —— 全条时间线上最快的一段，
+   而且是**最后**发生的，所以「还没看清就已经闪过去了」的第一印象是它造成的。
+   现在它比波形还慢一点，收尾反而成了最从容的一段。 */
+@keyframes np-wipe {
+  from { transform: translateX(calc(-1 * var(--np-word-wipe, 300px))); }
+  to   { transform: translateX(0); }
+}
+
+#np-word-clip-rect {
+  transform: translateX(0);
+  animation: np-wipe 620ms var(--np-e-inout) 1380ms both;
+}
+
+/* ---------- 捕获 / 无动效 / 降级 ---------- */
+
+/* 截帧模式：动画全部冻结，位置由 JS 按 currentTime 指定（见 logo_motion.html）。
+   这里的 paused 是兜底 —— 它保证「JS 写完 currentTime」到「截图」之间不会再有漂移。 */
+.np-boot.is-capture,
+.np-boot.is-capture * {
+  animation-play-state: paused !important;
+}
+
+/* 静态模式：直接删掉动画，元素落回基础样式（= 最终帧）。
+   reduced-motion 走同一结果 —— 不是「不播动画」，而是「本来就只有终帧」，
+   这条路径不依赖任何动画能否跑起来。
+
+   !important 是必需的，不是偷懒：上面几条动画规则挂在 ID 上（#pulse-line 的
+   特异性是 100），而这里的选择器最多到 20，不加 !important 根本盖不住。
+   盖不住的后果很隐蔽 —— 动画仍在跑，只是「刚好已经跑完」，于是静态路径在
+   正常情况下看着完全正确，一旦动画被拖慢或中途失败就全盘失效。
+   （这条是 QA 在 reduced-motion 帧与静态终帧不一致时报出来的。） */
+.np-boot.is-static,
+.np-boot.is-static * {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .np-boot,
+  .np-boot * {
+    animation: none !important;
+  }
+}
