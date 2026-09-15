@@ -437,11 +437,11 @@
             </div>
 
             <div class="srow" id="opRow">
-              <div class="t"><b>面板不透明度</b><small>越低底图越透出来。图偏亮时系统自动补压暗，文字始终可读</small></div>
+              <div class="t"><b>面板不透明度</b><small id="opHint">越低底图越透出来。面板身后那块背景会自动归一成柔色，拉到最低也读得清</small></div>
               <div class="slider">
-                <input type="range" id="stdOpacity" min="0.7" max="1" step="0.01" value="0.88"
+                <input type="range" id="stdOpacity" min="0.3" max="1" step="0.01" value="0.45"
                        aria-label="面板不透明度" />
-                <span class="value" id="opValue">0.88</span>
+                <span class="value" id="opValue">0.45</span>
               </div>
             </div>
             <!-- 这张图触发自动压暗 / 硬钳时才出现 -->
@@ -454,7 +454,7 @@
               </div>
             </div>
             <div class="srow" id="scrimRow">
-              <div class="t"><b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small></div>
+              <div class="t" id="scrimLabel"><b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small></div>
               <div class="slider">
                 <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
                        aria-label="背景压暗" />

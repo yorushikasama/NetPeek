@@ -94,17 +94,20 @@ button { font-family: inherit; }
 }
 /* 噪点强度直接烘进 SVG（rect opacity）——background 栈的单层挂不了 CSS opacity。
    fractalNoise 去饱和后经 discrete 传递推成黑白盐椒，避免 50% 灰平涂发闷。
-   栈序（上→下）：噪点 → 顶栏渐变（用户压暗）→ tint 纱（用户压暗）→ 自动压暗
-   （守卫的纯黑补偿，垫在最底下只压底图本身）。 */
+   栈序（上→下）：噪点 → 顶栏渐变（用户纱浓度）→ tint 纱（用户纱浓度，低彩度）
+   → 自动补偿（守卫的纯色层，垫在最底下只作用于底图本身）。
+   纯色层的颜色走 --backdrop-veil（theme.applyBackdrop 按皮肤方向铺 0 0 0 或
+   255 255 255）：深色皮肤整体是黑纱压亮区，浅色皮肤整体是白纱抬暗区 ——
+   旧版写死黑色，浅色皮肤上黑纱既弄脏露出的图、又把守卫的地板越抬越高。 */
 .backdrop::after {
   content: '';
   position: absolute;
   inset: 0;
   background:
     var(--noise-url) repeat,
-    linear-gradient(to bottom, rgb(0 0 0 / calc(var(--backdrop-dim) * 0.55)), rgb(0 0 0 / 0) 96px),
+    linear-gradient(to bottom, rgb(var(--backdrop-veil, 0 0 0) / calc(var(--backdrop-dim) * 0.55)), rgb(var(--backdrop-veil, 0 0 0) / 0) 96px),
     color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
-    rgb(0 0 0 / var(--backdrop-auto, 0));
+    rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0));
 }
 body:not(.has-bg) .backdrop::after { content: none; }
 
@@ -132,6 +135,51 @@ body.has-bg {
 body.has-bg .card,
 body.has-bg .rc {
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+/* 真磨砂 + 面板级背景归一化（仅置底模式）：面板对身后的图做
+   blur + var(--lens-filter)——图在面板处化成柔色、在缝隙里保持原样锐利。
+   这是任意壁纸「高级感」的主杠杆（macOS vibrancy / Win11 Acrylic 的同名步骤）。
+   --lens-filter（theme.js 写入，见那里的 LENS / lensFromImage 推导）把身后的背景压进
+   本皮肤方向的一条窄明度带：浅色基线 ≈ contrast(.105) brightness(1.9) saturate(3.2)，
+   深色 ≈ contrast(.9) brightness(.5)。这组数不是常量 —— 只要底图解码完了，就按这张图
+   自己的灰范围反解（auto-levels：把等效灰通道的 [p2, p98] 拉张开铺满同一条带），于是
+   近黑、几乎没有内部对比的壁纸也能把「形」透出来；图太平或还没解码完才回落上面的基线。
+   带上它之后面板才终于可以「薄」——
+   漆层降到 0.3–0.6 底图仍然透得出来且文字可读；没有它就只能靠把面板不透明度
+   抬到 0.9+ 换可读性（底图等于看不见，2026-09-15 用户实测）。
+   saturate 是必需的补偿：contrast 收缩会把彩度一起压掉，不补的话暗红壁纸在
+   面板下会变成一块灰粉。
+   注意 backdrop-filter 会把 position:fixed 后代困成相对自己定位——右键菜单 /
+   toast 挂在 body 下、rail tooltip 是 absolute、resize-edge 是 .frame 子元素，
+   都不受影响（2026-09-15 核对过挂载点）。 */
+body.has-bg:not(.wrap-mode) .card,
+body.has-bg:not(.wrap-mode) .rc,
+body.has-bg:not(.wrap-mode) .topbar,
+body.has-bg:not(.wrap-mode) .rail,
+body.has-bg:not(.wrap-mode) .snav,
+body.has-bg:not(.wrap-mode) .sbody {
+  -webkit-backdrop-filter: blur(16px) var(--lens-filter, saturate(1.5));
+  backdrop-filter: blur(16px) var(--lens-filter, saturate(1.5));
+}
+
+/* 浮起阴影按皮肤方向分档（body.light-skin 由 applyBackdrop 点亮，仅置底模式）：
+   浅色面板是「亮玻璃」，两件事必须一起做才像玻璃 —— ① 边缘：浅色面板上的
+   7% 白高光是看不见的（白压白没有对比度），得给到 70% 左右的顶棱 + 一圈 30%
+   的白线，玻璃才有「接住光」的边；② 落影：一枚贴近的接触影（0 1px 2px）把它
+   钉在底图上，再一枚大半径环境影给出悬浮高度，层次是这两枚撑起来的（只有大
+   半径柔影时面板像悬空的纸片）。深色面板与暗图同调，维持原来的重影一档。 */
+body.has-bg.light-skin .card,
+body.has-bg.light-skin .rc {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 72%),
+    inset 0 0 0 1px rgb(255 255 255 / 30%),
+    0 1px 2px rgb(0 0 0 / 12%),
+    0 14px 34px rgb(0 0 0 / 24%);
+}
+body.has-bg:not(.light-skin) .card,
+body.has-bg:not(.light-skin) .rc {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%), 0 10px 30px rgb(0 0 0 / 34%);
 }
 
 /* 贴膜显示模式（body.wrap-mode）：壁纸作为一张平面的膜按「窗口坐标」对齐铺下，

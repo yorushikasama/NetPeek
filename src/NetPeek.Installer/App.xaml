@@ -1,0 +1,140 @@
+<Application x:Class="NetPeek.Installer.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <!-- 安装器皮肤 = 主应用 tokens.css 的 v2 朴素基底（中性灰黑），逐值对齐。
+             核心约束同源：交互强调一律中性反白（accent），琥珀/钢蓝只属于数据
+             语义，永远不进 chrome —— 主按钮/进度条都不用彩色。 -->
+        <SolidColorBrush x:Key="BgBrush" Color="#1B1D21"/>          <!-- tokens: bg -->
+        <SolidColorBrush x:Key="PanelBrush" Color="#22252A"/>       <!-- tokens: panel -->
+        <SolidColorBrush x:Key="PanelHiBrush" Color="#2C2F36"/>     <!-- tokens: panel-hi -->
+        <SolidColorBrush x:Key="Panel2Brush" Color="#17191D"/>      <!-- tokens: panel-2 -->
+        <SolidColorBrush x:Key="LineBrush" Color="#32363E"/>        <!-- tokens: line -->
+        <SolidColorBrush x:Key="LineSoftBrush" Color="#272A30"/>    <!-- tokens: line-soft -->
+        <SolidColorBrush x:Key="TextBrush" Color="#E3E5E9"/>        <!-- tokens: text -->
+        <SolidColorBrush x:Key="Text2Brush" Color="#9BA1A9"/>       <!-- tokens: text-2 -->
+        <SolidColorBrush x:Key="Text3Brush" Color="#686E77"/>       <!-- tokens: text-3 -->
+        <SolidColorBrush x:Key="AccentBrush" Color="#E3E5E9"/>      <!-- tokens: accent：反白 -->
+        <SolidColorBrush x:Key="AccentInkBrush" Color="#1B1D21"/>   <!-- tokens: accent-ink -->
+        <SolidColorBrush x:Key="AccentHoverBrush" Color="#D3D5D9"/> <!-- accent 混入 accent-ink 一档 -->
+        <SolidColorBrush x:Key="PressBrush" Color="#272930"/>       <!-- tokens: press -->
+        <SolidColorBrush x:Key="OkBrush" Color="#4CC38A"/>          <!-- tokens: ok -->
+        <SolidColorBrush x:Key="ErrBrush" Color="#E57373"/>         <!-- tokens: error -->
+        <SolidColorBrush x:Key="ErrInkBrush" Color="#412121"/>      <!-- black 82% 混 error -->
+        <SolidColorBrush x:Key="DownBrush" Color="#F0963F"/>        <!-- tokens: down：仅品牌点缀 -->
+
+        <!-- 主按钮：.btn.is-primary —— 反白底 + 深字 + 600 -->
+        <Style x:Key="BtnPrimary" TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentInkBrush}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Padding" Value="20,0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{StaticResource AccentHoverBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="{StaticResource PressBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 次按钮：.btn.ghost —— 透明 + text-2，hover panel-hi -->
+        <Style x:Key="BtnGhost" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource Text2Brush}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Padding" Value="14,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{StaticResource PanelHiBrush}"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 窗控：.winbtns .icon-btn —— 34×30 / r-s 6 / text-2，hover panel-hi + text -->
+        <Style x:Key="WinBtn" TargetType="Button">
+            <Setter Property="Width" Value="34"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource Text2Brush}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{StaticResource PanelHiBrush}"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="{StaticResource PressBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 关闭钮：hover 走 error 语义色 + 深墨字（与主窗 .is-danger 同规则） -->
+        <Style x:Key="WinBtnDanger" TargetType="Button" BasedOn="{StaticResource WinBtn}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{StaticResource ErrBrush}"/>
+                                <Setter Property="Foreground" Value="{StaticResource ErrInkBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#3B1E1E"/>
+                                <Setter Property="Foreground" Value="{StaticResource ErrInkBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Application.Resources>
+</Application>

@@ -24,5 +24,8 @@ Desktop.ini
 src/NetPeek.App/src-tauri/installer/collector/
 *.wixobj
 
+# 自研安装器内嵌产物（build-installer.ps1 填充，两个 exe 共 ~52MB，不入库）
+src/NetPeek.Installer/payload/
+
 # 工作区临时资料（图标包下载缓存、解包中间物等，单个数 MB，不入库）
 .workbuddy/tmp/

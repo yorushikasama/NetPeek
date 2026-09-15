@@ -108,21 +108,235 @@ section('guardTokens：上屏的颜色一定过对比度');
   eq(good.adjusted.length, 0, '出厂皮肤本来就合格，不该被动一个键');
 }
 
-section('backdropFloor：面板不透明度下限由实测底图亮度推出');
+section('glass lens：带端由可读性契约反解，带宽就是底图的形');
 {
-  // 界面上写着「0.82 下限保证 4.5:1」，实测并不成立：面板叠在任意照片上时，
-  // 有效底色是合成结果，固定下限保证不了任何东西。压暗层在面板之下、值已知，
-  // 所以由它承担这个保证。
-  const white = T.backdropFloor(T.SKINS.plain.tokens, 1.0, 0.2);
-  const black = T.backdropFloor(T.SKINS.plain.tokens, 0.0, 0.2);
-  ok(white >= 0.82 && white <= 1, '白底：下限落在合法区间');
-  ok(white > black, '越亮的底图要求越高的面板不透明度');
+  // 这一节替换掉「窄带」时代的契约。旧版把带写死成浅色 [0.85, 1] 通道 —— 一条
+  // 0.15 宽、贴着纯白的窄带，底图自己的形在里面只剩几个灰阶（实测面板上只剩
+  // p2p 6/255），用户因此连着两次报「不透明度拉到最低也透不出底图」。
+  // 现在带端由 theme.lensBand 反解：在设计不透明度（取滑杆下限，于是契约在整个
+  // 滑杆行程上都成立）下，最不利那档面板上 GLASS_TIERS 每一档都要达标。
+  // 带宽 = 底图的形能用的空间，所以这一节主要钉「带够宽」+「带端刚好卡在那条线上」。
+  const light = T.expandTokens({
+    bg: '#f5e4df', panel: '#f8eeeb', text: '#2a2c30', accent: '#2a2c30',
+    down: '#8d5621', up: '#39668f', ok: '#1f6f44', warn: '#8a6608', error: '#b3352b',
+  }, { tightRamp: true });
+  const dark = T.expandTokens({
+    bg: '#161418', panel: '#1c191d', text: '#f2ecea', accent: '#f2ecea',
+    down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+  }, { tightRamp: true });
 
-  // 拿返回的下限合成一次，验证它真的兑现了 4.5:1
-  const floor = T.backdropFloor(T.SKINS.plain.tokens, 1.0, 0.2);
-  const eff = T.effectivePanel(T.SKINS.plain.tokens, 1.0, 0.2, floor);
-  ok(T.contrast(T.hexToRgb(T.SKINS.plain.tokens.text2), T.hexToRgb(eff)) >= 4.5,
-    '按下限合成后，次要文字也达标（原来这里是 3.30）');
+  const hexOf = (c) => '#' + ['r', 'g', 'b'].map((k) => Math.round(
+    Math.min(255, Math.max(0, c[k])),
+  ).toString(16).padStart(2, '0')).join('');
+  // 最不利那档面板：浅色皮肤怕「更暗」（暗字没地方落）取更暗的，深色取更亮的
+  const worstSurf = (tokens) => {
+    const p1 = T.hexToRgb(tokens.panel);
+    const p2 = T.hexToRgb(tokens.panel2);
+    const lt = T.isLightSkin(tokens);
+    return lt
+      ? (T.luminance(p1) <= T.luminance(p2) ? p1 : p2)
+      : (T.luminance(p1) >= T.luminance(p2) ? p1 : p2);
+  };
+  // 带上的灰 × 最不利面板，按设计不透明度调和 → 各档字阶的 Lc
+  const lcsAt = (tokens, t) => {
+    const p = worstSurf(tokens);
+    const op = T.LENS_DESIGN_OP;
+    const g = t * 255;
+    const comp = { r: g + (p.r - g) * op, g: g + (p.g - g) * op, b: g + (p.b - g) * op };
+    const hex = hexOf(comp);
+    const tiers = T.isLightSkin(tokens) ? T.GLASS_TIERS.light : T.GLASS_TIERS.dark;
+    return tiers.map(([k, min]) => [k, Math.abs(T.apcaLc(tokens[k], hex)), min]);
+  };
+  // 自校准后的**实际**目标 = min(声明档位, 该档在「最有利端」实测对比 × GLASS_TIER_REL)。
+  // 判定必须用它，不能直接用声明档位 —— 深色那枚中灰的物理上限低于声明档位，拿声明
+  // 档位判会永远判不过，这正是旧实现的死结：带退化成一个点。
+  // 实际目标直接取实现导出的那一份（glassTierTargets），测试不重抄一遍公式 ——
+  // 两处口径一旦漂移，重抄的那份会假装通过。
+  const effTiers = (tokens) => T.glassTierTargets(tokens);
+  const tiersOkAt = (tokens, t) => {
+    const eff = new Map(effTiers(tokens));
+    return lcsAt(tokens, t).every(([k, v]) => v >= (eff.get(k) ?? 0) - 0.5);
+  };
+  const brief = (rows) => JSON.stringify(rows.map(([, v]) => Math.round(v)));
+
+  eq(T.LENS_DESIGN_OP, T.MIN_PANEL_OP, '带端按滑杆下限反解（契约在整个滑杆行程上成立）');
+
+  const [l0, l1] = T.lensBand(light);
+  eq(l1, 0.99, '浅色带顶留一点白（不烧成纯色）');
+  ok(tiersOkAt(light, l0), `浅色带底上各字阶达标（Lc ${brief(lcsAt(light, l0))}）`);
+  ok(!tiersOkAt(light, l0 - 0.02), '浅色带底不是白送的：再往下 0.02 就有档位不达标');
+  ok(l1 - l0 >= 0.30,
+    `浅色带够宽（${(l1 - l0).toFixed(3)} ≥ 0.30）—— 这是「底图的形」能用的空间`);
+
+  const [d0, d1] = T.lensBand(dark);
+  eq(d0, 0.05, '深色带底留一点黑（暗部不压死、形还在）');
+  ok(tiersOkAt(dark, d1), `深色带顶上各字阶达标（实测 Lc ${brief(lcsAt(dark, d1))}）`);
+  ok(!tiersOkAt(dark, d1 + 0.02), '深色带顶不是白送的：再往上 0.02 就有档位不达标');
+  ok(d1 - d0 >= 0.20, `深色带够宽（${(d1 - d0).toFixed(3)} ≥ 0.20）`);
+
+  // bandOf 与 lensBand 同源（前者的通道端就是后者的亮度版），审计口径才不会漂
+  ok(Math.abs(T.bandOf(light)[0] - T.luminance({ r: l0 * 255, g: l0 * 255, b: l0 * 255 })) < 1e-9,
+    'bandOf 与 lensBand 同源（浅色带底）');
+  ok(Math.abs(T.bandOf(dark)[1] - T.luminance({ r: d1 * 255, g: d1 * 255, b: d1 * 255 })) < 1e-9,
+    'bandOf 与 lensBand 同源（深色带顶）');
+
+  // 地板在这个契约下不再需要：任意底图亮度，深浅两侧的地板都退回滑杆下限
+  // —— 这就是「滑杆不被系统拿走」的回归锁。
+  for (const L of [0, 0.0014, 0.02, 0.12, 0.6, 1.0]) {
+    const gl = T.backdropGuard(light, L, 0.09, T.MIN_PANEL_OP);
+    eq(gl.floor, T.MIN_PANEL_OP, `浅色派生 + 底图亮度 ${L}：地板退回滑杆下限`);
+    eq(gl.autoDim, 0, `浅色派生 + 底图亮度 ${L}：不铺自动纱`);
+    const gd = T.backdropGuard(dark, L, 0.30, T.MIN_PANEL_OP);
+    eq(gd.floor, T.MIN_PANEL_OP, `深色派生 + 底图亮度 ${L}：地板退回滑杆下限`);
+    eq(gd.autoDim, 0, `深色派生 + 底图亮度 ${L}：不铺自动压暗（带顶已经压在契约线上）`);
+  }
+
+  // —— 用户第二次报缺陷的回归锁（深色那一半） ——
+  // 实测来源：2026-09-15 用户壁纸（橙红火焰）派生出的深色皮肤，token 实测为
+  //   panel #1e130f / panel2 #0e0604 / text #f0e5e2 / text2 #9b8f8b
+  // 这枚中灰次要字压在近黑底上，|Lc| 的物理上限只有 ≈43（连纯黑也只给 43.3），
+  // 而 GLASS_TIERS.dark 当时声明 45 —— 契约无解。旧实现无解时返回退化的
+  // [0.05,0.05]，lensParams 因斜率 0 返回 null，lensOf 变 null，backdropGuard
+  // 退回「无透镜」分支把面板地板顶到 1：深色面板全不透明，底图彻底消失
+  // （像素量尺实测 p2p 0/255 —— 就是用户那句「现在深色也一样了」）。
+  // 自校准之后下面每一条都必须同时成立，缺一条就是缺陷复发。
+  const userDark = {
+    ...dark,
+    bg: '#140906', panel: '#1e130f', panel2: '#0e0604',
+    text: '#f0e5e2', text2: '#9b8f8b', text3: '#6a5e5a',
+  };
+  eq(T.isLightSkin(userDark), false, '实测深色皮肤：方向判为深色（亮字压暗底）');
+  const [u0, u1] = T.lensBand(userDark);
+  ok(u1 - u0 >= 0.20,
+    `实测深色皮肤：带不退化成点（${u0.toFixed(3)} → ${u1.toFixed(3)}，宽 ${(u1 - u0).toFixed(3)}）`);
+  const uLens = T.lensOf(userDark);
+  ok(uLens !== null, '实测深色皮肤：透镜非空（否则守卫退回「无透镜」把面板顶成全不透明）');
+  ok(uLens.contrast > 0 && uLens.brightness > 0, '实测深色皮肤：透镜参数有效');
+  const uEff = new Map(effTiers(userDark));
+  ok(uEff.get('text2') < 45 && uEff.get('text2') > 0,
+    `实测深色皮肤：次要字档被自校准松到 ${uEff.get('text2').toFixed(1)}（物理上限 ≈43，声明 45 无解）`);
+  eq(uEff.get('text'), 60, '实测深色皮肤：正文档位余量充足，自校准不动它');
+  const ug = T.backdropGuard(userDark, 0.06, 0.2, T.MIN_PANEL_OP);
+  eq(ug.floor, T.MIN_PANEL_OP, '实测深色皮肤：地板仍是滑杆下限（面板不会变成全不透明）');
+  eq(ug.autoDim, 0, '实测深色皮肤：不铺自动补偿（滑杆不被拿走）');
+  // 兜底本身也不能再退化成「没有透镜」：契约自校准后走不到，但形状必须是有效透镜
+  const wide = { ...userDark, text2: '#1e130f' };   // 次要字与面板同色 → 物理对比为 0
+  const wLens = T.lensOf(wide);
+  ok(wLens !== null && wLens.contrast > 0,
+    '病态 token（次要字与面板同色）：兜底仍是有效透镜，绝不返回 null');
+  ok(T.lensBand(wide)[1] - T.lensBand(wide)[0] > 0, '病态 token：带仍有正宽度');
+}
+
+section('自适应透镜（auto-levels）：把底图自己的灰范围铺满明度带');
+{
+  // 回落透镜把底图**整条** [0,1] 映射进带 —— 对「自己只占一小段灰」的壁纸，那 0.07
+  // 的内部对比只铺进带里的一小截、剩下的带宽空着（用户壁纸实测面板上的形只剩
+  // 6/255）。自适应透镜按图自己的 [p2, p98] 反解 contrast / brightness，把这段灰
+  // 拉张开铺满整条带；带端不动（那是可读性契约）。这一步是「不透明度拉到最低也
+  // 看得见底图」落地的最后一环。
+  const light = T.expandTokens({
+    bg: '#f5e4df', panel: '#f8eeeb', text: '#2a2c30', accent: '#2a2c30',
+    down: '#8d5621', up: '#39668f', ok: '#1f6f44', warn: '#8a6608', error: '#b3352b',
+  }, { tightRamp: true });
+  const dark = T.expandTokens({
+    bg: '#161418', panel: '#1c191d', text: '#f2ecea', accent: '#f2ecea',
+    down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+  }, { tightRamp: true });
+
+  const gray = (v) => { const c = Math.round(255 * v); return { r: c, g: c, b: c }; };
+  // 铺纱：与 theme.lensFromImage 内部那条完全同构 —— 纱色必须走 veilOf
+  // （浅色是 scrimTint 的亮分支，深色是纯黑），自己拿 scrimTint 拼会差一个方向
+  const mkVeiled = (tokens, scrim) => {
+    const vc = T.lumToChannel(T.luminance(T.veilOf(tokens))) / 255;
+    return (v) => v + (vc - v) * scrim;
+  };
+  const outCh = (lens, v) => T.lensApply(gray(v), lens).r / 255;
+
+  const [t0, t1] = T.lensBand(light);
+  const scrim = T.effectiveScrim(0.3, true);
+  const veil = mkVeiled(light, scrim);
+  const RANGES = [
+    ['用户壁纸（近黑星空）', 0.059, 0.130],
+    ['暗调照片', 0.030, 0.420],
+    ['中间调低对比', 0.400, 0.560],
+    ['正常照片', 0.050, 0.900],
+    ['高对比', 0.010, 0.990],
+  ];
+  for (const [name, lo, hi] of RANGES) {
+    const lens = T.lensFromImage(lo, hi, light, scrim, 1);
+    ok(lens, `${name}：反解出透镜参数`);
+    ok(lens.contrast > 0 && lens.brightness > 0, `${name}：参数为正（映射单调、不发散）`);
+    // 端点口径（第三次返工后）：图的最亮端**正好**落到带顶（用满带宽），而最暗端
+    // 落在带内 —— 带底留给「比 p2 更暗的像素」。旧版要求最暗端也压在带底上，那必然
+    // 让更暗的像素掉出带（实测弱字阶 Lc 28.6）。
+    ok(Math.abs(outCh(lens, veil(hi)) - t1) <= 0.03,
+      `${name}：灰最亮端落到带顶（${outCh(lens, veil(hi)).toFixed(3)} vs ${t1.toFixed(3)}）`);
+    ok(outCh(lens, veil(lo)) >= t0 - 0.01,
+      `${name}：灰最暗端落在带内（${outCh(lens, veil(lo)).toFixed(3)} ≥ 带底 ${t0.toFixed(3)}）`);
+    ok(Math.abs(outCh(lens, veil(0)) - t0) <= 0.02,
+      `${name}：输入纯黑落到带底（${outCh(lens, veil(0)).toFixed(3)}）`);
+  }
+
+  // 验收口径：面板身后那张背景的可变幅度（0..255）。回落透镜在「只占一小段灰」的
+  // 图上把带宽浪费掉，自适应透镜要把它抬到两位数，且乘完不透明度仍要够看。
+  const amp = (lens, lo = 0.059, hi = 0.130) => Math.abs(outCh(lens, veil(hi)) - outCh(lens, veil(lo))) * 255;
+  const near = T.lensFromImage(0.059, 0.130, light, scrim, 1);
+  const fallback = T.lensOf(light);
+  ok(amp(near) >= amp(fallback) * 8,
+    `近黑壁纸：身后幅度 ${amp(fallback).toFixed(1)}/255 → ${amp(near).toFixed(1)}/255（≥8×）`);
+  // 幅度门槛分两档，因为「锚点改到输入下限」之后幅度要乘一个折算系数
+  // factor = (hiV−loV)/(hiV−zeroV)：图自己的范围只占带的一段，剩下那一段留给
+  // 「比 p2 更暗的像素」（它们必须留在带内，这是契约对每个像素成立的前提）。
+  //   · 用户真壁纸（等效灰 p2≈0.020、p98≈0.193）→ factor≈0.90，几乎不损失，仍 ≥40；
+  //   · 下面这条合成用例 p2=0.059 离黑很远（比真图苛刻得多）→ factor≈0.55，
+  //     门槛按 40×0.55≈22 折算后再留余量，取 30。
+  const realRange = [0.020, 0.193];
+  ok(amp(near, ...realRange) * 0.7 >= 40,
+    `用户真壁纸那一档灰范围：0.30 面板上的调制 ${(amp(near, ...realRange) * 0.7).toFixed(1)}/255 ≥ 40`);
+  ok(amp(near) * (1 - T.MIN_PANEL_OP) >= 30,
+    `合成近黑档（比真图苛刻）：0.30 面板上的调制 ${(amp(near) * 0.7).toFixed(1)}/255 ≥ 30`);
+
+  // 新不变量（第三次返工的验收）：透镜输出**不可能**越过带底。旧锚点是 veiled(p2)，
+  // 于是所有比 p2 更暗的像素都掉到带底之下 —— 像素审计在用户真图上量到弱字阶
+  // Lc 28.6（旧窄带时代是 60.3），就是壁纸里成片的近黑区（渲染在 .top-meta 后面）
+  // 逃出带造成的。带是契约/守卫/审计三者的共同前提，输出一旦越界，三者的保证同时作废。
+  for (const [name, lo, hi] of [
+    ['近黑星空', 0.059, 0.130], ['暗调照片', 0.030, 0.420], ['中间调低对比', 0.400, 0.560],
+  ]) {
+    const l = T.lensFromImage(lo, hi, light, scrim, 1);
+    ok(l, `${name}：反解成功`);
+    let minOut = Infinity;
+    for (let v = 0; v <= 1.0001; v += 0.005) minOut = Math.min(minOut, outCh(l, veil(v)));
+    ok(minOut >= t0 - 0.01,
+      `${name}：输出下界 ${minOut.toFixed(3)} ≥ 带底 ${t0.toFixed(3)}（不越过带）`);
+  }
+
+  // 彩度补偿必须跟着 c 走：旧版把 3.2 写死（那是给 c=0.105 配的），透镜改成自适应
+  // 之后 c 变大、补偿过头 → 底图整幅发粉（用户截图里那层粉雾）。本轮的第二个坑。
+  eq(near.saturate, T.chromaComp(near.contrast), '饱和补偿由 c 反解，不再写死');
+  ok(near.saturate <= 2.6, `自适应透镜的饱和补偿落在钳位内（${near.saturate}）`);
+  ok(near.contrast > fallback.contrast,
+    `灰范围窄 → c 比回落透镜大（${near.contrast} > ${fallback.contrast}）`);
+
+  // 反例留档：若用「未铺纱」的范围反解、却把参数用在铺纱后的输入上，最暗端会被顶到
+  // 带顶之上全 clamp 成白 —— 底图反而彻底消失。这是本实现第一版的坑，必须被钉住。
+  const noVeil = T.lensFromImage(0.059, 0.130, light, 0, 1);
+  ok(outCh(noVeil, veil(0.059)) > t1,
+    '（反例）用未铺纱范围反解 → 铺纱后的最暗端被顶过带顶');
+
+  // 近乎纯色的图不给噪声送放大：参数退化时回落 lensOf
+  eq(T.lensFromImage(0.020, 0.035, light, scrim, 1), null, '近纯色图：回落 lensOf');
+  eq(T.lensFromImage(0.500, 0.505, light, scrim, 1), null, '平色图：回落 lensOf');
+  ok(T.MIN_IMG_RANGE > 0 && T.MIN_IMG_RANGE < 0.05, `平坦门槛在合理区间（${T.MIN_IMG_RANGE}）`);
+
+  // 深色侧镜像：亮底图的灰范围同样铺满深色带，且不越过带顶
+  const dScrim = T.effectiveScrim(0.3, false);
+  const dVeil = mkVeiled(dark, dScrim);
+  const dLens = T.lensFromImage(0.020, 0.900, dark, dScrim, 1);
+  ok(dLens, '深色皮肤：亮底图也能反解出参数');
+  const [, dT1] = T.lensBand(dark);
+  ok(outCh(dLens, dVeil(0.900)) <= dT1 + 0.03,
+    `深色皮肤：灰最亮端不越过带顶（${outCh(dLens, dVeil(0.900)).toFixed(3)} vs ${dT1.toFixed(3)}）`);
 }
 
 section('弱字阶托底：派生 text3 不跌破设计带（≈3:1）');
@@ -148,51 +362,90 @@ section('弱字阶托底：派生 text3 不跌破设计带（≈3:1）');
   eq(T.SKINS.light.tokens.text3, '#9098a4', 'light 的手写 text3 原样');
 }
 
-section('backdropFloor：下限只由 text2 驱动');
+section('薄面板原地达标：滑杆拉到底仍达标');
 {
-  // 旧版 floor 同时保 text2@4.5 与 text3@2.9 —— 让设计意图就是「弱」的字阶握着
-  // 最强的一票否决，实测任意真实照片（最坏块亮度 ≥0.2）都会把下限顶到 0.94+，
-  // 面板不透明度滑杆的可用区间只剩 0.04，三个材质滑杆全部失感（2026-09-13）。
-  // 现在 floor 只保 text2@4.5；text3 的可读性由派生托底与自动压暗间接保障。
-  // 方向：floor 抬高只发生在「字与有效底反向」的组合 —— 亮字皮肤遇亮图、
-  // 暗字皮肤遇暗图；反方向的组合（亮图 + 暗字）天然受益，不再被误抬。
-  const plain = T.SKINS.plain.tokens;
-  const light = T.SKINS.light.tokens;
-  ok(T.backdropFloor(plain, 0.92, 0.2) > 0.82, '亮字皮肤 + 亮图：下限抬过 0.82');
-  ok(T.backdropFloor(light, 0.066, 0.3) > 0.82, '暗字皮肤 + 暗图：下限抬过 0.82');
-  eq(T.backdropFloor(light, 0.92, 0.2), 0.82, '亮图 + 暗字：暗字在亮底上更清楚，下限不动');
+  // 用户两次报的缺陷（「不透明度拉到最低还是透不出底图」）的直接验收。透镜把面板
+  // 身后的背景按契约归一化之后，0.30 的漆层就够 —— 不再需要把地板抬到 0.9+
+  // （那样底图就看不见了）。断言锁三件：地板不介入、自动补偿不介入、最不利那档
+  // 面板上各档字阶仍站在玻璃档位之上（含此前被稀释到看不见的弱字阶）。
+  const light = T.expandTokens({
+    bg: '#f5e4df', panel: '#f8eeeb', text: '#2a2c30', accent: '#2a2c30',
+    down: '#8d5621', up: '#39668f', ok: '#1f6f44', warn: '#8a6608', error: '#b3352b',
+  }, { tightRamp: true });
+  const scrim = 0.09; // 浅色侧的最小亮纱（effectiveScrim 的折算下限）
+  // 最不利那档面板：浅色皮肤怕暗 → 两档里更暗的那档（顶栏 / rail 那档）
+  const pCard = T.hexToRgb(light.panel);
+  const pTop = T.hexToRgb(light.panel2);
+  const worst = T.luminance(pCard) <= T.luminance(pTop)
+    ? light : { ...light, panel: light.panel2 };
+  const tiersOf = (op, L) => [worst.text, worst.text2, worst.text3]
+    .map((c) => Math.abs(T.apcaLc(c, T.effectivePanel(worst, L, scrim, op))));
+  for (const L of [0, 0.0014, 0.12, 0.6, 1.0]) {
+    const g = T.backdropGuard(light, L, scrim, T.MIN_PANEL_OP);
+    eq(g.floor, T.MIN_PANEL_OP, `底图亮度 ${L}：地板不介入（滑杆拉到底即最优）`);
+    eq(g.autoDim, 0, `底图亮度 ${L}：浅色侧不铺自动亮纱（会连缝隙一起洗）`);
+    const [a, b, c] = tiersOf(T.MIN_PANEL_OP, L);
+    ok(a >= 60 && b >= 48 && c >= 32,
+      `底图亮度 ${L} + 0.30 漆层：三档字阶 ${a.toFixed(0)}/${b.toFixed(0)}/${c.toFixed(0)} ≥ 60/48/32`);
+  }
+  // 契约在滑杆下限上反解 ⟹ 往上拖只会更好
+  const [atMin] = tiersOf(T.MIN_PANEL_OP, 0.0014);
+  const [at45] = tiersOf(0.45, 0.0014);
+  ok(at45 > atMin, `拖高不透明度，正文更清楚（${atMin.toFixed(0)} → ${at45.toFixed(0)}）`);
+  // 层级不能用「把弱字阶压黑」换来：text3 仍明显弱于 text2
+  ok(T.luminance(T.hexToRgb(light.text3)) > T.luminance(T.hexToRgb(light.text2)),
+    'text3 仍比 text2 弱（层级用的是收窄的派生带，不是把弱字阶压黑）');
+  // 合成面落在 bandOf（= 透镜带端的亮度版）之内
+  const l = T.luminance(T.hexToRgb(T.effectivePanel(light, 0.0014, scrim, T.MIN_PANEL_OP)));
+  const [bLo, bHi] = T.bandOf(light);
+  ok(l >= bLo && l <= bHi,
+    `薄面板合成面落在玻璃带内（L ${l.toFixed(3)} ∈ [${bLo.toFixed(3)}, ${bHi.toFixed(3)}]）`);
 
-  // 中等亮度（0.2 = 「挺暗的照片」）不再把下限顶到 0.94+：本次重构的直接验收
-  const mid = T.backdropFloor(plain, 0.2, 0.37);
-  ok(mid < 0.94, `中等亮度图的下限回落到可用区间（实测 ${mid}）`);
-
-  // 暗图不能被抬高 —— 半透明是该模式的存在意义。
-  const mist = { ...T.SKINS.plain.tokens, panel: '#151619', text2: '#a9a19c' };
-  eq(T.backdropFloor(mist, 0.066, 0.3), 0.82, '晨雾级暗图（默认压暗）：下限仍是 0.82');
-  eq(T.backdropFloor(mist, 0.066, 0.2), 0.82, '晨雾级暗图（最低压暗）：下限仍是 0.82');
+  // —— 深色那一半（用户第二次报缺陷的另一半） ——
+  // 用实测的深色 token。透镜自校准把**次要字**档松到 ≈32（那枚中灰的物理上限只有
+  // ≈43，声明 45 无解），但**正文**（近白 #f0e5e2）档必须仍 ≥60 —— 这是「放宽次要字
+  // 换底图的形」这笔交易的下限，也是深色玻璃上用户真能感觉到的可读性。同时地板必须
+  // 仍是滑杆下限：地板一介入，面板就全不透明，底图又没了。
+  const duser = {
+    ...light,
+    bg: '#140906', panel: '#1e130f', panel2: '#0e0604',
+    text: '#f0e5e2', text2: '#9b8f8b', text3: '#6a5e5a',
+  };
+  for (const L of [0, 0.0014, 0.06, 0.6, 1.0]) {
+    const g = T.backdropGuard(duser, L, 0.2, T.MIN_PANEL_OP);
+    eq(g.floor, T.MIN_PANEL_OP, `深色实测皮肤 + 底图亮度 ${L}：地板不介入（底图不会被面板吃掉）`);
+    const eff = T.effectivePanel(duser, L, 0.2, T.MIN_PANEL_OP);
+    const body = Math.abs(T.apcaLc(duser.text, eff));
+    const sec = Math.abs(T.apcaLc(duser.text2, eff));
+    ok(body >= 60, `深色实测皮肤 + 底图亮度 ${L} + 0.30 漆层：正文 Lc ${body.toFixed(0)} ≥ 60`);
+    ok(sec >= 32, `深色实测皮肤 + 底图亮度 ${L}：次要字 Lc ${sec.toFixed(0)} ≥ 32（自校准档）`);
+  }
 }
 
-section('backdropGuard：亮图先补自动压暗，顶格才硬钳');
+section('backdropGuard：透镜在，守卫退休；只有没有透镜才兜底');
 {
-  const plain = T.SKINS.plain.tokens;
-  // 亮图 + 低不透明度：自动压暗补偿让用户选的 0.70 原地达标
-  const g = T.backdropGuard(plain, 0.95, 0.3, 0.7);
-  ok(g.autoDim > 0 && g.autoDim <= 0.6, `亮图触发自动压暗（${g.autoDim}）`);
-  const eff = T.effectivePanel(plain, 0.95, Math.min(1, 0.3 + g.autoDim), 0.7);
-  ok(T.contrast(T.hexToRgb(plain.text2), T.hexToRgb(eff)) >= 4.5,
-    '补完自动压暗后，0.70 不透明度下 text2 仍 ≥ 4.5');
-  // 暗图：零补偿
-  eq(T.backdropGuard(plain, 0.066, 0.3, 0.7).autoDim, 0, '暗图不需要自动压暗');
-  // 自动压暗顶格仍不达标 → 硬钳 floor 兜底
-  const g2 = T.backdropGuard(plain, 1.0, 0.2, 0.7);
-  if (g2.autoDim >= 0.6) {
-    ok(g2.floor > 0.7, `顶格仍不达标时给出硬钳 floor（${g2.floor}）`);
-  } else {
-    ok(g2.floor <= 0.7 + 1e-9, '未顶格时不需要硬钳');
+  const dark = T.expandTokens({
+    bg: '#161418', panel: '#1c191d', text: '#f2ecea', accent: '#f2ecea',
+    down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+  }, { tightRamp: true });
+  // 有透镜（置底模式 + 底图）：无论底图多亮多暗，地板与自动补偿都不介入 ——
+  // 用户拖到多少就是多少。「滑杆被系统拿走」正是用户连着两次报的同一个缺陷，
+  // 这个双层循环就是它的回归锁。
+  for (const L of [0, 0.066, 0.5, 0.95, 1]) {
+    for (const [name, tokens] of [
+      ['浅色', T.SKINS.light.tokens],
+      ['朴素', T.SKINS.plain.tokens],
+      ['深色派生', dark],
+    ]) {
+      const g = T.backdropGuard(tokens, L, 0.3, T.MIN_PANEL_OP);
+      eq(g.floor, T.MIN_PANEL_OP, `${name} + 底图亮度 ${L}：地板不介入`);
+      eq(g.autoDim, 0, `${name} + 底图亮度 ${L}：不铺自动补偿`);
+    }
   }
-  // 守卫对用户滑杆单调：不透明度越高，需要的自动压暗不增
-  const hi = T.backdropGuard(plain, 0.95, 0.3, 0.95);
-  ok(hi.autoDim <= g.autoDim, '不透明度调高，自动压暗随之减少');
+  // 没有透镜的路径（贴膜 / 无图）守卫照旧兜底：浅色皮肤 + 近黑底图 + 0.30 的漆层会
+  // 滑进中调，这时地板必须抬起来 —— 这是「退休」没有越界的证据。
+  const noLens = T.backdropFloor(T.SKINS.light.tokens, 0.0014, 0.09, T.MIN_PANEL_OP, null);
+  ok(noLens > T.MIN_PANEL_OP, `没有透镜时地板仍会兜底（抬到 ${noLens}）`);
 }
 
 section('backdropFloor：不耦合全局界面不透明度');
@@ -204,6 +457,36 @@ section('backdropFloor：不耦合全局界面不透明度');
   eq(T.backdropFloor.length, 3, 'backdropFloor 不再收 uiOpacity 参数');
   eq(T.effectivePanel(toks, 0.5, 0.3, 0.9), T.effectivePanel(toks, 0.5, 0.3, 0.9),
     'effectivePanel 是纯函数（同样的输入同样的漆）');
+  // 贴膜模式没有面板级 backdrop-filter（膜就是表面），模型必须显式关掉透镜 ——
+  // 忘了传 null 就会吃到默认透镜，判定比渲染乐观（wrapFloor 里就是传 null 的）。
+  const withLens = T.effectivePanel(toks, 0.0, 0.3, 0.3);
+  const noLens = T.effectivePanel(toks, 0.0, 0.3, 0.3, undefined, null);
+  ok(withLens !== noLens, '贴膜（lens=null）与置底（带透镜）的合成面必须不同');
+  eq(noLens, T.effectivePanel(toks, 0.0, 0.3, 0.3, undefined, null), '关掉透镜后仍是纯函数');
+}
+
+section('旧配置归位：地板时代留下的近实心面板不透明度');
+{
+  // 透镜上线前，面板不透明度被地板逼在 0.55–1.0 的近实心区间（最高 0.97），
+  // 那个区间只剩「底图看不见」一个作用。迁到新版本时一次性落回 0.45，且只做一次。
+  const old = T.migrateState({
+    skin: 'image', backgroundImage: 'C:/x.jpg', panelOpacity: 0.93,
+    imageMode: 'light', themes: {},
+  });
+  eq(old.panelOpacity, 0.45, '地板时代的 0.93 一次性归位到 0.45');
+  eq(old.opRev, 1, '归位打上标记，之后不再重复');
+  const keep = T.migrateState({
+    skin: 'image', backgroundImage: 'C:/x.jpg', panelOpacity: 0.8,
+    opRev: 1, imageMode: 'light', themes: {},
+  });
+  eq(keep.panelOpacity, 0.8, '已归位过的配置里，用户自己选的 0.8 不再被改');
+  const thin = T.migrateState({
+    skin: 'image', backgroundImage: 'C:/x.jpg', panelOpacity: 0.35,
+    imageMode: 'light', themes: {},
+  });
+  eq(thin.panelOpacity, 0.35, '本来就薄的面板原样保留');
+  eq(T.migrateState({ skin: 'image', backgroundImage: 'C:/x.jpg', themes: {} }).panelOpacity, 0.45,
+    '没存过面板不透明度的 image 用户落到新默认 0.45');
 }
 
 section('壁纸取色：交互色与数据色不同色');
@@ -483,11 +766,18 @@ section('显示方式与背景亮度：迁移与守卫');
   const r = T.resolveSkin(m);
   eq(r.backdropStyle, 'wrap', 'resolveSkin 带出显示方式');
   eq(r.wrapOpacity, 0.5, 'resolveSkin 带出浓度');
-  // 贴膜浓度地板（wrapFloor：主文字 4.5、次要 3.2）：亮图抬地板,暗图落在可用区间
+  // 贴膜浓度地板（wrapFloor）：守护档位 2026-09-15 从 WCAG 比值换成 APCA —— 亮侧
+  // 主文字 Lc 75 / 次要 Lc 60，暗侧只守次要文字 Lc 45（贴膜天然是装饰性的，弱字阶
+  // 不参与，否则膜会被推成不透明面板、模式失去意义）。
+  // 换度量后暗图地板上移 0.55 → 0.58：亮字压暗底时 APCA 45 比 WCAG 4.5 严约 0.03
+  // 个不透明度（探针实测 op=0.4 时合成面 #393b3d、text2 Lc 42.9；op=0.58 才到 45）。
+  // 0.58 仍在滑杆区间（0.4–0.9）的中段，贴膜的装饰性保留 —— 这正是本条要守的东西。
   const plain = T.SKINS.plain.tokens;
   ok(T.wrapFloor(plain, 0.92, 0.4) > 0.6, '亮图：贴膜浓度地板显著抬高');
   const darkFloor = T.wrapFloor(plain, 0.066, 0.4);
-  ok(darkFloor <= 0.55, `暗图：浓度地板落在可用区间（实测 ${darkFloor}）`);
+  ok(darkFloor <= 0.6, `暗图：浓度地板落在可用区间（实测 ${darkFloor}）`);
+  // 地板生效后，旧口径（WCAG 比值）也该同时成立 —— 两套度量在同一点互相印证，
+  // 换度量不该把原来就达标的组合弄坏。
   const f = T.wrapFloor(plain, 0.92, 0.4);
   const eff = T.effectivePanel(plain, 0.92, 0, f);
   ok(T.contrast(T.hexToRgb(plain.text), T.hexToRgb(eff)) >= 4.5, '主文字按地板调和后 ≥ 4.5');

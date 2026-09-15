@@ -121,6 +121,69 @@ function contrast(a, b) {
   return window.chroma.contrast(chromaOf(a), chromaOf(b));
 }
 
+// ---------- APCA（WCAG 3 的感知对比度模型） ----------
+//
+// 为什么面板被底图稀释之后不能再用 WCAG 2 的比值说了算：那个比值是「相对亮度」
+// 的线性比，而人眼对亮度差的感知在不同区间差着量级。面板被底图稀释成中调之后，
+// 暗字对它的比值还报 6–10（远超标），实际观感却是「灰字压灰底」——中调区间的
+// 亮度差最不值钱。2026-09-15 用户实测：近黑壁纸 + 浅色派生 + 面板 0.70，合成面
+// 落在 L 0.36 的中调，WCAG 判定「正文 6.6 达标」，而单位字、说明字、导轨图标
+// 全部糊掉（比值 1.4–2.8），只能靠人眼发现。
+//
+// APCA 是 WCAG 3（Silver）草案采用的替代模型：按极性分别取指数（暗字压亮底
+// ^0.57/^0.56，亮字压暗底 ^0.62/^0.65），对极暗色做软钳位（模拟光晕），
+// 输出带符号的 Lc（正 = 暗字压亮底，负 = 亮字压暗底），绝对值为可达性指标。
+// 它在中间调与低对比区间与人的判断吻合得多，正好补上上面那个盲区。
+// 常量取 Myndex 参考实现 0.1.9（4g）；算法本身在 public domain。
+const APCA = {
+  mainTRC: 2.4,
+  normBG: 0.56, normTXT: 0.57, revTXT: 0.62, revBG: 0.65,
+  sRco: 0.2126729, sGco: 0.7151522, sBco: 0.0721750,
+  blkThrs: 0.022, blkClmp: 1.414, deltaYmin: 0.0005,
+  scaleBoW: 1.14, scaleWoB: 1.14,
+  loBoWthresh: 0.035991, loBoWoffset: 0.027,
+  loWoBthresh: 0.035991, loWoBoffset: 0.027,
+};
+
+// 线性化用 ^2.4 而不是 WCAG 的 sRGB 分段曲线 —— APCA 的 sRGB 系数是配套这个的。
+function apcaY({ r, g, b }) {
+  const t = APCA.mainTRC;
+  return APCA.sRco * Math.pow(r / 255, t)
+    + APCA.sGco * Math.pow(g / 255, t)
+    + APCA.sBco * Math.pow(b / 255, t);
+}
+
+function apcaSoftClamp(y) {
+  return y > APCA.blkThrs ? y : y + Math.pow(APCA.blkThrs - y, APCA.blkClmp);
+}
+
+// 带符号的 Lc。|Lc| 是可达性指标：90 正文下限、75 理想正文、60 大字与 UI 部件、
+// 45 有意义的图标、30 装饰性部件。
+function apcaLc(fg, bg) {
+  const ytx = apcaSoftClamp(apcaY(typeof fg === 'string' ? hexToRgb(fg) : fg));
+  const ybg = apcaSoftClamp(apcaY(typeof bg === 'string' ? hexToRgb(bg) : bg));
+  if (Math.abs(ybg - ytx) < APCA.deltaYmin) return 0;
+  if (ybg > ytx) {
+    const s = (Math.pow(ybg, APCA.normBG) - Math.pow(ytx, APCA.normTXT)) * APCA.scaleBoW;
+    return s < APCA.loBoWthresh ? 0 : Math.round((s - APCA.loBoWoffset) * 1000) / 10;
+  }
+  const s = (Math.pow(ybg, APCA.revBG) - Math.pow(ytx, APCA.revTXT)) * APCA.scaleWoB;
+  return s > -APCA.loWoBthresh ? 0 : Math.round((s + APCA.loWoBoffset) * 1000) / 10;
+}
+
+// 字阶的 APCA 目标，按出厂皮肤反标定（不是照抄 APCA 通用表）：两套出厂皮肤
+// 实测 —— 浅色 正文 99 / 次要 78 / 弱字阶 53，朴素 86 / 49 / 24。
+// 底图稀释之后取「仍站得住、又不把层级压平」的一档：浅色 75 / 60 / 40。
+// 正文 75 就是 APCA 表里「理想正文」的下限（大字与 UI 部件的下限是 60）。
+// 弱字阶（40）是这次修复的重点 —— 旧实现完全不守它（注释里那句「3:1 是它的
+// 设计意图」，在底图把面板稀释成中调之后它只剩 Lc 16，设计意图早就没了）。
+// 深色皮肤沿用原档位（次要字 45 ≈ 原来的 WCAG 4.5）；底图只会把深色面板
+// 稀释得更暗，亮字在更暗的底上对比度只增不减，弱字阶不需要单独守。
+const APCA_TIERS = {
+  light: [['text', 75], ['text2', 60], ['text3', 40]],
+  dark: [['text2', 45]],
+};
+
 // 两色在色环上的最短距离（0–180）。无彩色（灰）h 为 NaN，按 0 处理——
 // 调用方只把它用在「彩色 vs 彩色」的判族上，灰色本来就该和任何彩色拉开。
 function hueDistance(a, b) {
@@ -307,7 +370,22 @@ const SKINS = {
 
 // 从核心键（bg / panel / text / down / up + 可选 accent）派生完整 17 键表。
 // 服务于动态路径：背景图取色、AI 生成、旧配置迁移。内置皮肤不走这里（手写精确值）。
-function expandTokens(core) {
+//
+// opts.tightRamp：给「面板会被底图稀释」的场景（跟随背景图皮肤）收两处结构：
+//
+// ① 字阶混比收紧（浅色侧 0.38/0.60 → 0.18/0.36）。线性混出来的 text2/text3 是
+//    相对「纯面板」调的，面板被稀释成中调之后这个相对关系整体下移 —— 0.38/0.60
+//    在合成面上只剩 Lc 59/32（2026-09-15 像素审计实测：顶栏那行状态字 36、
+//    卡片里的单位字 49），而收紧到 0.18/0.36 之后同一合成面上是 66/50。
+//    字阶是相对关系，合成面把整条阶压向中间，阶深也必须跟着收 —— 不收敛的结果
+//    是「正文还能看、说明字与图标先糊」，层级还在、可读性没了。
+// ② 凹档的落差收小（浅色侧 0.05 → 0.02）。0.05 的 OKLab 混比落在浅色区间是
+//    约 15% 的**亮度**落差（Oklab L 与 Y 近似立方关系），顶栏 / rail / 表头那一档
+//    （--panel-2）因此比面板暗出一整截 —— 本该是「一档凹色」，稀释后成了另一块
+//    中调面，同一条判据在它上面总是先失守（审计里 Lc 36 那三个元素全在顶栏）。
+//    深色侧不动：暗区里 15% 的亮度差本来就看不出来，亮字在更暗的底上只会更清楚。
+function expandTokens(core, opts = {}) {
+  const tight = !!opts.tightRamp;
   const bgRgb = hexToRgb(core.bg);
   const panelRgb = hexToRgb(core.panel);
   const textRgb = hexToRgb(core.text);
@@ -321,12 +399,12 @@ function expandTokens(core) {
     // 抬一档：hover、选中底、悬停读数小卡
     panelHi: rgbToHex(mixOk(panelRgb, toward, dark ? 0.06 : 0.10)),
     // 凹一档：顶栏、rail、表头、输入框
-    panel2: rgbToHex(mixOk(bgRgb, { r: 0, g: 0, b: 0 }, dark ? 0.15 : 0.05)),
+    panel2: rgbToHex(mixOk(bgRgb, { r: 0, g: 0, b: 0 }, dark ? 0.15 : (tight ? 0.02 : 0.05))),
     line: rgbToHex(mixOk(panelRgb, textRgb, dark ? 0.09 : 0.17)),
     lineSoft: rgbToHex(mixOk(panelRgb, textRgb, dark ? 0.03 : 0.09)),
     text: core.text,
-    text2: rgbToHex(mixOk(textRgb, bgRgb, dark ? 0.35 : 0.38)),
-    text3: rgbToHex(mixOk(textRgb, bgRgb, dark ? 0.62 : 0.60)),
+    text2: rgbToHex(mixOk(textRgb, bgRgb, dark ? 0.35 : (tight ? 0.18 : 0.38))),
+    text3: rgbToHex(mixOk(textRgb, bgRgb, dark ? 0.62 : (tight ? 0.36 : 0.60))),
     down: core.down,
     up: core.up,
     ok: core.ok,
@@ -404,6 +482,32 @@ function setDraftKey(draft, key, hex) {
   if (CORE_KEYS.includes(key)) d.core[key] = hex;
   else d.overrides[key] = hex;
   return d;
+}
+
+// ---------- 派生规则版本：存量草稿跟着算法走 ----------
+//
+// 取了色、存下来的草稿是「一张算好的 17 键表」，算法改了它不会自己重算 ——
+// 只改代码的话，新选图的用户拿到新颜色，老用户永远停在旧规则的结果上
+// （2026-09-15 实测：明度带与字阶混比都换过之后，用户配置里那份 #e4d3ce/#e7ddda
+// 的粉米色表面还在原样渲染，改动对他等于没发生）。
+// 带版本号之后，启动迁移把老草稿按当前规则重算一次。
+const DERIVE_REV = 3;
+
+// 按当前规则重算一份已展开的 17 键草稿。只动两处与可读性绑死的：
+//   · bg / panel 重新过明度带（色相与彩度原样保留，只挪明度）；
+//   · 字阶走收紧混比（expandTokens 的 tightRamp）。
+// 其余核心键（text / down / up / ok / warn / error / accent）原样保留 ——
+// 用户或 AI 挑的颜色不该被算法改写。
+function refreshDerivedTokens(tokens) {
+  if (!tokens || typeof tokens !== 'object') return tokens;
+  const light = isLightSkin(tokens);
+  const core = coreOf(tokens);
+  if (!core.bg || !core.panel || !core.text) return tokens;
+  core.bg = rgbToHex(normalizedSurface(
+    hexToRgb(core.bg), light ? 0.93 : 0.15, light ? 0.96 : 0.30, light ? 0.02 : 0.03));
+  core.panel = rgbToHex(normalizedSurface(
+    hexToRgb(core.panel), light ? 0.955 : 0.20, light ? 0.985 : 0.36, light ? 0.012 : 0.02));
+  return validateSkin(expandTokens(core, { tightRamp: true }));
 }
 
 // 旧版（v1 三模式主题）10 键 token → 新 17 键表。用于旧配置迁移与 AI 返回值归一。
@@ -493,30 +597,374 @@ function lumToChannel(lum) {
   return Math.round(s * 255);
 }
 
-// 面板叠在背景图上之后，文字实际踩着的那个颜色。
-// 层序（styles.css）：底图 → 压暗纱 → 半透面板。压暗在面板之下，所以先压再叠。
-// 全局界面不透明度（--ui-opacity）不参与这里：floor 只管「面板滑杆 vs 底图」的
-// 可读关系，全局淡出作用于所有漆层（含底图），是用户的显式选择，不该被 floor 钳住。
-function effectivePanel(tokens, backdropLum, scrim, opacity) {
-  const v = lumToChannel(backdropLum);
-  const dimmed = mix({ r: v, g: v, b: v }, { r: 0, g: 0, b: 0 }, clamp(scrim, 0, 1));
-  return rgbToHex(mix(dimmed, hexToRgb(tokens.panel), clamp(opacity, 0, 1)));
+// 皮肤方向：亮字压暗底（深色皮肤）还是暗字压亮底（浅色皮肤）。
+// 纱的方向、守卫的补偿方向、底图亮度的分位口径都跟着它走 —— 深色皮肤怕图里的
+// 成片亮区（亮字没地方落），浅色皮肤怕成片暗区（暗字没地方落），互为镜像。
+function isLightSkin(tokens) {
+  const t2 = luminance(hexToRgb(tokens.text2 || tokens.text));
+  const p = luminance(hexToRgb(tokens.panel));
+  return t2 < p;
 }
 
-// 给定底图亮度与压暗强度，求「能让次要文字与最坏亮区仍达标」的面板不透明度下限。
-// 只保 text2@4.5 —— text3 不再参与：3:1 左右的弱对比是它的设计意图，让最弱的
-// 字阶握着最强的一票否决，实测会把任意真实照片的下限顶到 0.94+（2026-09-13
-// 用户实测：暗壁纸 floor 0.96，三个材质滑杆全部失去可感效果）。弱字阶的可读性
-// 由两道既有机制间接保障：派生托底（expandTokens 相对面板 ≥2.9）与自动压暗。
-// minOp 是搜索起点也是返回下界：守卫管线（backdropGuard）放宽滑杆后传 0.70 进来。
-function backdropFloor(tokens, backdropLum, scrim, minOp = 0.82) {
-  const fg = tokens.text2 || tokens.text;
-  const ok = (op) => {
-    if (!/^#[0-9a-f]{6}$/i.test(fg || '')) return true;
-    return contrast(hexToRgb(fg), hexToRgb(effectivePanel(tokens, backdropLum, scrim, op))) >= MIN_CONTRAST;
+// 纱的合成目标色：深色皮肤混向黑（压暗亮区），浅色皮肤混向亮纱（抬亮暗区）。
+// 亮纱不用纯白，用 scrimTint 的浅色分支（从皮肤底色派生的「有颜色的亮」）——
+// Mica 的浅色质感同样来自 tint 而不是惨白；更重要的是守卫拿同一个色当模型目标，
+// 与 CSS 实际铺的两层纱（tint 纱 + auto 补偿层）方向一致，近似合成才是保守的。
+function veilOf(tokens) {
+  if (!isLightSkin(tokens)) return { r: 0, g: 0, b: 0 };
+  return hexToRgb(scrimTint(tokens.bg, true));
+}
+
+// 纱浓度的方向化有效值 —— CSS（--backdrop-dim）与守卫模型（backdropGuard 的
+// scrim 入参）共用的唯一口径，两边必须同源，可读性判定才不会和实际渲染漂移。
+// 深色皮肤：滑杆值即有效值（0.2–0.6，压暗是深色皮肤的主语言，图暗下去不心疼）。
+// 浅色皮肤：亮纱只做「轻度统一观感」，浓度按 0.45 折算（0.2–0.6 → 0.09–0.27）。
+// 旧版把 0.2 当下限直接全量铺白纱，暗壁纸缝隙里的图被抬成一片粉白、戏剧性全无
+// （2026-09-15 用户实测：暗红壁纸钉浅色 = 整窗发白发粉）；用户把滑杆拖到下限
+// 0.2 仍然糊 —— 折算让存量配置不动滑杆就回到「图为主、纱为辅」。
+function effectiveScrim(scrim, lightSkin) {
+  const v = clamp(scrim ?? 0.30, 0.2, 0.6);
+  return lightSkin ? Math.round(v * 0.45 * 100) / 100 : v;
+}
+
+// ---------- 面板局部背景归一化（glass lens） ----------
+//
+// 面板自己的 backdrop-filter 先把「身后的底图」压进本皮肤方向的那条明度带，然后
+// 才叠半透漆层。这一步解开的是整个可读性方案里最硬的死结 —— 旧版只能二选一：
+// 想要可读，就把面板不透明度地板一路抬到 0.9+（底图彻底看不见）；想要看见底图，
+// 就得忍受面板和近黑底图混成一块中调灰粉。局部归一化把矛盾解在「面板身后那块
+// 背景」上：缝隙里的底图保持原样锐利（戏剧性一点不丢），只有面板下方那一块被抬成
+// 浅色柔色玻璃 —— 这正是 macOS vibrancy / Win11 Acrylic 的做法（它们也从不让
+// 原始图直接透出材质，透出的是压过一条窄带的「亮度层」）。
+//
+// CSS 的 filter 是逐通道仿射：out = in * (c·b) + 0.5·b·(1 − c)
+// （contrast(c) 绕 0.5 收缩，再 brightness(b) 缩放）。于是「把 [0,1] 映到目标带
+// [lo,hi]」有闭式解：斜率 c·b = hi − lo，截距 0.5·b·(1 − c) = lo。
+// 带的两端不是常量，是从「可读性契约」反解出来的（见 lensBand）：浅色带底 =
+// 「合成面最不利的那一档面板上正文恰好达标」的那条线，深色对称取带顶，另一端固定。
+// 底图自己那段灰在带内被拉张开（auto-levels），于是**带有多宽，底图的形就有多大**。
+// contrast 收缩会把彩度一起压掉（色相被拉向中灰），所以要补 saturate()，补偿量
+// 必须跟着 c 走（见 chromaComp）。
+//
+// 亮度口径上 saturate 可以忽略（filter 的 saturate 矩阵是保亮度的），所以守卫模型
+// 只算 contrast + brightness 两步；blur 也不进模型 —— 它取的是邻域均值，比最坏像素
+// 温和，忽略它只会让守卫更保守。
+//
+// 2026-09-15 第二次返工（用户第二次报同一缺陷：不透明度拉到最低还是透不出底图）：
+// 旧版把带写死成浅色 [0.85, 1] 通道 —— 一条 0.15 宽、贴着纯白的窄带。底图自己的
+// 形在里面只剩几个灰阶，实测面板上只剩 p2p 11/255，肉眼就是一块粉白雾；而 saturate
+// 也写死 3.2（那是给 c=0.105 配的补偿量），透镜改成自适应后 c 变大、补过头，整幅
+// 发粉。现在两端按契约反解、彩度补偿跟着 c 走。
+// 面板不透明度滑杆的下限（另一处是 index.html 的 range min，必须同步改）。
+// 它能放到 0.30，是因为透镜接手了「底图偏暗 / 偏亮」那一档 —— 局部归一化之后
+// 0.30 的漆层仍读得出「一块有色玻璃 + 正文字阶达标」。
+const MIN_PANEL_OP = 0.30;
+// 反解带端时假设的面板不透明度：**取滑杆下限**，不取默认档。这样契约在整个滑杆
+// 行程上都成立 —— 拖到最低时正文字阶恰好是 LENS_BODY_LC，往上拖只会更好。
+// （若取默认档 0.45，拖到下限就会比契约低一档，用户看到的是「越透明字越虚」。）
+const LENS_DESIGN_OP = MIN_PANEL_OP;
+// 反解带端时要求各字阶守住的下限（「玻璃字阶」）：档位与 APCA_TIERS 同构，只是浅色
+// 正文那一档从严格的 75 降到 60 —— 60 是 APCA 对 16px 正文的「可用」线，而 75 要求
+// 合成面亮度 ≥ 0.63，会把浅色玻璃钉回近白（带只剩 0.23 宽，就是那块粉白雾）。
+// 反解取各档里最严的那个（各档 |Lc| 对亮度同向单调，AND 就是最保守那条线）。
+const LENS_BODY_LC = 60;
+const GLASS_TIERS = {
+  light: [['text', LENS_BODY_LC], ['text2', 48], ['text3', 32]],
+  dark: [['text', LENS_BODY_LC], ['text2', 45]],
+};
+const LENS_BAND_TOP = 0.99;           // 浅色带顶（通道值）：留一点白，不烧成纯色
+const LENS_BAND_BOTTOM_DARK = 0.05;   // 深色带底（通道值）：留一点黑，暗部不压死
+// 自校准系数（关键）：每档的**实际**目标不是上面的声明档位，而是
+// min(声明档位, 该档在「对比最强端」上物理可得对比 × 本系数)。
+//
+// 为什么必须自校准 —— 2026-09-15 用户第二次报缺陷的深色那一半，根因就在这里：
+// 深色皮肤的次要字是一枚中灰（实测 token #9b8f8b），压在近黑底上时 |Lc| 的物理
+// 上限只有 ≈43，连纯黑都只给到 43.3；而声明档位写着 45。于是 meets(带底) 恒假，
+// lensBand 返回退化的 [0.05,0.05]，lensParams 因斜率 0 返回 null，lensOf 变 null，
+// backdropGuard 退回「无透镜」分支把面板地板顶到 1 —— 面板全不透明，底图彻底看不见。
+// 打顶之后 meets(最强端) **恒真**（该端的实测对比 ≥ 自身 × 0.75），带不可能退化。
+// 取 0.75 而不是更低：浅色那三档的物理余量本来就大（白底上 text 98 / text2 90 /
+// text3 76，×0.75 后分别是 73/67/57，全都高于声明档位），所以浅色的反解结果
+// 一格不动；只有深色那枚贴着天花板的次要字被真正松到 32.25。
+const GLASS_TIER_REL = 0.75;
+
+// 彩度补偿：contrast(c) 把彩度按 ≈2c 缩（相对亮度之比），saturate 补回来。
+// 钳在 [0.7, 2.6]：auto-levels 在大斜率时 c 接近 1，此时不是要补而是略微收一点。
+function chromaComp(c) {
+  return clamp(Math.round((0.5 / c) * 100) / 100, 0.7, 2.6);
+}
+
+// 由带的两端（通道值）反解 CSS filter 三件套。仿射 out = in·(c·b) + 0.5·b·(1−c)
+// 把 [0,1] 映到 [t0,t1] ⟹ 斜率 s = t1−t0 = c·b、截距 t0 ⟹ b = 2·t0 + s、c = s/b。
+function lensParams(t0, t1) {
+  const s = t1 - t0;
+  const b = 2 * t0 + s;
+  if (!(s > 0) || !(b > 0) || !isFinite(b)) return null;
+  const c = s / b;
+  if (!(c > 0) || !isFinite(c)) return null;
+  return {
+    contrast: Math.round(c * 1000) / 1000,
+    brightness: Math.round(b * 1000) / 1000,
+    saturate: chromaComp(c),
   };
+}
+
+// 明度带的两端（通道值 0..1）：在 LENS_DESIGN_OP 下反解 —— 合成面（带上的灰与
+// 最不利那档面板按该不透明度调和）要让 GLASS_TIERS 里**每一档**字阶都达标。
+// 浅色皮肤合成面越亮暗字越好读 → 解**最小**的带底；深色皮肤对称，解**最大**的带顶。
+// 最不利的那档：浅色怕「更暗」（暗字没地方落）取更暗的面板，深色取更亮的。
+//
+// 为什么浅色正文那一档取 60 而不是严格表的 75：75 要求合成面亮度 ≥ 0.63，浅色玻璃
+// 会被钉回近白、带只剩 0.23 宽 —— 那就是用户看到的那块粉白雾。60 是 APCA 对正文字阶
+// 的「可用」线，换来的是宽出一倍多的带，底图的形从「没有」变成「看得见」。
+// 这是用户明确要的那一头：他两次的原话都是「底图透不出来」，没有一次说字看不清
+// （字看不清的那次是 0.2 亮纱 + 中调合成面，另一个成因，已由纱的折算解决）。
+// 最不利那档面板底色：浅色皮肤怕「更暗」（暗字没地方落）取更暗的，深色取更亮的。
+// lensBand 的反解与 glassTierTargets 共用这一份，避免两处口径漂移。
+function worstSurface(tokens) {
+  const p1 = hexToRgb(tokens.panel);
+  const p2 = /^#[0-9a-f]{6}$/i.test(tokens.panel2 || '') ? hexToRgb(tokens.panel2) : p1;
+  return isLightSkin(tokens)
+    ? (luminance(p1) <= luminance(p2) ? p1 : p2)
+    : (luminance(p1) >= luminance(p2) ? p1 : p2);
+}
+
+// 玻璃字阶的**实际**目标（自校准后）：[[key, 目标], …]。见 GLASS_TIER_REL 的长注释。
+// 单独导出是给回归脚本用的 —— 回归脚本此前拿 APCA_TIERS（浅色 75/60/40、深色次要字
+// 45）去量玻璃合成面，那套严格档位在玻璃上本来就不可能满足：浅色 75 要求合成面亮度
+// ≥0.63（带只剩 0.21 宽，就是用户两次抱怨的那块「粉白雾」），深色 45 超过那枚中灰
+// 的物理上限 ≈43。判定口径必须与渲染同源，否则回归只会逼着实现把带宽还回去。
+function glassTierTargets(tokens) {
+  const light = isLightSkin(tokens);
+  const surf = worstSurface(tokens);
+  const tBest = light ? LENS_BAND_TOP : LENS_BAND_BOTTOM_DARK;
+  const op = LENS_DESIGN_OP;
+  const g = tBest * 255;
+  const bestHex = rgbToHex({
+    r: g + (surf.r - g) * op, g: g + (surf.g - g) * op, b: g + (surf.b - g) * op,
+  });
+  return (light ? GLASS_TIERS.light : GLASS_TIERS.dark)
+    .filter(([k]) => /^#[0-9a-f]{6}$/i.test(tokens[k] || ''))
+    .map(([k, declared]) => [k, Math.min(declared, GLASS_TIER_REL * Math.abs(apcaLc(tokens[k], bestHex)))]);
+}
+
+function lensBand(tokens) {
+  const light = isLightSkin(tokens);
+  const surf = worstSurface(tokens);
+  const op = LENS_DESIGN_OP;
+  const composite = (t) => {
+    const g = t * 255;
+    return { r: g + (surf.r - g) * op, g: g + (surf.g - g) * op, b: g + (surf.b - g) * op };
+  };
+  // 「对比最强端」：浅色皮肤要暗字落在最亮处、深色皮肤要亮字落在最暗处。契约锚在
+  // 它上面 —— 另一端只可能更差。配上 GLASS_TIER_REL，各档目标 ≤ 这一端的实测对比，
+  // 所以 meets(tBest) 恒真，二分一定有解（也就不可能再退化成「一个点」）。
+  const tiers = glassTierTargets(tokens);
+  const meets = (t) => {
+    const hex = rgbToHex(composite(t));
+    return tiers.every(([k, min]) => Math.abs(apcaLc(tokens[k], hex)) >= min);
+  };
+  if (light) {
+    let lo = 0;
+    let hi = LENS_BAND_TOP;
+    // 兜底（自校准之后走不到）：退化成整条带 = 恒等透镜，仍是一个**有效**透镜，
+    // 绝不会变成 null 把面板地板顶到 1。宁可「不归一化」，也不能「没有透镜」。
+    if (!meets(hi)) return [0, LENS_BAND_TOP];
+    for (let i = 0; i < 18; i++) {
+      const mid = (lo + hi) / 2;
+      if (meets(mid)) hi = mid; else lo = mid;
+    }
+    return [hi, LENS_BAND_TOP];
+  }
+  let lo = LENS_BAND_BOTTOM_DARK;
+  let hi = 1;
+  if (!meets(lo)) return [LENS_BAND_BOTTOM_DARK, 1];
+  for (let i = 0; i < 18; i++) {
+    const mid = (lo + hi) / 2;
+    if (meets(mid)) lo = mid; else hi = mid;
+  }
+  return [LENS_BAND_BOTTOM_DARK, lo];
+}
+
+// 回落透镜：把底图**整条** [0,1] 映射进明度带（不按图自己的直方图拉张）。图还没
+// 解码完 / 图太平 / 参数退化时走这一支；解码完之后由 lensFromImage 接管 —— 带的两端
+// 两种情况下同源，所以「回落」只是少了一层拉张，契约不变。
+function lensOf(tokens) {
+  const [t0, t1] = lensBand(tokens);
+  return lensParams(t0, t1);
+}
+
+// 写进 CSS 变量（applyBackdrop 用）。数值与守卫模型同源，不手抄两遍。
+function lensFilter(lens) {
+  return `contrast(${lens.contrast}) brightness(${lens.brightness}) saturate(${lens.saturate})`;
+}
+
+// 逐通道走 contrast + brightness（与 CSS filter 的语义一致，含 clamp）。通道按
+// 0..255 进出，与别处的 hexToRgb / mix 同一量纲。
+function lensApply(rgb, lens) {
+  const ch = (v) => clamp(((v / 255 - 0.5) * lens.contrast + 0.5) * lens.brightness, 0, 1) * 255;
+  return { r: ch(rgb.r), g: ch(rgb.g), b: ch(rgb.b) };
+}
+
+// ---------- 自适应透镜（auto-levels） ----------
+//
+// 回落透镜把底图**整条** [0,1] 映射进明度带 —— 对「自己就占满整条灰」的图没问题，
+// 对「自己只占一小段灰」的壁纸就浪费掉大半条带：2026-09-15 用户那张壁纸的块均值
+// 等效灰通道只落在 0.06–0.13（宽 0.07），回落透镜只把这 0.07 铺进带里的一小截，
+// 剩下的带空着。所以透镜还要**按这张图自己的直方图拉张开**：把图的实际灰范围
+// [p2, p98] 铺满整条带。Mica 采样壁纸生成材质做的也是这件事。
+//
+// 带的两端不因 auto-levels 而变（那是可读性契约），变的只是「用图的哪一小段灰去铺
+// 它」—— 契约在，底图的形也满幅。这才是「不透明度拉到最低也看得见底图」的那一步。
+//
+// 灰范围下限：宽度低于这个值（约 5/255）的图基本是一块平色，拉张只会把 JPEG 的
+// 压缩噪声放大成色块，不如交给回落透镜老实铺平。门槛取 0.02 是为「几乎纯色」的
+// 极端图（如整幅 #0a0a0a）。
+const MIN_IMG_RANGE = 0.02;
+// 斜率上限：极暗且极平的图算出的 s 会很大，钳住免得噪声主导。
+const MAX_LENS_SLOPE = 6;
+
+// 由底图自己的灰范围反解透镜参数。lo / hi 是**原始**（未铺纱）的等效灰通道，
+// 0..1。veil（纱色）与 scrim（已方向化的有效浓度）由调用方给出 —— 透镜实际吃到
+// 的输入是「纱铺过的图」，必须用铺纱之后的 [lo, hi] 反解：暗图 + 亮纱时，纱会把
+// 整段推到带顶之上，用原始范围反解出来的斜率会把它们全 clamp 成白，底图反而
+// 彻底消失（这是本实现的第一个坑，实测踩到过）。
+// brightness 是「背景亮度」滑杆的倍率：CSS 里它作用在 .backdrop::before 的
+// filter 上，位于纱之下、面板透镜之上，所以要先乘进来再铺纱。
+// 返回值可能是 null（图太平 / 参数退化），调用方回落到 lensOf(tokens)。
+//
+// 2026-09-15 第三次返工 —— 归一化的**锚点**：
+// 旧版把图的 [p2, p98] 映到 [t0, t1]（锚点 = veiled(p2)）。这在数学上把图的内部对比
+// 用满，但代价是**比 p2 更暗的像素会掉到带底之下**（截距 t = t0 − s·loV 是负的：
+// 输入 0 的输出 = t < t0）。而带是整个设计的**不变量** —— 契约（各档字阶达标）、
+// 守卫（地板退休、滑杆不被拿走）、像素审计全都以「透镜输出 ∈ 带」为前提，输出一旦
+// 掉出去，三条保证同时作废。实测踩到：用户壁纸里成片的近黑区落在 `.top-meta` 那行
+// 后面，像素审计量到弱字阶 Lc 28.6（旧窄带时代是 60.3）。
+// 现在锚点改成「输入可能达到的最低值」= veiled(0) = vc·a（纱把纯黑抬到的那一点）：
+// 于是 out(0) = t0、out(veiled(1)) ≥ t1，**输出结构上不可能越过带底**。
+// 代价是图自己的 [p2,p98] 只占带的一段：(hiV−loV)/(hiV−zeroV)（近黑图 ≈100%、
+// 中调图 ≈55–75%）。拿回来的东西更值：任何像素都在带内，契约对**每个像素**成立，
+// 而不是只管 98% 再赌剩下的 2% 不成片。
+// 上端**故意**只用 p98 当锚（不用白点 veiled(1)）：用白点会把图的可用范围按
+// (hiV−zeroV)/(veiled(1)−zeroV) 压掉一个数量级（实测浅色侧是 7.7×），形全没了。
+// 代价是 p98 之上那 2% 的像素输出会略微越过带顶（越界量 = s·(veiled(1)−hiV)，
+// 浅色侧被 clamp 在 1.0；深色侧实测 ≈0.03 通道 ≈ 6 灰阶，可忽略）。
+function lensFromImage(lo, hi, tokens, scrim, brightness = 1) {
+  const [t0, t1] = lensBand(tokens);
+  if (!(t1 - t0 > 0)) return null;
+  const beta = clamp(brightness ?? 1, 0.2, 3);
+  const vc = lumToChannel(luminance(veilOf(tokens))) / 255;
+  const a = clamp(scrim ?? 0, 0, 1);
+  const veiled = (v) => {
+    const l = clamp(v * beta, 0, 1);
+    return l + (vc - l) * a;
+  };
+  const loV = veiled(lo);
+  const hiV = veiled(hi);
+  const range = hiV - loV;
+  if (!(range > MIN_IMG_RANGE)) return null;
+  // 锚在输入下限 zeroV：out(0) = t0，带底成为输出的硬下界（见上面的长注释）。
+  const zeroV = veiled(0);
+  const span = hiV - zeroV;
+  if (!(span > 0)) return null;
+  let s = (t1 - t0) / span;
+  if (!(s > 0) || !isFinite(s)) return null;
+  // 斜率只管一件事：不发散（上限）。**不能**再加「截距 ≥ 0.05」这类下限 ——
+  // 带底降到 0.613 之后，把一张暗图的最亮端送到带顶本来就需要大斜率、而这必然
+  // 对应负截距；那条下限会把最亮端按在带顶之下（实测 0.85 vs 0.99），等于把刚
+  // 争来的带宽原样还回去（本轮单测当场抓到）。真正要防的发散是 b = 2t + s ≤ 0
+  // （那会让 CSS 的 contrast/brightness 取到 ≤0，语义未定义）—— 交给下面的
+  // b > 0 判据回落 lensOf，而不是靠斜率下限硬撑。
+  s = Math.min(s, MAX_LENS_SLOPE);
+  // 反解出 contrast / brightness：out = s·in + t，CSS 里 s = c·b、t = 0.5·b·(1−c)
+  // → b = 2t + s、c = s / b。
+  const t = t0 - s * zeroV;
+  const b = 2 * t + s;
+  if (!(b > 0) || !isFinite(b)) return null;
+  const c = s / b;
+  if (!(c > 0) || !isFinite(c)) return null;
+  return {
+    contrast: Math.round(c * 1000) / 1000,
+    brightness: Math.round(b * 1000) / 1000,
+    saturate: chromaComp(c),
+  };
+}
+
+// 面板叠在背景图上之后，文字实际踩着的那个颜色。
+// 层序（styles.css）：底图 → 纱（方向随皮肤）→ 面板自己的 lens（backdrop-filter）
+// → 半透面板。纱与 lens 都在面板之下，先纱、再 lens、最后叠漆。
+// veil 是纱的合成目标（黑 / 亮纱），与 CSS 两层同色纱等效：mix(图, veil, 纱浓度)
+// 再 lens(…) 再 mix(…, panel, 不透明度)。
+// lens 传 null 表示这个模式下没有面板级 backdrop-filter（贴膜模式：膜直接由
+// 面板底色与壁纸调和，没有「身后那块背景」可言）。
+// 全局界面不透明度（--ui-opacity）不参与这里：floor 只管「面板滑杆 vs 底图」的
+// 可读关系，全局淡出作用于所有漆层（含底图），是用户的显式选择，不该被 floor 钳住。
+function effectivePanel(tokens, backdropLum, scrim, opacity, veil = veilOf(tokens), lens = lensOf(tokens)) {
+  const v = lumToChannel(backdropLum);
+  const veiled = mix({ r: v, g: v, b: v }, veil, clamp(scrim, 0, 1));
+  const behind = lens ? lensApply(veiled, lens) : veiled;
+  return rgbToHex(mix(behind, hexToRgb(tokens.panel), clamp(opacity, 0, 1)));
+}
+
+// ---------- 表面明度带（Mica 的 tonal band） ----------
+//
+// 「合成面必须仍是一块可读的表面」这条规则本身没变，但**带的两端不再是常量**：
+// 由 lensBand 按可读性契约反解（带底 = 合成面最暗处正文达标的那条线）。
+//
+// 为什么放弃常量：旧版浅色带写死 [0.64, 1] 亮度，配合旧透镜把面板身后的背景压进
+// 一条近白窄带 —— 合成面确实稳稳落在带内，但底图自己的形只剩几个灰阶（实测面板上
+// p2p 11/255），用户看到的是「一块粉白雾」，连着两次当成缺陷报上来。带底放低之后
+// 合成面仍是一块**浅色玻璃**（不是旧版那种中调灰粉：中调来自「暗图 + 粉米面板」
+// 的灰混，这里来自带内带宽的底图本身，色相与明暗都跟着底图走）。
+//
+// 带同时用于守卫与像素审计（「合成面没滑进中调」），口径 = 面板身后那块背景被
+// 归一化之后落在哪一段亮度（通道 → 亮度）。
+
+// 面板不透明度滑杆的下限（另一处是 index.html 的 range min，必须同步改）。
+// 常量定义挪到透镜一节（lensBand 的反解就以它为基准），这里只留说明：旧版下限
+// 写死 0.70、且守卫算出的地板会把滑杆的 min 顶上去（theme-ui 里那行
+// `els.opacity.min =`），于是「看见底图」这个能力被整个拿走了 —— 2026-09-15
+// 用户实测：滑杆拉到底就是 0.93，底图一点透不出来。
+
+function bandOf(tokens) {
+  const [t0, t1] = lensBand(tokens);
+  const lumOf = (t) => luminance({ r: t * 255, g: t * 255, b: t * 255 });
+  return [lumOf(t0), lumOf(t1)];
+}
+
+// 给定底图亮度与纱浓度，求「合成面仍落在明度带内、且各字阶仍达 APCA 目标」
+// 的面板不透明度下限。两条判据共用一条二分：不透明度越高，合成面越接近纯面板
+// 色（浅色皮肤下更亮、深色皮肤下更暗），明度带与对比度都朝达标方向单调。
+// 字阶档位按方向分（APCA_TIERS）：浅色守 正文 80 / 次要 60 / 弱字阶 40，
+// 深色守 次要字 45（≈ 原来那条 WCAG 4.5）。弱字阶这次进守卫，是本次修复的
+// 重点：它此前被「3:1 是设计意图」豁免掉，而底图把面板稀释成中调之后它的
+// 实际值只剩 Lc 16 —— 设计意图早就没了，豁免的是「已经不存在的东西」
+// （2026-09-13 那次让它握一票否决的教训是「档位不能照抄」，不是「不许守」）。
+// minOp 是搜索起点也是返回下界：守卫管线（backdropGuard）与滑杆下限共用 0.30。
+// lens 是「面板身后那块背景会被归一成什么」的模型（自适应透镜，见 lensFromImage）：
+// 必须与 CSS 实际铺的 --lens-filter 同源，否则判定的和渲染的不是同一件事。
+function backdropFloor(tokens, backdropLum, scrim, minOp = MIN_PANEL_OP, lens = lensOf(tokens)) {
+  const band = bandOf(tokens);
+  const tiers = isLightSkin(tokens) ? APCA_TIERS.light : APCA_TIERS.dark;
+  // 面板底色有两档：--panel（卡片）与 --panel-2（顶栏 / rail / 表头 / 输入框）。
+  // panel-2 比 panel 暗一档，底图稀释之后的合成面跟着更暗 —— 顶栏那行状态字
+  // （「已采集 28:36:15 · 61 个进程」）就是这么糊掉的：2026-09-15 像素审计实测
+  // Lc 36，而卡片里同字号是 49。两档都要过判据，取更严的那个。
+  const surfaces = [tokens.panel];
+  if (/^#[0-9a-f]{6}$/i.test(tokens.panel2 || '')) surfaces.push(tokens.panel2);
+  const ok = (op) => surfaces.every((surf) => {
+    const eff = effectivePanel(
+      surf === tokens.panel ? tokens : { ...tokens, panel: surf }, backdropLum, scrim, op, undefined, lens);
+    const L = luminance(hexToRgb(eff));
+    if (L < band[0] - 1e-9 || L > band[1] + 1e-9) return false;
+    return tiers.every(([key, min]) => {
+      const fg = tokens[key];
+      if (!/^#[0-9a-f]{6}$/i.test(fg || '')) return true;
+      return Math.abs(apcaLc(fg, eff)) >= min - 1e-9;
+    });
+  });
   if (ok(minOp)) return minOp;
-  // 单调：不透明度越高，有效底色越接近纯面板色，对比度只增不减。二分够用。
+  // 单调：不透明度越高，有效底色越接近纯面板色。二分够用。
   let lo = minOp;
   let hi = 1;
   for (let i = 0; i < 20; i++) {
@@ -529,19 +977,27 @@ function backdropFloor(tokens, backdropLum, scrim, minOp = 0.82) {
 }
 
 // 贴膜模式的浓度地板：膜 = 图与面板色调和，装饰性天然比置底强一档，守护档位
-// 也宽一档 —— 主文字（--text）仍保 4.5，次要文字（--text-2）保 3.2（介于正文与
-// 弱字阶之间），弱字阶不参与（与置底同一条豁免）。若按置底的 4.5 管到 text2，
-// 亮图上地板会顶到 1、膜退化成不透明面板，模式失去存在意义（2026-09-13
-// 用户壁纸实测）。等效合成模型与置底同构：mix(图灰, panel, 浓度)，无黑纱。
+// 也宽一档 —— 主文字（--text）守 APCA 80，次要文字（--text-2）守 60（深色方向
+// 45），弱字阶不参与：贴膜模式下「图就是表面」，模式本身要的就是那层图案，
+// 把它守到弱字阶达标就等于把膜推成不透明面板、模式失去存在意义
+// （2026-09-13 用户壁纸实测）。等效合成模型与置底同构：mix(图灰, panel, 浓度)，
+// 无纱、也不套明度带（膜本来就是与图同调的中调面）。
 function wrapFloor(tokens, backdropLum, minOp = 0.4) {
-  const fgs = [
-    [tokens.text || tokens.text2, MIN_CONTRAST],
-    [tokens.text2, 3.2],
-  ];
-  const ok = (op) => fgs.every(([fg, min]) => {
-    if (!/^#[0-9a-f]{6}$/i.test(fg || '')) return true;
-    return contrast(hexToRgb(fg), hexToRgb(effectivePanel(tokens, backdropLum, 0, op))) >= min;
-  });
+  const light = isLightSkin(tokens);
+  const tiers = light
+    ? [['text', APCA_TIERS.light[0][1]], ['text2', APCA_TIERS.light[1][1]]]
+    : [['text2', APCA_TIERS.dark[0][1]]];
+  const ok = (op) => {
+    // 贴膜模式没有面板级 backdrop-filter（膜就是表面，不存在「身后的背景」），
+    // 所以显式把 lens 传成 null —— 不传的话会吃到 lensOf(tokens) 的默认透镜，
+    // 模型比渲染乐观，判定就漂了。
+    const eff = effectivePanel(tokens, backdropLum, 0, op, undefined, null);
+    return tiers.every(([key, min]) => {
+      const fg = tokens[key];
+      if (!/^#[0-9a-f]{6}$/i.test(fg || '')) return true;
+      return Math.abs(apcaLc(fg, eff)) >= min - 1e-9;
+    });
+  };
   if (ok(minOp)) return minOp;
   // 与 backdropFloor 同款单调二分 + 上取整到两位小数
   let lo = minOp;
@@ -554,35 +1010,25 @@ function wrapFloor(tokens, backdropLum, minOp = 0.4) {
   return Math.min(1, Math.ceil(hi * 100) / 100);
 }
 
-// 可读性守卫（一体版）：面板不透明度滑杆放开到 0.70 之后，亮图不再靠「把滑杆
-// 钳到地板」保可读，而是先补「自动压暗」——一层纯黑纱垫在 tint 纱之下、底图
-// 之上，把最坏亮区压下去，让用户选的不透明度原地达标。压到 0.6 顶还不够读
-// （接近纯白的图 + 很低的不透明度）才退回硬钳：给出抬高的 floor。
-// 方向性：黑纱只会把有效面板压暗，因此只对「亮字压暗底」的深色皮肤生效；
-// 浅色皮肤（暗字压亮底）黑纱帮倒忙，保持硬钳路径（floor 按用户压暗原样算）。
-// 返回 { autoDim, floor }；scrim 参数是用户滑杆值，autoDim 叠在它之上。
-function backdropGuard(tokens, backdropLum, scrim, panelOpacity) {
-  const userScrim = clamp(scrim, 0, 1);
-  const total = (dim) => Math.min(1, userScrim + dim);
-  const okAt = (op, dim) => backdropFloor(tokens, backdropLum, total(dim), 0.70) <= op + 1e-9;
-  const text2Lum = luminance(hexToRgb(tokens.text2 || tokens.text));
-  const panelLum = luminance(hexToRgb(tokens.panel));
-  const lightText = text2Lum >= panelLum; // 亮字压暗底：黑纱补偿有效
-  if (!lightText) {
-    // 暗字压亮底（浅色皮肤）：不做黑纱补偿，需要更高不透明度就直接钳
-    return { autoDim: 0, floor: backdropFloor(tokens, backdropLum, userScrim, 0.70) };
-  }
-  if (okAt(panelOpacity, 0)) return { autoDim: 0, floor: 0.7 };
-  let lo = 0;
-  let hi = 0.6;
-  for (let i = 0; i < 20; i++) {
-    const mid = (lo + hi) / 2;
-    if (okAt(panelOpacity, mid)) hi = mid;
-    else lo = mid;
-  }
-  if (okAt(panelOpacity, 0.6)) return { autoDim: Math.ceil(hi * 100) / 100, floor: 0.7 };
-  // 自动压暗到顶仍不达标：硬钳兜底，floor 按「压暗顶格」时的需要算
-  return { autoDim: 0.6, floor: backdropFloor(tokens, backdropLum, total(0.6), 0.70) };
+// 可读性守卫：只在**没有透镜**的路径上工作（无底图 / 贴膜），返回 { autoDim, floor }。
+//
+// 置底模式 + 底图的路径上透镜已经退休了守卫：面板身后那块背景被 lensBand 反解
+// 出来的带归一化，合成面的最坏值只由用户选的不透明度决定 —— 再去垫一层地板或
+// 一层自动纱，就是替用户改他的选择，而「滑杆被系统拿走、拉到底也看不见底图」
+// 正是 2026-09-15 用户连着两次报上来的同一个缺陷。
+//
+// 换句话说：带的两端由 lensBand 在**设计不透明度**（LENS_DESIGN_OP）上反解，
+// 用户把滑杆拖到 0.30 时合成面确实低于那条线 —— 那是他自己要的透明度，不是
+// 需要被补偿的缺陷。想更清楚就把滑杆拖回去，这句话现在由提示条说，不由地板说。
+//
+// scrim 是用户滑杆值（已方向化）；autoDim 叠在它之上（名字沿用历史：深色皮肤它
+// 真的是「压暗」，浅色皮肤是「提亮」）。
+function backdropGuard(tokens, backdropLum, scrim, panelOpacity, lens = lensOf(tokens)) {
+  if (lens) return { autoDim: 0, floor: MIN_PANEL_OP };
+  return {
+    autoDim: 0,
+    floor: backdropFloor(tokens, backdropLum, clamp(scrim, 0, 1), MIN_PANEL_OP, null),
+  };
 }
 
 // ---------- 内置壁纸 ----------
@@ -632,8 +1078,18 @@ function tokensFromImage(imgData, imgEl, mode = 'auto') {
     : mode === 'dark' ? true
     : luminance(main) < 0.5;
 
-  const bg = rgbToHex(normalizedSurface(main, dark ? 0.15 : 0.88, dark ? 0.30 : 0.94, 0.03));
-  const panel = rgbToHex(normalizedSurface(main, dark ? 0.20 : 0.905, dark ? 0.36 : 0.965, 0.02));
+  // 浅色表面的彩度上限比深色更紧（0.02 / 0.012）：同样的彩度在亮表面被视觉放大
+  // 成明显的「粉底/奶黄」，暗图钉浅色时整窗发闷（2026-09-15 暗红壁纸实测）。
+  // Mica 浅色表面同样以中性为主、壁纸色相只留一丝。
+  //
+  // 浅色的明度带按出厂浅色皮肤反标定（bg #f2f3f5 ≈ Oklab L 0.965、panel #ffffff
+  // = 1.0）：壁纸只贡献色相与一丝彩度，不参与决定「这块表面有多亮」——它是
+  // 「浅色」皮肤，就该是浅色表面的亮度。旧带 [0.88, 0.94] / [0.905, 0.965] 把
+  // 近黑壁纸派生成 #e4d3ce / #e7ddda（L 0.88 / 0.906），比出厂浅色暗一整档，
+  // 再被半透面板一稀释就落到中调灰粉 —— 「发白发粉、没有高级感」的源头之一。
+  // 深色侧的带不动。
+  const bg = rgbToHex(normalizedSurface(main, dark ? 0.15 : 0.93, dark ? 0.30 : 0.96, dark ? 0.03 : 0.02));
+  const panel = rgbToHex(normalizedSurface(main, dark ? 0.20 : 0.955, dark ? 0.36 : 0.985, dark ? 0.02 : 0.012));
 
   // 文字随色温：白/黑基底上掺一丝源色相（彩度 ≤0.012），暖壁纸配暖白、冷壁纸
   // 配冷白。原实现写死暖调（#f2e6dc），蓝壁纸配暖白字是色温打架。
@@ -669,7 +1125,7 @@ function tokensFromImage(imgData, imgEl, mode = 'auto') {
     warn: ensureContrast('#e5b567', panel),
     error: ensureContrast('#e57373', panel),
     accent: accentHex,
-  }));
+  }, { tightRamp: true }));
 }
 
 // 给外观屏的「强调色色板」用：与 tokensFromImage 同一条分析管线，吐出去重后的
@@ -792,44 +1248,78 @@ function applyUiOpacity(v) {
     String(Number.isFinite(n) ? clamp(n, 0.5, 1) : 1));
 }
 
-// 压暗纱的色调：从底色（壁纸主色 / 其归一色）派生一层「有颜色的暗」——
-// Mica 质感的一半来自 tint 而不是灰黑。只压亮度不换色相；亮度钳到 ≤0.1，
-// 这样「底图 × 黑纱」的近似合成（effectivePanel / backdropFloor）仍然保守：
-// tint 比纯黑亮出来的那点量，被纱里更深的顶栏渐变盖回去。
-function scrimTint(bgHex) {
-  if (!/^#[0-9a-f]{6}$/i.test(String(bgHex || ''))) return '#0b0c0e';
+// 纱的色调：从底色（壁纸主色 / 其归一色）派生一层「有颜色的纱」——
+// Mica 质感的一半来自 tint 而不是灰黑/惨白。只动亮度不换色相：
+// 深色皮肤（缺省）压亮度，钳到 ≤0.1 —— 这样「底图 × 黑纱」的近似合成
+// （effectivePanel / backdropFloor）仍然保守：tint 比纯黑亮出来的那点量，
+// 被纱里更深的顶栏渐变盖回去。
+// 浅色皮肤（light=true）抬亮度，钳到 ≥0.9 —— 亮纱把底图的暗区托起来给暗字
+// 落脚，同一条「有颜色的 tint」逻辑镜像到浅色侧；守卫的 veilOf 拿同一个色当
+// 模型目标，与 CSS 两层纱的合成方向一致。
+function scrimTint(bgHex, light = false) {
+  if (!/^#[0-9a-f]{6}$/i.test(String(bgHex || ''))) return light ? '#f4f5f7' : '#0b0c0e';
   let c = hexToRgb(bgHex);
-  for (let i = 0; i < 8 && luminance(c) > 0.1; i++) {
-    c = mixOk(c, { r: 0, g: 0, b: 0 }, 0.5);
+  if (light) {
+    for (let i = 0; i < 8 && luminance(c) < 0.9; i++) {
+      c = mixOk(c, { r: 255, g: 255, b: 255 }, 0.5);
+    }
+    // Mica 浅色纱是「一丝色相的中性亮」，不是粉白：提亮保留了源色相的彩度，
+    // 暗红壁纸的纱提亮后是一层明显的粉纱、缝隙里的图跟着泛粉（2026-09-15 实测）。
+    // 提亮后把 OKLab 彩度压到 ≤0.012 —— 色温还在，粉感消失。
+    const o = rgbToOklab(c);
+    const kc = Math.min(1, 0.012 / Math.max(okChroma(c), 1e-4));
+    c = oklabToRgb({ L: o.L, a: o.a * kc, b: o.b * kc });
+  } else {
+    for (let i = 0; i < 8 && luminance(c) > 0.1; i++) {
+      c = mixOk(c, { r: 0, g: 0, b: 0 }, 0.5);
+    }
   }
   return rgbToHex(c);
 }
 
-// 背景图模式四件套 + 纱色：面板不透明度 / 背景模糊 / 背景压暗 / 背景图 url / tint。
-// 仅「跟随背景图」皮肤会传背景；其余皮肤调用时 background 为空，全部归位。
-//
-// 换壁纸走交叉淡入：旧图留在根变量上，新图挂到临时同款 .backdrop 层上淡入
-// （styles.css .is-fade-in），完成后切根变量、移除临时层。只有「图 → 另一张图」
-// 才淡入——首次设置淡入会闪一块空底，撤图淡出会闪一下黑，都直切。
+// 背景图模式四件套 + 纱色：面板不透明度 / 背景模糊 / 纱浓度 / 背景图 url / tint。
+// 纱的方向由 lightSkin 决定：深色皮肤铺黑纱（压暗），浅色皮肤铺亮纱（提亮）——
+// tint 与顶栏渐变、自动补偿层的颜色全部跟着翻。仅「跟随背景图」皮肤会传背景；
+// 其余皮肤调用时 background 为空，全部归位。
 
 let lastBackdropUrl = null;
 let fadingTo = null; // 正在淡入的目标 url；非空期间重复铺装不得抢根变量
 let fadeSeq = 0;
 
-function applyBackdrop({ background, panelOpacity, bgBlur, scrim, tint, autoDim, style, wrapOpacity, brightness }) {
+function applyBackdrop({ background, panelOpacity, bgBlur, scrim, tint, autoDim, style, wrapOpacity, brightness, lightSkin, lens, tokens }) {
   const root = document.documentElement;
   const hasBg = !!background;
   const wrap = hasBg && style === 'wrap';
-  root.style.setProperty('--panel-op', hasBg && !wrap ? String(clamp(panelOpacity ?? 1, 0.7, 1)) : '1');
+  root.style.setProperty('--panel-op', hasBg && !wrap ? String(clamp(panelOpacity ?? 1, MIN_PANEL_OP, 1)) : '1');
   root.style.setProperty('--bg-blur', hasBg && !wrap ? `${Math.round(clamp(bgBlur ?? 0, 0, 60))}px` : '0px');
   root.style.setProperty('--bg-brightness', hasBg ? String(clamp(brightness ?? 1, 0.5, 1.5)) : '1');
-  root.style.setProperty('--backdrop-dim', hasBg && !wrap ? String(clamp(scrim ?? 0, 0.2, 0.6)) : '0');
+  root.style.setProperty('--backdrop-dim', hasBg && !wrap ? String(effectiveScrim(scrim, lightSkin)) : '0');
   root.style.setProperty('--backdrop-auto', hasBg && !wrap ? String(clamp(autoDim ?? 0, 0, 0.6)) : '0');
-  root.style.setProperty('--wrap-op', wrap ? String(clamp(wrapOpacity ?? 0.62, 0.4, 1)) : '0.62');
-  root.style.setProperty('--backdrop-tint', scrimTint(hasBg ? tint : ''));
+  root.style.setProperty('--wrap-op', wrap ? String(clamp(wrapOpacity ?? 0.45, 0.4, 1)) : '0.62');
+  root.style.setProperty('--backdrop-tint', scrimTint(hasBg ? tint : '', !!lightSkin));
+  // 顶栏渐变与自动补偿层的纯色方向（CSS 里 rgb(var(--backdrop-veil) / a)）：
+  // tint 是低彩度版，这两层用同方向的全饱和纯色。无图/贴膜时回到黑（缺省；
+  // 无图时该层整个不渲染，贴膜的亮度补偿有自己的白/黑层）。
+  root.style.setProperty('--backdrop-veil', hasBg && !wrap && lightSkin ? '255 255 255' : '0 0 0');
+  // 面板级背景归一化（styles.css 的 backdrop-filter 里那一串 contrast/brightness/
+  // saturate）。带的两端由 lensBand 反解、CSS 只消费同一组数，改一处两边一起变。
+  // 无图 / 贴膜时回到中性（贴膜的面板不走 backdrop-filter，这条只是兜底，免得变量
+  // 悬空）。lens 由调用方按当前底图自己的直方图算出（自适应 auto-levels，见
+  // lensFromImage）；传空就回落 lensOf(tokens) —— 图还没解码完 / 图太平 / 参数退化
+  // 时走这一支，带的两端同源，只是少一层按图拉张。
+  const fallbackLens = tokens ? lensOf(tokens) : null;
+  const useLens = lens || fallbackLens;
+  root.style.setProperty('--lens-filter', hasBg && !wrap && useLens
+    ? lensFilter(useLens) : 'saturate(1.5)');
   document.body.classList.toggle('wrap-mode', wrap);
   document.body.classList.toggle('has-bg', hasBg);
+  // 方向类：卡片浮起阴影按皮肤方向分档（浅色亮玻璃柔影 / 深色重影）。
+  // 只在置底模式点亮——贴膜模式的面板自己贴图，不浮在图上。
+  document.body.classList.toggle('light-skin', hasBg && !wrap && !!lightSkin);
 
+  // 换壁纸走交叉淡入：旧图留在根变量上，新图挂到临时同款 .backdrop 层上淡入
+  // （styles.css .is-fade-in），完成后切根变量、移除临时层。只有「图 → 另一张图」
+  // 才淡入——首次设置淡入会闪一块空底，撤图淡出会闪一下黑，都直切。
   // 淡入已在飞且目标没变（换肤重应用 / 拖滑杆触发的重铺）：直接退出。
   // 不挡的话第二次调用会把根变量提前切到新图，交叉淡入瞬间变成硬切。
   if (hasBg && fadingTo === background) return;
@@ -895,12 +1385,12 @@ function resolveSkin(state, id) {
     return {
       tokens: draft && draft.tokens ? { ...draft.tokens } : { ...SKINS.plain.tokens },
       background: (state && state.backgroundImage) || '',
-      panelOpacity: clamp((state && state.panelOpacity) ?? 0.88, 0.7, 1),
+      panelOpacity: clamp((state && state.panelOpacity) ?? 0.45, MIN_PANEL_OP, 1),
       bgBlur: clamp((state && state.bgBlur) ?? 0, 0, 60),
       bgBrightness: clamp((state && state.bgBrightness) ?? 1, 0.5, 1.5),
       scrim: clamp((state && state.scrim) ?? 0.30, 0.2, 0.6),
       backdropStyle: (state && state.backdropStyle) === 'wrap' ? 'wrap' : 'underlay',
-      wrapOpacity: clamp((state && state.wrapOpacity) ?? 0.62, 0.4, 0.9),
+      wrapOpacity: clamp((state && state.wrapOpacity) ?? 0.45, 0.4, 0.9),
     };
   }
   // 编辑器草稿本身就是一种皮肤。原来它只存在 state.custom 里、由 UI 直接调 applyTokens
@@ -980,10 +1470,10 @@ async function aiGenerate(provider, imgDataUrl) {
         content: [
           { type: 'text', text: '根据这张壁纸生成一套 UI 主题令牌，输出 JSON（不要代码块）：'
             + '{"bg":"#hex","panel":"#hex","text":"#hex","down":"#hex","up":"#hex","ok":"#hex","warn":"#hex","error":"#hex","accent":"#hex","panelOpacity":0.9,"blur":12}。'
-            + '要求：bg 与 panel 是低彩度表面色，深浅方向与壁纸整体协调，panel 比 bg 明度高约一档；'
+            + '要求：bg 与 panel 是低彩度表面色，深浅方向必须与壁纸整体明暗一致（暗壁纸输出深色表面、亮壁纸输出浅色表面，不要把暗壁纸抬成浅色），panel 比 bg 明度高约一档；'
             + 'text 相对 panel 的对比度 ≥4.5:1，色温与壁纸一致；'
             + 'accent 是交互强调色，down/up 分别是下载/上传数据色，ok/warn/error 是语义色 —— 三组颜色色相彼此错开至少 30°；'
-            + 'panelOpacity 取 0.7–1，blur 取 0–60。' },
+            + 'panelOpacity 取 0.3–1（面板身后那块背景由内置透镜局部归一化，压低也读得清），blur 取 0–60。' },
           { type: 'image_url', image_url: { url: imgDataUrl } },
         ],
       }],
@@ -1023,7 +1513,8 @@ function defaultState() {
   return {
     skin: 'plain',        // 内置 id | 'image' | themes 里的自定义皮肤名
     backgroundImage: '',  // 仅 image 皮肤使用（已落盘路径）
-    panelOpacity: 0.88,   // image 皮肤：面板不透明度（滑杆 0.70–1）
+    panelOpacity: 0.45,   // image 皮肤：面板不透明度（滑杆 0.30–1）。透镜把面板身后
+                          // 那块背景归一成柔色之后，0.45 就已经「底图看得见 + 字读得清」
     bgBlur: 0,            // image 皮肤：背景模糊半径 px
     bgBrightness: 1,      // image 皮肤：背景亮度 0.5–1.5，暗图提亮 / 亮图压暗
     scrim: 0.30,          // image 皮肤：背景压暗
@@ -1047,7 +1538,7 @@ function migrateState(state) {
   // 旧版三模式（mode: standard | ai | custom）→ 新皮肤归属
   if (typeof state.mode === 'string') {
     const std = state.standard || {};
-    state.panelOpacity = clamp(std.panelOpacity ?? 0.88, 0.7, 1);
+    state.panelOpacity = clamp(std.panelOpacity ?? 0.45, MIN_PANEL_OP, 1);
     state.bgBlur = clamp(std.blur ?? 0, 0, 60);
     state.scrim = clamp(std.scrim ?? 0.30, 0.2, 0.6);
     state.backgroundImage = state.pendingBackground || '';
@@ -1091,7 +1582,7 @@ function migrateState(state) {
       state.skin = 'image';
       state.backgroundImage = cur.background;
       state.imageDraft = cur.tokens ? { tokens: { ...cur.tokens }, source: cur.source || 'standard' } : null;
-      state.panelOpacity = clamp(cur.panelOpacity ?? 0.88, 0.7, 1);
+      state.panelOpacity = clamp(cur.panelOpacity ?? 0.45, MIN_PANEL_OP, 1);
       state.bgBlur = clamp(cur.blur ?? 0, 0, 60);
       state.scrim = clamp(cur.scrim ?? 0.30, 0.2, 0.6);
     } else if (cur.tokens) {
@@ -1131,7 +1622,16 @@ function migrateState(state) {
   }
 
   if (state.skin === 'image') {
-    state.panelOpacity = clamp(state.panelOpacity ?? 0.88, 0.7, 1);
+    // 一次性归位：透镜（LENS）上线前，面板不透明度被「可读性地板」逼在 0.7–1.0 的
+    // 近实心区间（地板最高算到 0.97，用户把滑杆拉到底也就是 0.93）——那个区间只剩
+    // 「底图看不见」一个作用，而用户的意图恰恰相反。所以把这一档历史值一次性落回
+    // 0.45：透镜接手后 0.45 就是「底图看得见 + 文字达标」。
+    // opRev 保证只做一次：之后用户自己调到 0.8 不会再被改回去。
+    if ((state.opRev ?? 0) < 1) {
+      if (Number(state.panelOpacity) >= 0.55) state.panelOpacity = 0.45;
+      state.opRev = 1;
+    }
+    state.panelOpacity = clamp(state.panelOpacity ?? 0.45, MIN_PANEL_OP, 1);
     state.bgBlur = clamp(state.bgBlur ?? 0, 0, 60);
     // 亮度：非法/缺省回落 1（不调）；区间 0.5–1.5
     state.bgBrightness = clamp(Number(state.bgBrightness) || 1, 0.5, 1.5);
@@ -1148,7 +1648,12 @@ function migrateState(state) {
         ? state.imageDraft.palette.filter((c) => c && /^#[0-9a-f]{6}$/i.test(c.hex || ''))
         : undefined;
       state.imageDraft = fixed
-        ? { tokens: fixed, source: state.imageDraft.source || 'standard', ...(pal ? { palette: pal } : {}) }
+        ? {
+          tokens: state.imageDraft.rev === DERIVE_REV ? fixed : refreshDerivedTokens(fixed),
+          source: state.imageDraft.source || 'standard',
+          rev: DERIVE_REV,
+          ...(pal ? { palette: pal } : {}),
+        }
         : null;
     } else {
       state.imageDraft = null;
@@ -1207,7 +1712,13 @@ window.NetPeekTheme = {
   okHue,
   paletteWeights,
   luminance,
+  lumToChannel,
   contrast,
+  apcaLc,
+  APCA_TIERS,
+  bandOf,
+  DERIVE_REV,
+  refreshDerivedTokens,
   ensureContrast,
   clamp,
   pickBase,
@@ -1220,10 +1731,28 @@ window.NetPeekTheme = {
   guardTokens,
   deriveTokens,
   effectivePanel,
+  lensOf,
+  lensApply,
+  lensFilter,
+  lensParams,
+  lensBand,
+  lensFromImage,
+  LENS_DESIGN_OP,
+  LENS_BODY_LC,
+  GLASS_TIERS,
+  GLASS_TIER_REL,
+  glassTierTargets,
+  worstSurface,
+  chromaComp,
+  MIN_IMG_RANGE,
+  MIN_PANEL_OP,
   backdropFloor,
   backdropGuard,
   wrapFloor,
   scrimTint,
+  isLightSkin,
+  veilOf,
+  effectiveScrim,
   migrateState,
   composeDraft,
   draftFromTokens,

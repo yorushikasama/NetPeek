@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>NetPeek.Setup</AssemblyName>
+    <RootNamespace>NetPeek.Installer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\icon.ico</ApplicationIcon>
+    <Product>NetPeek</Product>
+    <AssemblyTitle>NetPeek 安装程序</AssemblyTitle>
+    <Description>NetPeek 网络流量监控 - 安装程序（安装主程序与采集服务）</Description>
+    <Version>0.1.0</Version>
+    <!-- 发布：单文件自包含 + 压缩。安装器自身绝不依赖 WebView2/运行时，
+         否则「要装的东西没装上之前，安装器自己先跑不起来」——鸡生蛋。 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 内嵌被安装产物：主程序 + 采集服务。payload 由 scripts/build-installer.ps1
+         填充；Exists 条件保证开发机没有 payload 时也能正常编译（此时跑 preview
+         模式看 UI 没问题，真安装会在解包步骤报「内嵌产物缺失」）。 -->
+    <EmbeddedResource Include="payload\NetPeek.exe" Condition="Exists('payload\NetPeek.exe')"
+                      LogicalName="NetPeek.payload.App.exe" />
+    <EmbeddedResource Include="payload\NetPeek.Collector.exe" Condition="Exists('payload\NetPeek.Collector.exe')"
+                      LogicalName="NetPeek.payload.Collector.exe" />
+    <Resource Include="assets\icon.png" Condition="Exists('assets\icon.png')" />
+  </ItemGroup>
+
+</Project>

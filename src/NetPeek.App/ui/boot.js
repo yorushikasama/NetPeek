@@ -118,10 +118,18 @@
       if (REDUCED) layer.classList.add("is-static");
       else rewind();
 
+      if (win) {
+        try { await win.show(); } catch { /* 浏览器里预览时没有窗口，正常 */ }
+      }
+
+      // 从「窗口真正可见」起算动效下限：show 是一次异步 IPC，完成时刻才接近实际
+      // 露脸。放在 show 之前计的话，慢机器上窗口还没显示时间线就在走，
+      // 用户实际看到的动效会短于 2400ms（复审 P3）。
+      // setFocus 排在计时之后：它也是一次 IPC，放在前面会进一步吃掉动画头部
+      //（动画自 rewind 起跑，shownAt 越晚，用户错过的时间线越多）。
       shownAt = performance.now();
 
       if (win) {
-        try { await win.show(); } catch { /* 浏览器里预览时没有窗口，正常 */ }
         try { await win.setFocus(); } catch { /* 同上 */ }
       }
 

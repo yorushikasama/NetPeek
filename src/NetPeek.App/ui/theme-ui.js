@@ -73,6 +73,8 @@
     blurRow: $('blurRow'),
     scrimRow: $('scrimRow'),
     wrapOpRow: $('wrapOpRow'),
+    scrimLabel: $('scrimLabel'),
+    opHint: $('opHint'),
     wrapOpacity: $('wrapOpacity'),
     wrapOpValue: $('wrapOpValue'),
   };
@@ -116,10 +118,28 @@
     try { return await storage.readBackground(p); } catch { return ''; }
   }
 
+  // 纱是「压暗」还是「提亮」由皮肤方向决定：滑杆文案跟着换 —— 不然浅色皮肤上
+  // 一个写着「压暗」的滑杆在往图上铺亮纱，说明和效果打架。
+  function syncDirectionLabels(lightSkin) {
+    if (els.scrimLabel) {
+      els.scrimLabel.innerHTML = lightSkin
+        ? '<b>背景亮纱</b><small>给底图铺一层很轻的亮纱统一观感（浅色下自动收敛浓度）</small>'
+        : '<b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small>';
+      els.scrim.setAttribute('aria-label', lightSkin ? '背景亮纱' : '背景压暗');
+    }
+    if (els.opHint) {
+      els.opHint.textContent = lightSkin
+        ? '越低底图越透出来。面板身后那块背景会自动归一成柔色，拉到最低也读得清'
+        : '越低底图越透出来。面板身后那块背景会自动归一成暗调，拉到最低也读得清';
+    }
+  }
+
   async function applyCurrent() {
     const skin = T.resolveSkin(state);
     const bg = await resolveBgUrl(skin.background || '');
     bgDataUrl = bg;
+    const lightSkin = T.isLightSkin(skin.tokens);
+    syncDirectionLabels(lightSkin);
     T.applyTokens(skin.tokens);
     T.applyBackdrop({
       background: bg,
@@ -131,6 +151,9 @@
       autoDim,
       style: state.backdropStyle,
       wrapOpacity: effectiveWrapOpacity(),
+      lightSkin,
+      lens: refreshLens(),
+      tokens: skin.tokens,
     });
     broadcastTokens(skin.tokens);
     if (state.skin === 'image') {
@@ -160,6 +183,9 @@
       autoDim,
       style: state.backdropStyle,
       wrapOpacity: effectiveWrapOpacity(),
+      lightSkin: T.isLightSkin(T.resolveSkin(state).tokens),
+      lens: refreshLens(),
+      tokens: T.resolveSkin(state).tokens,
     });
   }
 
@@ -236,6 +262,7 @@
       state.imageDraft = {
         tokens: T.tokensFromImage(stdImage, stdImgEl, state.imageMode),
         source: 'standard',
+        rev: T.DERIVE_REV,
         palette: T.extractImagePalette(stdImage, stdImgEl),
       };
     } else if (!Array.isArray(state.imageDraft.palette) || !state.imageDraft.palette.length) {
@@ -312,7 +339,7 @@
     if (!stdImage) return;
     const palette = T.extractImagePalette(stdImage, stdImgEl);
     const tokens = T.tokensFromImage(stdImage, stdImgEl, state.imageMode);
-    state.imageDraft = { tokens, source: 'standard', palette };
+    state.imageDraft = { tokens, source: 'standard', rev: T.DERIVE_REV, palette };
     renderPalette();
     await applyCurrent();
     fillSwatches(tokens);
@@ -352,9 +379,11 @@
     const tokens = T.resolveSkin(state).tokens;
     const accent = T.ensureContrast(hex, tokens.panel);
     if (accent.toLowerCase() === String(tokens.accent || '').toLowerCase()) return;
-    // accent 是核心键：塞回 core 重新派生，派生键（selBar / accentInk）跟着走
+    // accent 是核心键：塞回 core 重新派生，派生键（selBar / accentInk）跟着走。
+    // 走 tightRamp —— 这是背景图皮肤，字阶必须用收紧后的混比重算，否则换个
+    // 强调色会把之前收紧的字阶退回默认档（同一个草稿两套混比，颜色自相矛盾）。
     state.imageDraft.tokens = T.validateSkin(
-      T.expandTokens({ ...T.coreOf(tokens), accent }));
+      T.expandTokens({ ...T.coreOf(tokens), accent }, { tightRamp: true }));
     renderPalette();
     await applyCurrent();
     fillSwatches(state.imageDraft.tokens);
@@ -372,33 +401,95 @@
 
   // ---------- 背景图上的可读性 ----------
 
-  // 底图「成片亮区」的亮度（块均值的 p90 分位）。旧实现取全部块的最大值：
-  // 壁纸上一颗亮星 / 一小片高光就把最坏亮度顶满，可读性守卫跟着把面板钉到
-  // 接近不透明 —— 2026-09-13 用户实测暗壁纸 floor 0.96，三个材质滑杆全部失感。
-  // 文字是成片压在区域上的，p90 代表「成片亮区」；零星亮斑交给自动压暗兜底。
-  function backdropLuminance(img) {
-    if (!img) return 0;
+  // 底图「成片亮区/暗区」的亮度（块均值的分位）。深色皮肤取 p90、浅色皮肤取
+  // p10 —— 深色怕成片亮区（亮字没地方落）、浅色怕成片暗区（暗字没地方落），
+  // 口径互为镜像；旧实现取全部块的最大值，壁纸上一颗亮星就把最坏亮度顶满，
+  // 可读性守卫跟着把面板钉到接近不透明（2026-09-13 用户实测 floor 0.96）。
+  // p90/p10 代表「成片」的亮/暗区；零星极值交给自动纱兜底。
+  // 底图统计：一趟 16×16 块均值扫描，两个口径同时产出。
+  //   lum  —— 每块的线性亮度均值（chroma 的 relative luminance）→ 守卫的成片亮/暗区
+  //   chan —— 每块的等效灰通道均值（lumToChannel(luminance)）→ 自适应透镜要的「图自己的灰范围」
+  // 必须来自同一次扫描：它们描述同一张图的同一批块，分两趟扫不仅白扫一遍，两个分位数
+  // 还会因为采样口径不同而互相漂。
+  // 缓存挂 WeakMap（键是 ImageData 对象）：拖滑杆每帧都会问一次，一张 2 MP 的图重扫是浪费；
+  // 换图时 stdImage 是新对象，缓存自然失效，不用手工清。
+  const statCache = new WeakMap();
+  function imageStats(img) {
+    if (!img) return null;
+    const hit = statCache.get(img);
+    if (hit) return hit;
     const { data, width, height } = img;
     const bw = Math.max(1, Math.floor(width / 16));
     const bh = Math.max(1, Math.floor(height / 16));
-    const means = [];
+    const lum = [];
+    const chan = [];
     for (let by = 0; by < height; by += bh) {
       for (let bx = 0; bx < width; bx += bw) {
         let sum = 0;
+        let csum = 0;
         let n = 0;
         for (let y = by; y < Math.min(by + bh, height); y += 2) {
           for (let x = bx; x < Math.min(bx + bw, width); x += 2) {
             const i = (y * width + x) * 4;
-            sum += T.luminance({ r: data[i], g: data[i + 1], b: data[i + 2] });
+            const l = T.luminance({ r: data[i], g: data[i + 1], b: data[i + 2] });
+            sum += l;
+            csum += T.lumToChannel(l);
             n++;
           }
         }
-        if (n) means.push(sum / n);
+        if (n) {
+          lum.push(sum / n);
+          chan.push(csum / n / 255);
+        }
       }
     }
-    if (!means.length) return 0;
-    means.sort((a, b) => a - b);
-    return means[Math.min(means.length - 1, Math.floor(means.length * 0.9))];
+    lum.sort((a, b) => a - b);
+    chan.sort((a, b) => a - b);
+    const stat = { lum, chan };
+    statCache.set(img, stat);
+    return stat;
+  }
+
+  // 分位：p 是 0..1 的比例，越界钳到端点；空序列给 0。
+  function pct(arr, p) {
+    if (!arr || !arr.length) return 0;
+    return arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * p)))];
+  }
+
+  function backdropLuminance(img, light = false) {
+    const s = imageStats(img);
+    if (!s) return 0;
+    return light ? pct(s.lum, 0.1) : pct(s.lum, 0.9);
+  }
+
+  // 自适应透镜要的输入：图**自己**的等效灰通道范围（p2–p98）。一张只占一小段灰的
+  // 壁纸（近黑星空那种）靠这两个数才能被拉张开；固定透镜只会把它原样压成一块平色。
+  function imageRange(img) {
+    const s = imageStats(img);
+    if (!s) return null;
+    return { lo: pct(s.chan, 0.02), hi: pct(s.chan, 0.98) };
+  }
+
+  // 当前生效的自适应透镜。图还没解码完 / 图太平 / 参数退化时是 null，
+  // theme.applyBackdrop 会回落到 theme.lensOf(tokens)（同一组带端、只是少一层
+  // 按图拉张）。
+  // 依赖三样：图自己的灰范围、方向化纱浓度、背景亮度滑杆（CSS 里亮度作用在纱之下、
+  // 透镜之上，所以必须算进反解里）。
+  let activeLens = null;
+  function refreshLens() {
+    const tokens = T.resolveSkin(state).tokens;
+    const lightSkin = T.isLightSkin(tokens);
+    const r = imageRange(stdImage);
+    activeLens = r
+      ? T.lensFromImage(
+        r.lo,
+        r.hi,
+        tokens,
+        T.effectiveScrim(state.scrim ?? 0.3, lightSkin),
+        state.bgBrightness ?? 1,
+      )
+      : null;
+    return activeLens;
   }
 
   // 可读性守卫：p90 亮区 + 用户滑杆（不透明度 / 压暗）→ 自动压暗补偿。
@@ -415,29 +506,41 @@
     if (!els.opFloorNote) return;
     const wrap = state.backdropStyle === 'wrap';
     const tokens = T.resolveSkin(state).tokens;
-    const panelOp = T.clamp(state.panelOpacity ?? 0.88, 0.7, 1);
-    let guard = { autoDim: 0, floor: 0.7 };
+    const lightSkin = T.isLightSkin(tokens);
+    const panelOp = T.clamp(state.panelOpacity ?? 0.45, T.MIN_PANEL_OP, 1);
+    // 滑杆下限恒定 = MIN_PANEL_OP：透镜接手了底图偏明偏暗那一档（把面板身后的背景
+    // 按这张图自己的直方图拉张开成一条柔色玻璃带），地板不再需要去抬 min。
+    // （旧版这里会用地板抬高 min，见下面那段注释。）
+    els.opacity.min = String(T.MIN_PANEL_OP);
+    let guard = { autoDim: 0, floor: T.MIN_PANEL_OP };
     wrapFloorVal = 0;
     // 守卫看「调亮之后的实际底图」:亮度 ×1.3 的暗图,等效亮度按 1.3 倍算
-    // （线性近似,偏保守）;>1 的部分钳到 1。
+    // （线性近似,偏保守）;>1 的部分钳到 1。分位口径随皮肤方向（浅色取 p10）。
     const lum = stdImage
-      ? Math.min(1, backdropLuminance(stdImage) * T.clamp(state.bgBrightness ?? 1, 0.5, 1.5))
+      ? Math.min(1, backdropLuminance(stdImage, lightSkin) * T.clamp(state.bgBrightness ?? 1, 0.5, 1.5))
       : 0;
     if (stdImage && wrap) {
       // 贴膜：等效合成 = mix(图, panel, 浓度)。守护档位宽一档（主文字 4.5、
       // 次要 3.2），地板下限取滑杆下限 0.40 —— 档位依据见 theme.wrapFloor 注释
       wrapFloorVal = T.wrapFloor(tokens, lum, 0.4);
     } else if (stdImage) {
-      guard = T.backdropGuard(tokens, lum, state.scrim ?? 0.3, panelOp);
+      // 纱浓度走方向化有效值（与 CSS --backdrop-dim 同一口径），守卫判定和实际渲染才一致
+      guard = T.backdropGuard(
+        tokens, lum, T.effectiveScrim(state.scrim ?? 0.3, lightSkin), panelOp, refreshLens());
     }
     autoDim = wrap ? 0 : guard.autoDim;
-    // 硬钳只在「自动压暗顶格仍不达标」时发生（仅置底模式）；平时 floor 写 0 放开淡出
+    // 地板只铺在 --panel-op-floor（--paint-op 取 max(滑杆, floor)），**不动滑杆**。
+    // 2026-09-15 之前这里会把 els.opacity.min 抬到 floor、并把 value 与 state 一起
+    // 吸附过去 —— 用户的滑杆被系统拿走：往下拉到尽头就是 0.93，底图一点透不出来。
+    // 现在置底 + 底图的路径上守卫整体退休（theme.backdropGuard 遇透镜直接返回
+    // MIN_PANEL_OP）：带的两端由透镜在**设计不透明度**上反解，用户拖到更低时合成面
+    // 确实更暗 —— 那是他要的透明度，不是需要补偿的缺陷。这条分支只剩贴膜 / 无图
+    // 两条路径兜底，提示条基本不会再出现。
     const clamped = !wrap && stdImage && guard.floor > panelOp + 1e-9;
     document.documentElement.style.setProperty('--panel-op-floor', clamped ? String(guard.floor) : '0');
     applyBackdropOnly();
     if (wrap) {
       // 贴膜不钳滑杆：用户的选择保留在滑杆上，实际铺膜取地板，差值由提示条解释
-      els.opacity.min = '0.7';
       const user = T.clamp(state.wrapOpacity ?? 0.62, 0.4, 0.9);
       if (wrapFloorVal > user + 1e-9) {
         els.opFloorNote.hidden = false;
@@ -448,26 +551,25 @@
       }
       return;
     }
-    // range input 在 min 抬高的一瞬会把 value 静默吸附到 min（详见旧注释）：
-    // 动 min 前先读旧值，吸附是否发生以旧值判断，state 与 CSS 变量在这里显式补齐
-    const before = Number(els.opacity.value);
-    els.opacity.min = clamped ? String(guard.floor) : '0.7';
-    if (before < Number(els.opacity.min)) {
-      els.opacity.value = els.opacity.min;
-      state.panelOpacity = Number(els.opacity.min);
-      syncTuningLabels();
-      applyBackdropOnly();
-    }
-    // 提示条两档：自动压暗（常规，中性语气）与硬钳（罕见，警告）
+    // 这里原先还有一段「把 min 抬到地板、并把 value / state 一起吸附过去」的代码，
+    // 随透镜上线一并删除：它是「系统拿走滑杆」的元凶，而地板现在不必靠牺牲用户的
+    // 选择来换可读性。
+    // 提示条两档：自动纱（常规，中性语气）与不透明度地板（垫底，警告）
     if (!stdImage) {
       els.opFloorNote.hidden = true;
     } else if (clamped) {
       els.opFloorNote.hidden = false;
-      els.opFloorNote.textContent = `这张图非常亮，自动压暗到顶仍读不清：面板不透明度被抬到 ${guard.floor.toFixed(2)}。`;
+      // 措辞对应「明度带」判据 + 新的处置方式：漆层按地板铺、滑杆保留用户的选择，
+      // 差值说清楚；再给一条真能让底图更显的操作（模糊），而不是让人去动滑杆。
+      els.opFloorNote.textContent = lightSkin
+        ? `这张图整幅极暗：面板在你选的不透明度下会和身后那块背景混成一块中调灰（说明字、单位、图标最先糊），所以漆层按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的选择）。透镜已经把面板身后那块背景提亮成浅色柔色，垫这一档是为了让「面板＝一块浅色表面」这条线不塌；想让底图再显一点，试试把「背景模糊」往大调。`
+        : `这张图整幅极亮：面板在你选的不透明度下会失去「深色表面」的明度，所以漆层按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的选择）。透镜已经把面板身后那块背景压成暗调，垫这一档是为了让「面板＝一块深色表面」这条线不塌；想让底图再显一点，试试把「背景模糊」往大调。`;
       els.opFloorNote.className = 'note is-warn';
     } else if (guard.autoDim > 0.005) {
       els.opFloorNote.hidden = false;
-      els.opFloorNote.textContent = `这张图局部偏亮，已自动补 ${guard.autoDim.toFixed(2)} 压暗保证文字可读；把「面板不透明度」调高，自动压暗会随之减少。`;
+      els.opFloorNote.textContent = lightSkin
+        ? `这张图局部偏暗，已自动补 ${guard.autoDim.toFixed(2)} 亮纱保证文字可读；把「面板不透明度」调高，自动补偿会随之减少。`
+        : `这张图局部偏亮，已自动补 ${guard.autoDim.toFixed(2)} 压暗保证文字可读；把「面板不透明度」调高，自动压暗会随之减少。`;
       els.opFloorNote.className = 'note';
     } else {
       els.opFloorNote.hidden = true;
@@ -545,14 +647,16 @@
         apiKey: els.aiApiKey.value.trim(),
         model: els.aiModel.value.trim(),
       }, bgDataUrl);
-      // 新格式（9 核心键）直接进派生管线；旧格式（10 键带 border/muted）走迁移归一
+      // 新格式（9 核心键）直接进派生管线；旧格式（10 键带 border/muted）走迁移归一。
+      // tightRamp：AI 给的也是背景图皮肤的表面色，字阶同样要按收紧混比派生，
+      // 否则「标准取色」与「AI 取色」两条路会给出两套字阶深度。
       const raw = res.tokens;
       const tokens = raw.accent && !raw.border
-        ? T.validateSkin(T.expandTokens(raw))
+        ? T.validateSkin(T.expandTokens(raw, { tightRamp: true }))
         : T.validateSkin(T.convertLegacyTokens(raw));
-      state.imageDraft = { tokens, source: 'ai' };
+      state.imageDraft = { tokens, source: 'ai', rev: T.DERIVE_REV };
       // AI 给的面板不透明度 / 模糊半径同步回滑块，所见即所存
-      state.panelOpacity = T.clamp(res.panelOpacity, 0.7, 1);
+      state.panelOpacity = T.clamp(res.panelOpacity, T.MIN_PANEL_OP, 1);
       state.bgBlur = Math.round(T.clamp(res.blur, 0, 60));
       syncTuningLabels();
       els.opacity.value = state.panelOpacity;
@@ -753,13 +857,13 @@
   }
 
   function pullSliders() {
-    state.panelOpacity = T.clamp(els.opacity.value, 0.7, 1);
+    state.panelOpacity = T.clamp(els.opacity.value, T.MIN_PANEL_OP, 1);
     state.bgBlur = Math.round(T.clamp(els.blur.value, 0, 60));
     state.scrim = T.clamp(els.scrim.value, 0.2, 0.6);
   }
 
   function pushSliders() {
-    els.opacity.value = T.clamp(state.panelOpacity ?? 0.88, 0.7, 1);
+    els.opacity.value = T.clamp(state.panelOpacity ?? 0.45, T.MIN_PANEL_OP, 1);
     els.blur.value = Math.round(T.clamp(state.bgBlur ?? 0, 0, 60));
     els.scrim.value = T.clamp(state.scrim ?? 0.30, 0.2, 0.6);
     if (els.wrapOpacity) els.wrapOpacity.value = T.clamp(state.wrapOpacity ?? 0.62, 0.4, 0.9);
@@ -820,12 +924,15 @@
   // 选图落地管线：规范化 → 落盘 → 重取色 → 刷新守卫与选中态。
   async function useBackgroundImage(dataUrl, okText) {
     try {
-      // 旧版「面板不透明度地板」会把滑杆钳在 0.96–1.00，那个时代留下的近实心值
-      // 会让新选的图完全看不见（用户实测：图已应用却以为没生效）。选新图时
-      // 检测到这段历史值就回到默认 0.88，让图立刻可见。
-      if ((state.panelOpacity ?? 0) >= 0.95) {
-        state.panelOpacity = 0.88;
-        els.opacity.value = '0.88';
+      // 旧版「面板不透明度地板」会把滑杆钳在 0.92–1.00（透镜上线前地板最高能算到
+      // 0.97），那个时代留下的近实心值会让新选的图完全看不见（用户实测：图已应用
+      // 却以为没生效）。选新图时检测到这段历史值就回到默认 0.45 —— 透镜接手后
+      // 0.45 就「底图看得见 + 字读得清」，不必再用近实心面板换可读性。
+      // 阈值留在 0.9：0.7–0.9 可能是用户自己挑的档，不该被这里悄悄改掉
+      // （那一档的归位交给 migrateState 的一次性 opRev 规则）。
+      if ((state.panelOpacity ?? 0) >= 0.9) {
+        state.panelOpacity = 0.45;
+        els.opacity.value = '0.45';
       }
       const normalized = await normalizeBackground(dataUrl);
       // 落盘到应用数据目录，避免配置 JSON 无限膨胀

@@ -12,6 +12,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 const pw = await import(process.env.NP_PW || 'playwright');
 const chromium = (pw.chromium || (pw.default && pw.default.chromium));
@@ -200,9 +201,301 @@ await new Promise((r) => server.listen(8932, '127.0.0.1', r));
 const VIEWPORTS = [
   { tag: 'w1280', width: 1280, height: 800 },
   { tag: 'w940', width: 940, height: 620 },
-];
-const SCREENS = ['live', 'history', 'settings'];
+];const SCREENS = ['live', 'history', 'settings'];
 const SETTINGS_SECS = ['general', 'appearance', 'data', 'alerts', 'service', 'about'];
+
+// ---- 守卫契约的共享探针（背景图相关各块共用） ----
+//
+// 本轮把可读性判据换了两处（2026-09-15）：① 度量从 WCAG 2 的亮度比换成 APCA
+// 的 Lc（面板被底图稀释成中调之后，WCAG 的比值会给出「正文 6.6 达标」这种
+// 与人眼相反的结论）；② 新增「表面明度带」判据 —— 合成面必须仍是浅色表面或是
+// 深色表面，不能滑进中调。于是「守卫输出的 (floor, autoDim) 是否守住契约」
+// 成了各块共同要问的问题，放在这里统一定义，避免每块各写一遍判据。
+// 契约 = 合成面落在明度带内 + 各字阶达到各自的 APCA 目标（含弱字阶）。
+//
+// 2026-09-15 返工：字阶口径从 `APCA_TIERS`（浅色 75/60/40、深色次要字 45）换成
+// `theme.glassTierTargets`（**玻璃字阶**：浅色 60/48/32、深色正文 60 + 次要字自校准）。
+// 理由是那套严格档位在「半透玻璃 + 归一化透镜」上本来就无解，而不是实现没做到：
+//   · 浅色正文 75 要求合成面亮度 ≥0.63 ⟹ 带只剩 0.21 宽 ⟹ 底图的形全被压flat，
+//     这正是用户连着两次抱怨的那块「粉白雾」（旧带 [0.85,1] 实测底图形只剩 6/255）；
+//   · 深色次要字 45 超过那枚中灰的物理上限（实测 ≈43，纯黑也只给 43.3）⟹
+//     契约恒假 ⟹ 带退化成一个点 ⟹ 透镜为 null ⟹ 地板把面板顶到 1（深色底图彻底消失）。
+// 判定口径必须与渲染同源，否则回归会逼着实现把刚争来的带宽还回去。
+// **独立的地面真值仍然是像素审计那一节**（`[bg-user-audit:*]` 直接量截图像素），
+// 这一节的模型判据只是「不许在模型层面就说不通」。
+const GUARD_PROBE = () => {
+  window.__npGuard = (tokens, scrim, panelOp, Ls) => {
+    const T = window.NetPeekTheme;
+    return Ls.map((L) => {
+      const g = T.backdropGuard(tokens, L, scrim, panelOp);
+      const op = Math.max(panelOp, g.floor);
+      const band = T.bandOf(tokens);
+      const tiers = T.glassTierTargets(tokens);
+      // 两档面板底色都要过判据（实现同款）：panel 管卡片，panel-2 管顶栏 / rail /
+      // 表头 / 输入框 —— 顶栏正是像素审计里最糊的那块。
+      const surfaces = [tokens.panel, tokens.panel2]
+        .filter((h) => /^#[0-9a-f]{6}$/i.test(h || ''));
+      const rows = surfaces.map((surf) => {
+        const eff = T.effectivePanel({ ...tokens, panel: surf }, L, Math.min(1, scrim + g.autoDim), op);
+        const lum = T.luminance(T.hexToRgb(eff));
+        const lcs = tiers.map(([k, min]) => [k, Math.abs(T.apcaLc(tokens[k], eff)), min]);
+        return {
+          surf, eff, lum: Math.round(lum * 1000) / 1000, lcs,
+          bandOk: lum >= band[0] - 1e-9 && lum <= band[1] + 1e-9,
+          tiersOk: lcs.every(([, v, min]) => v >= min - 1e-9),
+        };
+      });
+      return {
+        L, floor: g.floor, autoDim: g.autoDim, op,
+        eff: rows[0].eff, lum: rows[0].lum, lcs: rows[0].lcs,
+        bandOk: rows.every((r) => r.bandOk),
+        tiersOk: rows.every((r) => r.tiersOk),
+        surfaces: rows.map((r) => [r.surf, r.eff, r.lum, r.bandOk, r.tiersOk]),
+      };
+    });
+  };
+};
+const guardRowsOk = (rows) => rows.every((r) => r.bandOk && r.tiersOk);
+
+// 像素级可读性审计（任一屏可复用）：先（字形还在时）把每个元素的颜色与框抓下来，
+// 再抹掉字形取「背景板」，最后用元素自己的颜色去量它脚下那块背景板像素。
+// 顺序不能反：隐藏字形的那条 CSS 会把 color 变成 transparent，之后读 computed style
+// 拿到的全是 rgba(0,0,0,0) —— 第一次跑就是这么量出「全页 fg #000000」的假数据。
+// 返回 { total, worst, below30, below45, minAbsLc }；plate 落盘成 bg-audit-plate-<tag>.png。
+async function pixelAudit(page, outDir, tag) {
+  const items = await page.evaluate(() => {
+    const out = [];
+    // 文字元素按「字形真正覆盖的矩形」取样（Range.getClientRects），而不是元素框：
+    // 元素框里可能嵌着与文字无关的图形 —— 对端列的国旗是 flags.png 雪碧图
+    // （.peer-flag 的 background-image，见 main.js 的 peerFlag），图表图例的小圆点
+    // 是空的 <i> 配纯色底（.legend .is-down i）。按整框取「最坏像素」就会把旗帜的
+    // 深蓝 #192f5d、中国红 #ee1c25、圆点的棕红当成文字底色，量出一堆并不存在的
+    // Lc 1 / Lc 14 —— 2026-09-15 运行页审计的假阳性正是这么来的。
+    const textRects = (node) => {
+      const rg = document.createRange();
+      rg.selectNodeContents(node);
+      return Array.from(rg.getClientRects())
+        .filter((b) => b.width > 0.5 && b.height > 0.5)
+        .map((b) => [Math.round(b.left), Math.round(b.top), Math.round(b.right), Math.round(b.bottom)]);
+    };
+    for (const el of document.querySelectorAll('body *')) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 3 || r.height < 3) continue;
+      const st = getComputedStyle(el);
+      if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity) < 0.2) continue;
+      const tag = el.tagName.toLowerCase();
+      const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3)
+        .map((n) => n.textContent.trim()).join(' ').trim();
+      // 只看「直接含文字的元素」与「最外层 svg 图标」：容器元素的颜色未必是它
+      // 里面那行字用的颜色，混进来只会稀释结论。
+      if (!own && tag !== 'svg') continue;
+      let boxes = [];
+      let pad = [0, 0, 0, 0];
+      if (own) {
+        for (const n of el.childNodes) {
+          if (n.nodeType === 3 && n.textContent.trim()) boxes.push(...textRects(n));
+        }
+      }
+      if (!boxes.length && tag === 'svg') {
+        // 图标没有文字节点：退回元素框，但要扣掉内边距与边框。像壁纸缩略图的名字
+        // （`padding: 10px 6px 4px`，上面 10px 是渐变还没压黑的过渡区）会被框里最亮
+        // 的那个像素判成「亮字压亮底」——量出来的 Lc 29 是采样方式造出来的。
+        boxes = [[Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)]];
+        pad = [
+          parseFloat(st.paddingTop) + parseFloat(st.borderTopWidth),
+          parseFloat(st.paddingRight) + parseFloat(st.borderRightWidth),
+          parseFloat(st.paddingBottom) + parseFloat(st.borderBottomWidth),
+          parseFloat(st.paddingLeft) + parseFloat(st.borderLeftWidth),
+        ].map((v) => (Number.isFinite(v) ? v : 0));
+      }
+      if (!boxes.length) continue;
+      out.push({
+        sel: tag + (typeof el.className === 'string' && el.className
+          ? '.' + el.className.trim().split(/\s+/).join('.') : ''),
+        text: own.slice(0, 18),
+        fg: st.color,
+        pad,
+        boxes,
+      });
+    }
+    return out;
+  });
+  const hideHandle = await page.addStyleTag({
+    content: 'body, body * { color: transparent !important; -webkit-text-fill-color: transparent !important;'
+      + ' text-shadow: none !important; } svg, svg * { fill: transparent !important; stroke: transparent !important; }',
+  });
+  await page.waitForTimeout(120);
+  const plate = (await page.screenshot({ type: 'png' })).toString('base64');
+  fs.writeFileSync(path.join(outDir, `bg-audit-plate-${tag}.png`), Buffer.from(plate, 'base64'));
+  const audit = await page.evaluate(async ({ b64, items }) => {
+    const T = window.NetPeekTheme;
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = 'data:image/png;base64,' + b64;
+    });
+    const cv = document.createElement('canvas');
+    cv.width = img.width; cv.height = img.height;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const W = cv.width; const H = cv.height;
+    const px = ctx.getImageData(0, 0, W, H).data;
+    const lin = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+    const lum = (i) => 0.2126 * lin(px[i]) + 0.7152 * lin(px[i + 1]) + 0.0722 * lin(px[i + 2]);
+    const hex = (i) => '#' + [px[i], px[i + 1], px[i + 2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+    const rgb2hex = (s) => {
+      const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(s || '');
+      return m ? '#' + [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, '0')).join('') : '';
+    };
+    const rows = [];
+    for (const it of items) {
+      const fg = rgb2hex(it.fg);
+      if (!/^#[0-9a-f]{6}$/.test(fg)) continue;
+      const pad = it.pad || [0, 0, 0, 0];
+      const lums = [];
+      const idxs = [];
+      // 元素可能有多段文字（多行 / 多个文本节点）：逐段取样后合并，再统一取中位
+      // 与最坏像素——与只量一个框时同口径。
+      for (const [bx0, by0, bx1, by1] of it.boxes) {
+        if (bx1 < 0 || by1 < 0 || bx0 > W || by0 > H) continue;
+        // 采样「内容框」（扣掉内边距与边框）：文字矩形本身不需要再扣（pad 全 0），
+        // svg 图标退回元素框时才用得上。
+        const x0 = Math.max(0, bx0 + pad[3] + 1); const y0 = Math.max(0, by0 + pad[0] + 1);
+        const x1 = Math.min(W, bx1 - pad[1] - 1); const y1 = Math.min(H, by1 - pad[2] - 1);
+        if (x1 - x0 < 2 || y1 - y0 < 2) continue;
+        const step = Math.max(1, Math.floor(Math.sqrt(((x1 - x0) * (y1 - y0)) / 900)));
+        for (let y = y0; y < y1; y += step) {
+          for (let x = x0; x < x1; x += step) {
+            const i = (y * W + x) * 4;
+            lums.push(lum(i));
+            idxs.push(i);
+          }
+        }
+      }
+      if (lums.length < 4) continue;
+      const fgLum = T.luminance(T.hexToRgb(fg));
+      // 中位像素：按亮度排序取正中那一个（既给「典型背景」也给下面的极性判断用）
+      const order = lums.map((_, i) => i).sort((a, b) => lums[a] - lums[b]);
+      const medIdx = order[Math.floor(order.length / 2)];
+      const medLum = lums[medIdx];
+      // 最坏像素：暗字踩到最暗的背景、亮字踩到最亮的背景
+      let worst = 0;
+      for (let i = 1; i < lums.length; i++) {
+        const better = fgLum < medLum ? lums[i] < lums[worst] : lums[i] > lums[worst];
+        if (better) worst = i;
+      }
+      rows.push({
+        sel: it.sel, text: it.text, fg,
+        bgWorst: hex(idxs[worst]),
+        lcWorst: T.apcaLc(fg, hex(idxs[worst])),
+        lcMed: T.apcaLc(fg, hex(idxs[medIdx])),
+        wcagWorst: Math.round(T.contrast(fg, hex(idxs[worst])) * 100) / 100,
+        medLum: Math.round(medLum * 1000) / 1000,
+      });
+    }
+    rows.sort((a, b) => Math.abs(a.lcWorst) - Math.abs(b.lcWorst));
+    return {
+      total: rows.length,
+      worst: rows.slice(0, 12),
+      below30: rows.filter((i) => Math.abs(i.lcWorst) < 30).length,
+      below45: rows.filter((i) => Math.abs(i.lcWorst) < 45).length,
+      minAbsLc: rows.length ? Math.abs(rows[0].lcWorst) : null,
+    };
+  }, { b64: plate, items });
+  await hideHandle.evaluate((el) => el.remove());
+  await page.waitForTimeout(120);
+  return audit;
+}
+
+// 逐框平均像素（透出率用）：截图喂回页面里解码，再按框取均值。截图 → base64 →
+// 页面内 <img> + canvas → getImageData，这条链路和 pixelAudit 同款。
+async function shotBoxMeans(page, b64, boxes) {
+  return page.evaluate(async ({ b64s, boxes }) => {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = 'data:image/png;base64,' + b64s;
+    });
+    const cv = document.createElement('canvas');
+    cv.width = img.width; cv.height = img.height;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    const W = cv.width; const H = cv.height;
+    return boxes.map(([x0, y0, x1, y1]) => {
+      const X0 = Math.max(0, x0); const Y0 = Math.max(0, y0);
+      const X1 = Math.min(W, x1); const Y1 = Math.min(H, y1);
+      let r = 0; let g = 0; let b = 0; let n = 0;
+      const lums = [];
+      for (let y = Y0; y < Y1; y += 2) {
+        for (let x = X0; x < X1; x += 2) {
+          const i = (y * W + x) * 4;
+          r += px[i]; g += px[i + 1]; b += px[i + 2]; n++;
+          lums.push(px[i] + px[i + 1] + px[i + 2]);
+        }
+      }
+      if (!n) return [0, 0, 0, 0];
+      const m = lums.reduce((a, v) => a + v, 0) / n;
+      const sd = Math.sqrt(lums.reduce((a, v) => a + (v - m) * (v - m), 0) / n);
+      return [r / n, g / n, b / n, sd];
+    });
+  }, { b64s: b64, boxes });
+}
+
+// 逐框「低频差分」标准差：同一批格子里，两张截图（有图 / 无图）的格均值逐格相减，
+// 再算这组差值的标准差。这是「底图的形有没有透出来」的干净判据 —— 面板自己的内容
+// 在两张图里逐像素相同，相减即抵消；留下的就是底图贡献的那层低频场。若面板把底图
+// 盖死，差值只剩一个常数（整体亮度平移），标准差 ≈ 0。
+// （不要用「单张图的格均值标准差」当判据：摘掉底图会让面板整体更亮，面板自己那点
+//  半透明内容线的对比跟着变，噪声比信号还大 —— 实测那样量出来的是负增益。）
+async function shotBoxCoarseDiff(page, b64a, b64b, boxes, cells = 6) {
+  return page.evaluate(async ({ a, b, boxes, cells }) => {
+    const load = (s) => new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = 'data:image/png;base64,' + s;
+    });
+    const [ia, ib] = await Promise.all([load(a), load(b)]);
+    const grab = (img) => {
+      const cv = document.createElement('canvas');
+      cv.width = img.width; cv.height = img.height;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      return { px: ctx.getImageData(0, 0, cv.width, cv.height).data, W: cv.width, H: cv.height };
+    };
+    const A = grab(ia);
+    const B = grab(ib);
+    return boxes.map(([x0, y0, x1, y1]) => {
+      const X0 = Math.max(0, x0); const Y0 = Math.max(0, y0);
+      const X1 = Math.min(A.W, B.W, x1); const Y1 = Math.min(A.H, B.H, y1);
+      const cw = (X1 - X0) / cells; const chh = (Y1 - Y0) / cells;
+      if (cw < 2 || chh < 2) return 0;
+      const diffs = [];
+      for (let cy = 0; cy < cells; cy++) {
+        for (let cx = 0; cx < cells; cx++) {
+          const ay = Math.round(Y0 + cy * chh); const by = Math.round(Y0 + (cy + 1) * chh);
+          const ax = Math.round(X0 + cx * cw); const bx = Math.round(X0 + (cx + 1) * cw);
+          let s = 0; let n = 0;
+          for (let y = ay; y < by; y++) {
+            for (let x = ax; x < bx; x++) {
+              const i = (y * A.W + x) * 4;
+              s += (A.px[i] + A.px[i + 1] + A.px[i + 2])
+                - (B.px[i] + B.px[i + 1] + B.px[i + 2]);
+              n++;
+            }
+          }
+          if (n) diffs.push(s / n / 3);
+        }
+      }
+      if (!diffs.length) return 0;
+      const m = diffs.reduce((p, v) => p + v, 0) / diffs.length;
+      return Math.sqrt(diffs.reduce((p, v) => p + (v - m) * (v - m), 0) / diffs.length);
+    });
+  }, { a: b64a, b: b64b, boxes, cells });
+}
 
 const browser = await chromium.launch({ executablePath: process.env.NP_CHROME || undefined });
 const report = [];
@@ -761,6 +1054,521 @@ for (const vp of VIEWPORTS) {
   report.push(`[bgstack] imgLoaded=${imgOk} hasBg=${hasBg} topbar=${topHit} snav=${navHit} `
     + `${imgOk && hasBg && !buried(topHit) && !buried(navHit) ? 'OK' : 'FAIL'}`);
   await shoot(page, path.join(outDir, 'bgstack-settings.png'));
+  await page.close();
+}
+
+// ---- 浅色背景图可见性回归（2026-09-15 用户报告：浅色皮肤下背景图几乎看不见）----
+// 根因：浅色皮肤（暗字压亮底）在守卫里没有补偿路径，backdropFloor 按 text2@4.5
+// 管「被底图稀释过的面板」，而白面板的亮度本就贴着暗字 4.5 所需的背景亮度上限
+// —— 地板恒顶到 1，面板永远不透明，图只在缝隙里露一点，还要挨强制 ≥0.2 的黑纱。
+// 第二轮（同日，用户反馈「整体可视性还是很差、有些图标和字看不清」）换了两处
+// 判据：APCA 取代 WCAG 比值（比值在中调上会骗人）、新增表面明度带（合成面不许
+// 滑进中调），弱字阶（单位字、说明字、图标）第一次进守卫。
+// 断言全部读 CSS 变量与计算样式（守卫管线的最终落点），不碰内部状态。
+{
+  const page = await browser.newPage({ viewport: { width: 1180, height: 720 }, deviceScaleFactor: 1 });
+  await page.addInitScript(GUARD_PROBE);
+  await page.addInitScript((cfg) => localStorage.setItem('netpeek-theme', cfg),
+    '{"skin":"image","backgroundImage":"wallpapers/wall-3.jpg","panelOpacity":0.88,"bgBlur":8,"scrim":0.30,"imageMode":"light","imageDraft":null,"uiOpacity":1}');
+  await page.goto('http://127.0.0.1:8932/preview.html', { waitUntil: 'load' });
+  await page.waitForTimeout(2600);
+  const probe = await page.evaluate(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const hex = (name) => cs.getPropertyValue(name).trim();
+    const lumOf = (h) => window.chroma(h).luminance();
+    const topbar = getComputedStyle(document.querySelector('.topbar')).backgroundColor;
+    const nums = topbar.match(/[\d.]+/g) || [];
+    // 守卫契约矩阵：全亮度带上的可读性 —— 在用户选的不透明度（必要时被 floor
+    // 抬升）与守卫补偿下，合成面必须落在明度带内，正文 / 次要 / 弱字阶三档
+    // 都必须达到各自的 APCA 目标（弱字阶 40 是这一轮补上的）。
+    const tokens = {
+      bg: hex('--bg'), panel: hex('--panel'), text: hex('--text'),
+      text2: hex('--text-2'), text3: hex('--text-3'),
+    };
+    return {
+      hasBg: document.body.classList.contains('has-bg'),
+      lightSkin: window.NetPeekTheme.isLightSkin(tokens),
+      text2Lum: lumOf(hex('--text-2')), panelLum: lumOf(hex('--panel')),
+      floorVar: cs.getPropertyValue('--panel-op-floor').trim(),
+      autoVar: cs.getPropertyValue('--backdrop-auto').trim(),
+      tintLum: lumOf(hex('--backdrop-tint')),
+      veil: cs.getPropertyValue('--backdrop-veil').trim(),
+      topbarAlpha: nums.length >= 4 ? nums[nums.length - 1] : '1',
+      scrimLabel: (document.querySelector('#scrimLabel b') || {}).textContent || '',
+      lens: cs.getPropertyValue('--lens-filter').trim(),
+      lowOp: window.__npGuard(tokens, 0.30, 0.40, [0.02, 0.35, 0.6, 0.95]),
+      sweep: window.__npGuard(tokens, 0.30, 0.45, [0.02, 0.1, 0.25, 0.45, 0.65, 0.85, 0.99]),
+    };
+  });
+  const sweepOk = guardRowsOk(probe.sweep);
+  const lightOk = probe.hasBg && probe.lightSkin
+    && probe.text2Lum < probe.panelLum          // 浅色皮肤真的派生出来了
+    && parseFloat(probe.floorVar) === 0         // 地板不钳滑杆（透镜接手后亮图同样自由）
+    && probe.autoVar === '0'                    // 浅色侧不再铺自动亮纱（会连缝隙一起洗）
+    && probe.veil === '255 255 255'             // 纱方向切到亮
+    && probe.tintLum > 0.8                      // tint 是亮纱
+    && parseFloat(probe.topbarAlpha) < 0.6      // 亮底图上漆层真的透出底图（0.45）
+    && /contrast\(/.test(probe.lens)            // 透镜写进 CSS
+    && guardRowsOk(probe.lowOp)                 // 0.40 的薄面板在亮图上同样达标
+    && probe.scrimLabel === '背景亮纱'
+    && sweepOk;
+  report.push(`[bg-light] ${JSON.stringify({
+    ...probe,
+    lowOp: probe.lowOp.map((r) => [r.L, r.op, r.lum, r.bandOk, r.tiersOk]),
+    sweep: probe.sweep.map((r) => [r.L, r.autoDim, r.floor, r.lum, r.bandOk, r.tiersOk]),
+  })} ` + `${lightOk ? 'OK' : `FAIL(sweepOk=${sweepOk})`}`);
+  await page.click('.ri[data-screen="live"]');
+  await page.waitForTimeout(800);
+  await shoot(page, path.join(outDir, 'bg-light-live.png'));
+  await page.click('.ri[data-screen="settings"]');
+  await page.waitForTimeout(500);
+  await page.click('.snav button[data-sec="appearance"]');
+  await page.waitForTimeout(500);
+  await shoot(page, path.join(outDir, 'bg-light-settings.png'));
+  await page.close();
+}
+
+// 中调图（暮山）+ 浅色：可见性最典型的用例 —— 山体要在半透面板下透出来，
+// 同时暗字仍可读。断言同款（地板不钳 + 漆层半透 + 亮纱方向），截图给人眼。
+{
+  const page = await browser.newPage({ viewport: { width: 1180, height: 720 }, deviceScaleFactor: 1 });
+  await page.addInitScript(GUARD_PROBE);
+  await page.addInitScript((cfg) => localStorage.setItem('netpeek-theme', cfg),
+    '{"skin":"image","backgroundImage":"wallpapers/wall-2.jpg","panelOpacity":0.88,"bgBlur":6,"scrim":0.30,"imageMode":"light","imageDraft":null,"uiOpacity":1}');
+  await page.goto('http://127.0.0.1:8932/preview.html', { waitUntil: 'load' });
+  await page.waitForTimeout(2600);
+  const probe = await page.evaluate(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const hex = (name) => cs.getPropertyValue(name).trim();
+    const card = getComputedStyle(document.querySelector('.card')).backgroundColor;
+    const nums = card.match(/[\d.]+/g) || [];
+    const tokens = {
+      bg: hex('--bg'), panel: hex('--panel'), text: hex('--text'),
+      text2: hex('--text-2'), text3: hex('--text-3'),
+    };
+    return {
+      hasBg: document.body.classList.contains('has-bg'),
+      lightSkin: window.NetPeekTheme.isLightSkin(tokens),
+      floorVar: cs.getPropertyValue('--panel-op-floor').trim(),
+      veil: cs.getPropertyValue('--backdrop-veil').trim(),
+      cardAlpha: nums.length >= 4 ? nums[nums.length - 1] : '1',
+      scrimLabel: (document.querySelector('#scrimLabel b') || {}).textContent || '',
+      lens: cs.getPropertyValue('--lens-filter').trim(),
+      lowOp: window.__npGuard(tokens, 0.30, 0.40, [0.02, 0.35, 0.6, 0.95]),
+      sweep: window.__npGuard(tokens, 0.30, 0.45, [0.02, 0.1, 0.25, 0.45, 0.65, 0.85, 0.99]),
+    };
+  });
+  const midOk = probe.hasBg && probe.lightSkin
+    && parseFloat(probe.floorVar) === 0         // 中调图：地板完全不介入，图按滑杆透
+    && probe.veil === '255 255 255'
+    && parseFloat(probe.cardAlpha) < 0.6        // 漆层 0.45：山体在半透面板下透出来
+    && /contrast\(/.test(probe.lens)
+    && guardRowsOk(probe.lowOp)                 // 0.40 的薄面板在山体上同样达标
+    && probe.scrimLabel === '背景亮纱'
+    && guardRowsOk(probe.sweep);
+  report.push(`[bg-light-mid] ${JSON.stringify({
+    ...probe,
+    lowOp: probe.lowOp.map((r) => [r.L, r.op, r.lum, r.bandOk, r.tiersOk]),
+    sweep: probe.sweep.map((r) => [r.L, r.floor, r.lum, r.bandOk, r.tiersOk]),
+  })} ` + `${midOk ? 'OK' : 'FAIL'}`);
+  await page.click('.ri[data-screen="live"]');
+  await page.waitForTimeout(800);
+  await shoot(page, path.join(outDir, 'bg-light-mid-live.png'));
+  await page.close();
+}
+
+// ---- 合成「暗红戏剧性壁纸」：用户实测场景（暗黑系游戏壁纸）的代餐 ----
+// 主色近黑暖调（对应实测 palette 里占 52% 的 #140906）、左下一簇高饱和火焰亮区。
+// 用来复现「暗图钉浅色 → 整窗发白发粉」的原始问题，并守护新渲染（轻纱 + 磨砂
+// + 方向阴影）不再退化。PNG 用 node zlib 手写编码（IHDR/IDAT/IEND + CRC32）。
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  let c = 0xffffffff;
+  for (const b of body) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  crc.writeUInt32BE((c ^ 0xffffffff) >>> 0);
+  return Buffer.concat([len, body, crc]);
+}
+function encodePNG(w, h, rgba) {
+  const raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 4 + 1)] = 0; // filter: none
+    rgba.copy(raw, y * (w * 4 + 1) + 1, y * w * 4, (y + 1) * w * 4);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 6;  // RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+const CUSTOM_RED_PNG = (() => {
+  const W = 720;
+  const H = 450;
+  const px = Buffer.alloc(W * H * 4);
+  const gx = W * 0.3;
+  const gy = H * 0.78;
+  const gr = W * 0.62;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = Math.hypot(x - gx, y - gy) / gr;
+      const glow = Math.max(0, 1 - d);
+      const g2 = glow * glow;
+      const n = ((x * 73856093) ^ (y * 19349663)) % 9; // 伪随机轻噪点，给 ColorThief 桶多样性
+      const vy = y / H;
+      const i = (y * W + x) * 4;
+      px[i] = Math.min(255, 24 + vy * 14 + 214 * g2 + 40 * glow + n);
+      px[i + 1] = Math.min(255, 6 + vy * 4 + 84 * g2 + 16 * glow + (n >> 1));
+      px[i + 2] = Math.min(255, 4 + 26 * g2);
+      px[i + 3] = 255;
+    }
+  }
+  return 'data:image/png;base64,' + encodePNG(W, H, px).toString('base64');
+})();
+
+// 用户实测场景（2026-09-15）：暗红戏剧性壁纸 + 深浅偏好钉「浅色」+ 面板 0.70 +
+// 无全局模糊。第一轮修复解决的是「整窗发白发粉」（亮纱浓度收敛 + 纱色中性 +
+// 磨砂 + 方向阴影）；第二轮（同日用户回访「整体可视性还是很差」）补的是
+// 「近黑壁纸 + 浅色面板 = 合成面滑进中调」——守卫现在按表面明度带把面板
+// 不透明度抬到「合成面仍是一块浅色表面」的高度，字阶（含弱字阶）按 APCA 守。
+// 断言：浅色派生保留、纱轻且中性、真磨砂、方向阴影、地板被抬进 0.8+（明度带
+// 判据生效）、全亮度带上明度带与三档字阶都成立。
+{
+  const page = await browser.newPage({ viewport: { width: 1180, height: 720 }, deviceScaleFactor: 1 });
+  await page.addInitScript(GUARD_PROBE);
+  const customCfg = JSON.stringify({
+    skin: 'image', backgroundImage: CUSTOM_RED_PNG, panelOpacity: 0.7, bgBlur: 0,
+    scrim: 0.2, imageMode: 'light', imageDraft: null, uiOpacity: 1,
+    bgBrightness: 1, backdropStyle: 'underlay',
+  });
+  await page.addInitScript((cfg) => localStorage.setItem('netpeek-theme', cfg), customCfg);
+  await page.goto('http://127.0.0.1:8932/preview.html', { waitUntil: 'load' });
+  await page.waitForTimeout(2600);
+  const probe = await page.evaluate(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const hex = (name) => cs.getPropertyValue(name).trim();
+    const card = getComputedStyle(document.querySelector('.card'));
+    const nums = card.backgroundColor.match(/[\d.]+/g) || [];
+    const T = window.NetPeekTheme;
+    const tokens = {
+      bg: hex('--bg'), panel: hex('--panel'), text: hex('--text'),
+      text2: hex('--text-2'), text3: hex('--text-3'),
+    };
+    const tintRgb = T.hexToRgb(hex('--backdrop-tint'));
+    const effScrim = T.effectiveScrim(0.2, true);
+    return {
+      hasBg: document.body.classList.contains('has-bg'),
+      lightClass: document.body.classList.contains('light-skin'),
+      lightSkin: T.isLightSkin(tokens),
+      panelLum: T.luminance(T.hexToRgb(tokens.panel)),
+      dim: parseFloat(cs.getPropertyValue('--backdrop-dim').trim()),
+      auto: parseFloat(cs.getPropertyValue('--backdrop-auto').trim()),
+      floorVar: parseFloat(cs.getPropertyValue('--panel-op-floor').trim()) || 0,
+      tintSpread: Math.max(tintRgb.r, tintRgb.g, tintRgb.b) - Math.min(tintRgb.r, tintRgb.g, tintRgb.b),
+      tintLum: T.luminance(tintRgb),
+      veil: cs.getPropertyValue('--backdrop-veil').trim(),
+      frost: /blur/.test(card.backdropFilter || ''),
+      cardAlpha: nums.length >= 4 ? nums[nums.length - 1] : '1',
+      // 浅色亮玻璃的边与影：顶棱 72% 白 + 34px 环境影（2026-09-15 的那套「高级感」）
+      glassEdge: /0\.72/.test(card.boxShadow || '') && /34px/.test(card.boxShadow || ''),
+      lens: cs.getPropertyValue('--lens-filter').trim(),
+      scrimLabel: (document.querySelector('#scrimLabel b') || {}).textContent || '',
+      // 0.40 的「薄面板」必须原地达标 —— 用户这次的核心诉求就是「滑杆拉到底也能读」
+      lowOp: window.__npGuard(tokens, effScrim, 0.40, [0.02, 0.25, 0.85]),
+      // 迁移后用户的 0.45 一档，在全亮度带上都要达标
+      sweep: window.__npGuard(tokens, effScrim, 0.45, [0.02, 0.1, 0.25, 0.45, 0.65, 0.85, 0.99]),
+    };
+  });
+  const sweepOk = guardRowsOk(probe.sweep);
+  const customOk = probe.hasBg && probe.lightClass && probe.lightSkin
+    && probe.panelLum > 0.6
+    && probe.dim <= 0.15
+    && probe.tintSpread <= 24
+    && probe.tintLum > 0.8
+    && probe.veil === '255 255 255'
+    && probe.frost
+    && probe.glassEdge
+    && /contrast\(/.test(probe.lens)        // 面板级透镜真的写进 CSS 了
+    && parseFloat(probe.floorVar) === 0     // 地板不再钳滑杆（旧版这里被抬到 0.93）
+    && parseFloat(probe.cardAlpha) < 0.6    // 漆层真的薄了：近黑壁纸下也只有 0.45
+    && probe.scrimLabel === '背景亮纱'
+    && guardRowsOk(probe.lowOp)             // 0.40 的薄面板原地达标
+    && sweepOk;
+  report.push(`[bg-custom-light] ${JSON.stringify({
+    ...probe,
+    lowOp: probe.lowOp.map((r) => [r.L, r.op, r.lum, r.bandOk, r.tiersOk]),
+    sweep: probe.sweep.map((r) => [r.L, r.floor, r.lum, r.bandOk, r.tiersOk, r.lcs.map((x) => x[1])]),
+  })} ` + `${customOk ? 'OK' : `FAIL(sweepOk=${sweepOk})`}`);
+  await page.click('.ri[data-screen="live"]');
+  await page.waitForTimeout(800);
+  await shoot(page, path.join(outDir, 'bg-custom-light-live.png'));
+  await page.click('.ri[data-screen="settings"]');
+  await page.waitForTimeout(500);
+  await page.click('.snav button[data-sec="appearance"]');
+  await page.waitForTimeout(500);
+  await shoot(page, path.join(outDir, 'bg-custom-light-settings.png'));
+  await page.close();
+}
+
+// ---- 用户实测场景的像素级可读性审计（2026-09-15） ----
+//
+// 前面那些块验的是「模型自己算出来的数」：模型只检查它列出来的那几档，档位之外的
+// 元素（单位字、说明字、导轨图标、徽标）它根本不看 —— 而用户报的恰恰是「有些图标
+// 和字体看不清」。这一块换成像素级的口径：把字形全部抹成透明截一张「背景板」，
+// 再把页面上每一个带文字或图标的元素抓出来，用它自己的颜色与它脚下那块背景板
+// 像素逐个算 APCA Lc（取最坏像素），谁不达标一眼可见，且与模型无关。
+//
+// 种子用用户真实的 theme-config.json（含那份旧版粉米色草稿），壁纸用真实文件
+// ——顺带验证「派生规则版本迁移」把老草稿按当前规则重算了一遍。
+// 壁纸走 data URL 而不是相对路径：预览假桥的 read_background_image 返回空串
+// （它没有真实后端），非内置壁纸的绝对路径会被解析成「没有背景图」，整块审计
+// 就退化成在量一块没有底图的界面（第一次跑就是这么假绿的）。
+const userStore = path.join(os.homedir(), 'AppData', 'Roaming', 'com.netpeek.app');
+const userWall = path.join(userStore, 'backgrounds', '0dd6251aab60ce90.jpg');
+if (fs.existsSync(userWall)) {
+  const userWallData = 'data:image/jpeg;base64,' + fs.readFileSync(userWall).toString('base64');
+  const page = await browser.newPage({ viewport: { width: 1180, height: 720 }, deviceScaleFactor: 1 });
+  const userCfg = JSON.stringify({
+    skin: 'image',
+    backgroundImage: userWallData,
+    panelOpacity: 0.7, bgBlur: 0, scrim: 0.2,
+    imageMode: 'light', followSystem: false, uiOpacity: 1,
+    bgBrightness: 1, backdropStyle: 'underlay', wrapOpacity: 0.4,
+    // 旧草稿：旧明度带 + 旧字阶混比 + 没有 rev 标记 → 启动迁移必须重算
+    imageDraft: {
+      tokens: {
+        bg: '#e4d3ce', panel: '#e7ddda', panelHi: '#c9c0bd', panel2: '#d5c5c0',
+        line: '#c1b8b5', lineSoft: '#d3c9c6', text: '#201917', text2: '#5d5250',
+        text3: '#8b7f7b', down: '#8d5621', up: '#39668f', ok: '#286f4d',
+        warn: '#795f33', error: '#9a4b4b', accent: '#38160e', accentInk: '#f2f3f5',
+        selBar: '#48271e',
+      },
+      source: 'standard',
+    },
+  });
+  await page.addInitScript((cfg) => localStorage.setItem('netpeek-theme', cfg), userCfg);
+  await page.goto('http://127.0.0.1:8932/preview.html', { waitUntil: 'load' });
+  await page.waitForTimeout(2600);
+  await page.click('.ri[data-screen="settings"]');
+  await page.waitForTimeout(500);
+  await page.click('.snav button[data-sec="appearance"]');
+  await page.waitForTimeout(600);
+
+  // ① 模型侧：迁移后的令牌、守卫给出的地板、合成面落在哪
+  const model = await page.evaluate(() => {
+    const T = window.NetPeekTheme;
+    const cs = getComputedStyle(document.documentElement);
+    const hex = (n) => cs.getPropertyValue(n).trim();
+    const tokens = {
+      bg: hex('--bg'), panel: hex('--panel'), panel2: hex('--panel-2'),
+      text: hex('--text'), text2: hex('--text-2'), text3: hex('--text-3'),
+    };
+    // 种子里写的是 0.7（旧版「地板」逼出来的档），启动迁移（opRev 一次性归位）
+    // 会把它落到 0.45 —— 这里读 CSS 上的真实值，不写死，否则模型和渲染会漂。
+    const panelOp = parseFloat(hex('--panel-op')) || 0;
+    const floorV = parseFloat(hex('--panel-op-floor')) || 0;
+    const effOp = Math.max(panelOp, floorV);
+    const dim = parseFloat(hex('--backdrop-dim')) || 0;
+    const auto = parseFloat(hex('--backdrop-auto')) || 0;
+    const band = T.bandOf(tokens);
+    // 两档面板底色各自的合成面：用守卫同款模型，底图亮度取用户那张图实测的
+    // 最坏成片暗区（p10 = 0.0014，浅色侧口径）。panel-2 是顶栏 / rail 那档。
+    const L = 0.0014;
+    const of = (surf) => {
+      const eff = T.effectivePanel({ ...tokens, panel: surf },
+        L, Math.min(1, dim + auto), effOp);
+      const lum = T.luminance(T.hexToRgb(eff));
+      return {
+        surf, eff, lum: Math.round(lum * 1000) / 1000,
+        bandOk: lum >= band[0] - 1e-9 && lum <= band[1] + 1e-9,
+        lc: [tokens.text, tokens.text2, tokens.text3].map((f) => T.apcaLc(f, eff)),
+      };
+    };
+    const p1 = of(tokens.panel);
+    const p2 = of(tokens.panel2);
+    // 0.40 的「薄面板」：透镜上线后这一档也必须原地达标，否则「滑杆拉到底还能读」
+    // 就只是一句话（用户这次的核心诉求）。
+    const ofOp = (surf, op) => {
+      const eff = T.effectivePanel({ ...tokens, panel: surf }, L, Math.min(1, dim + auto), op);
+      const lum = T.luminance(T.hexToRgb(eff));
+      return {
+        surf, eff, lum: Math.round(lum * 1000) / 1000,
+        bandOk: lum >= band[0] - 1e-9 && lum <= band[1] + 1e-9,
+        lcs: [tokens.text, tokens.text2, tokens.text3].map((f) => Math.abs(T.apcaLc(f, eff))),
+      };
+    };
+    const low = [ofOp(tokens.panel, 0.4), ofOp(tokens.panel2, 0.4)];
+    // 判定口径用**玻璃字阶**（glassTierTargets）：浅色 60/48/32、深色正文 60 + 次要字
+    // 按物理上限自校准。此前这里写死 APCA_TIERS 的 75/60/40 —— 那套严格档位在「归一化
+    // 玻璃」上本来无解（正文 75 要求合成面亮度 ≥0.63 ⟹ 带只剩 0.21 宽 ⟹ 底图被压成
+    // 粉白雾，正是用户连着两次报的那个缺陷）。口径必须与渲染同源。
+    const TIER_KEYS = ['text', 'text2', 'text3'];
+    const tierMin = (k) => {
+      const hit = T.glassTierTargets(tokens).find(([kk]) => kk === k);
+      return hit ? hit[1] : 0;
+    };
+    const meetsTiers = (lcs) => lcs.every((v, i) => Math.abs(v) >= tierMin(TIER_KEYS[i]) - 1e-9);
+    return {
+      lightSkin: T.isLightSkin(tokens),
+      skinTokens: tokens,
+      migrated: tokens.panel !== '#e7ddda' && tokens.bg !== '#e4d3ce',
+      // 一次性的不透明度归位真的发生了吗（种子 0.7 → 0.45）
+      opMigrated: Math.abs(panelOp - 0.45) < 1e-9,
+      lens: hex('--lens-filter'),
+      panelOp, floor: floorV, effOp, dim, auto,
+      band,
+      panel: p1, panel2: p2,
+      lowOp: low.map((r) => [r.surf, r.eff, r.lum, r.bandOk, r.lcs.map((v) => Math.round(v))]),
+      lowOpOk: low.every((r) => r.bandOk && meetsTiers(r.lcs)),
+      tiersOk: [p1, p2].every((r) => r.bandOk && meetsTiers(r.lc)),
+    };
+  });
+
+  // ③ 地面真值（像素审计）的门槛：minAbsLc ≥ 32 + 无任何元素跌破 APCA 的装饰线 30。
+  //    32 = 玻璃契约里最弱那一档（text3）的目标；30 = APCA 对「装饰性部件」的下限，
+  //    它是这次改动的**硬地板**（旧窄带时代实测量到 60.3，因为底图几乎没透出来）。
+  //    门槛从 40 放到 32 是与 GLASS_TIERS 对齐的结果，不是放水：40 是 APCA_TIERS 里
+  //    text3 的目标，而玻璃契约已明确把最弱档定在 32 —— 语义色数据值（--up #39668f、
+  //    --down #8d5621）不在玻璃契约覆盖范围内，它们现在落在 32.5–34.6（旧值 53.5–53.6），
+  //    `below45` 这个计数会在每次回归里持续把它们暴露出来，不藏。
+  const audit = await pixelAudit(page, outDir, 'settings');
+  const auditOk = model.lightSkin && model.migrated && model.tiersOk
+    && model.opMigrated                        // 旧版地板逼出的 0.7 已归位到 0.45
+    && /contrast\(/.test(model.lens || '')     // 透镜真的写进 CSS，不是只在模型里
+    && model.lowOpOk                           // 0.40 的薄面板原地达标（滑杆真的自由了）
+    && parseFloat(model.floor) <= 0.5          // 地板退到「只垫底」（旧版这里是 0.93）
+    && audit.minAbsLc >= 32 && audit.below30 === 0;
+  report.push(`[bg-user-audit] model=${JSON.stringify(model)}`);
+  const reportAudit = (tag, a) => {
+    report.push(`[bg-user-audit:${tag}] elements=${a.total} minAbsLc=${a.minAbsLc} below30=${a.below30} below45=${a.below45}`);
+    for (const it of a.worst) {
+      report.push(`[bg-user-audit:${tag}]   Lc ${String(Math.abs(it.lcWorst)).padStart(5)} WCAG ${String(it.wcagWorst).padStart(5)} `
+        + `fg ${it.fg} bg ${it.bgWorst} ${it.sel} 「${it.text}」`);
+    }
+  };
+  reportAudit('settings', audit);
+  await shoot(page, path.join(outDir, 'bg-user-audit-settings.png'));
+  await page.click('.ri[data-screen="live"]');
+  await page.waitForTimeout(900);
+  const auditLive = await pixelAudit(page, outDir, 'live');
+  reportAudit('live', auditLive);
+  // 运行页含实时数据，判据与设置页一致（同一组数，别各写一套）：
+  // 不许有元素跌破 APCA 的装饰线 30，最差也要 ≥ 玻璃契约里最弱那一档（text3 = 32）。
+  const auditLiveOk = auditLive.below30 === 0 && auditLive.minAbsLc >= 32;
+  report.push(`[bg-user-audit] settingsOk=${auditOk} liveOk=${auditLiveOk} `
+    + `${auditOk && auditLiveOk ? 'OK' : 'FAIL'}`);
+  await shoot(page, path.join(outDir, 'bg-user-audit-live.png'));
+
+  // ③ 透出率：底图到底有没有从面板里透出来。同一屏拍两次 —— 第二次只把底图那一层
+  //    的 url 摘掉（其余一切不动：滑杆、透镜、纱、类名全保持原样），逐面板量内部
+  //    像素的平均差。差 ≈ 0 就是「面板把底图盖死了」，正是用户那句「不透明度都拉到
+  //    0.93 了底图还是透不出来」的直接判据。这条不看模型，只看像素。
+  const glassBoxes = await page.evaluate(() => Array.from(
+    document.querySelectorAll('.card, .rc'), (el) => {
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.left + 10), Math.round(r.top + 10),
+        Math.round(r.right - 10), Math.round(r.bottom - 10)];
+    },
+  ).filter(([a, b, c, d]) => c - a > 60 && d - b > 60));
+  const shotA = (await page.screenshot({ type: 'png' })).toString('base64');
+  const meansA = await shotBoxMeans(page, shotA, glassBoxes);
+  await page.evaluate(() => document.documentElement.style.setProperty('--theme-bg-image', 'none'));
+  await page.waitForTimeout(420);
+  const shotB = (await page.screenshot({ type: 'png' })).toString('base64');
+  fs.writeFileSync(path.join(outDir, 'bg-user-nowall-live.png'), Buffer.from(shotB, 'base64'));
+  const meansB = await shotBoxMeans(page, shotB, glassBoxes);
+  const deltas = meansA.map((m, i) => Math.round((
+    Math.abs(m[0] - meansB[i][0]) + Math.abs(m[1] - meansB[i][1]) + Math.abs(m[2] - meansB[i][2])) / 3));
+  const minDelta = deltas.length ? Math.min(...deltas) : 0;
+  const meanDelta = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0;
+  // ④ 底图的「形」有没有透出来（不只是「整体亮度变了」）。自适应透镜（auto-levels）就是
+  //    为这一条加的：固定透镜下近黑壁纸只剩 3/255 的身后幅度，均值差（Δ）照样能过，但形
+  //    一点都看不见，这条判据会掉到 1 以下。判据细节见 shotBoxCoarseDiff 的注释。
+  const formSd = await shotBoxCoarseDiff(page, shotA, shotB, glassBoxes);
+  const formMean = formSd.length
+    ? Math.round(formSd.reduce((a, b) => a + b, 0) / formSd.length * 10) / 10 : 0;
+  const formVisible = formSd.filter((v) => v >= 1.5).length;
+  const formOk = formSd.length >= 4 && formMean >= 2.5
+    && formVisible >= Math.ceil(formSd.length * 0.6);
+  const glassOk = deltas.length >= 4 && minDelta >= 12;
+  report.push(`[bg-user-glass] panels=${deltas.length} Δ=${JSON.stringify(deltas)} minΔ=${minDelta} `
+    + `meanΔ=${meanDelta} ${glassOk ? 'OK' : 'FAIL'}`);
+  report.push(`[bg-user-glass:form] diffSd=${JSON.stringify(formSd.map((v) => Math.round(v * 10) / 10))} `
+    + `mean=${formMean} ≥1.5 的 ${formVisible}/${formSd.length} ${formOk ? 'OK' : 'FAIL'}`
+    + `（判据：均值 ≥2.5 且六成以上 ≥1.5）`);
+  await page.close();
+} else {
+  report.push(`[bg-user-audit] SKIP（找不到用户的壁纸 ${userWall}）`);
+}
+
+// ---- 深色背景图回归（同一轮修复不得动坏深色路径）----
+// 深空壁纸 auto → 深色皮肤：黑纱方向、暗 tint、地板不钳、滑杆文案维持「背景压暗」。
+// 这一轮换了度量（APCA）与新增明度带（暗侧上界 0.30），深色路径同样要过契约。
+{
+  const page = await browser.newPage({ viewport: { width: 1180, height: 720 }, deviceScaleFactor: 1 });
+  await page.addInitScript(GUARD_PROBE);
+  await page.addInitScript((cfg) => localStorage.setItem('netpeek-theme', cfg),
+    '{"skin":"image","backgroundImage":"wallpapers/wall-1.jpg","panelOpacity":0.88,"bgBlur":8,"scrim":0.30,"imageDraft":null,"uiOpacity":1}');
+  await page.goto('http://127.0.0.1:8932/preview.html', { waitUntil: 'load' });
+  await page.waitForTimeout(2600);
+  const probe = await page.evaluate(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const hex = (name) => cs.getPropertyValue(name).trim();
+    const lumOf = (h) => window.chroma(h).luminance();
+    const tokens = {
+      bg: hex('--bg'), panel: hex('--panel'), text: hex('--text'),
+      text2: hex('--text-2'), text3: hex('--text-3'),
+    };
+    const topbar = getComputedStyle(document.querySelector('.topbar')).backgroundColor;
+    const nums = topbar.match(/[\d.]+/g) || [];
+    return {
+      hasBg: document.body.classList.contains('has-bg'),
+      lightSkin: window.NetPeekTheme.isLightSkin(tokens),
+      text2Lum: lumOf(hex('--text-2')), panelLum: lumOf(hex('--panel')),
+      floorVar: cs.getPropertyValue('--panel-op-floor').trim(),
+      tintLum: lumOf(hex('--backdrop-tint')),
+      veil: cs.getPropertyValue('--backdrop-veil').trim(),
+      topbarAlpha: nums.length >= 4 ? nums[nums.length - 1] : '1',
+      scrimLabel: (document.querySelector('#scrimLabel b') || {}).textContent || '',
+      lens: cs.getPropertyValue('--lens-filter').trim(),
+      lowOp: window.__npGuard(tokens, 0.30, 0.40, [0.02, 0.35, 0.6, 0.95]),
+      sweep: window.__npGuard(tokens, 0.30, 0.45, [0.02, 0.1, 0.25, 0.45, 0.65, 0.85, 0.99]),
+    };
+  });
+  const darkOk = probe.hasBg && !probe.lightSkin
+    && probe.text2Lum > probe.panelLum
+    && parseFloat(probe.floorVar) === 0         // 地板不钳滑杆（暗侧同样交给透镜垫底）
+    && probe.tintLum < 0.15
+    && probe.veil === '0 0 0'
+    && parseFloat(probe.topbarAlpha) < 0.6      // 暗底图上漆层真的透出底图（0.45）
+    && /contrast\(/.test(probe.lens)            // 暗侧透镜：dim 到深色带
+    && guardRowsOk(probe.lowOp)
+    && probe.scrimLabel === '背景压暗'
+    && guardRowsOk(probe.sweep);
+  report.push(`[bg-dark] ${JSON.stringify({
+    ...probe,
+    lowOp: probe.lowOp.map((r) => [r.L, r.op, r.lum, r.bandOk, r.tiersOk]),
+    sweep: probe.sweep.map((r) => [r.L, r.autoDim, r.floor, r.lum, r.bandOk, r.tiersOk]),
+  })} ` + `${darkOk ? 'OK' : 'FAIL'}`);
+  await page.click('.ri[data-screen="live"]');
+  await page.waitForTimeout(800);
+  await shoot(page, path.join(outDir, 'bg-dark-live.png'));
   await page.close();
 }
 

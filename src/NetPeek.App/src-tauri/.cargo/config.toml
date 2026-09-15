@@ -1,0 +1,5 @@
+# 静态链接 VC 运行库：Tauri 主程序默认动态链接 vcruntime140.dll，
+# 干净机器（精简镜像/LTSC/新装系统）缺 VC++ Redistributable 时会直接起不来。
+# crt-static 把 CRT 编进 exe，安装器就多消除一个运行前置。详见 docs §44。
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]
