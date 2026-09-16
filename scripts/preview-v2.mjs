@@ -202,7 +202,7 @@ const VIEWPORTS = [
   { tag: 'w1280', width: 1280, height: 800 },
   { tag: 'w940', width: 940, height: 620 },
 ];const SCREENS = ['live', 'history', 'settings'];
-const SETTINGS_SECS = ['general', 'appearance', 'data', 'alerts', 'service', 'about'];
+const SETTINGS_SECS = ['general', 'appearance', 'background', 'data', 'alerts', 'service', 'about'];
 
 // ---- 守卫契约的共享探针（背景图相关各块共用） ----
 //
@@ -213,24 +213,38 @@ const SETTINGS_SECS = ['general', 'appearance', 'data', 'alerts', 'service', 'ab
 // 成了各块共同要问的问题，放在这里统一定义，避免每块各写一遍判据。
 // 契约 = 合成面落在明度带内 + 各字阶达到各自的 APCA 目标（含弱字阶）。
 //
-// 2026-09-15 返工：字阶口径从 `APCA_TIERS`（浅色 75/60/40、深色次要字 45）换成
-// `theme.glassTierTargets`（**玻璃字阶**：浅色 60/48/32、深色正文 60 + 次要字自校准）。
-// 理由是那套严格档位在「半透玻璃 + 归一化透镜」上本来就无解，而不是实现没做到：
+// 2026-09-15 二次返工（第三代口径）：带**只**承载两条与「表面本身」有关的判据 ——
+// 正文契约（`glassContract().bodyLc`）与中调护栏（midMax / midMin）。其余字阶与
+// 全部语义色改由 `glassHardenTokens` 对着「带的最不利端合成面」逐键加固，不花带宽。
+//
+// 为什么不再按「每个字阶都进带的反解」来判（第二代，已下线）：
 //   · 浅色正文 75 要求合成面亮度 ≥0.63 ⟹ 带只剩 0.21 宽 ⟹ 底图的形全被压flat，
 //     这正是用户连着两次抱怨的那块「粉白雾」（旧带 [0.85,1] 实测底图形只剩 6/255）；
 //   · 深色次要字 45 超过那枚中灰的物理上限（实测 ≈43，纯黑也只给 43.3）⟹
-//     契约恒假 ⟹ 带退化成一个点 ⟹ 透镜为 null ⟹ 地板把面板顶到 1（深色底图彻底消失）。
-// 判定口径必须与渲染同源，否则回归会逼着实现把刚争来的带宽还回去。
+//     契约恒假 ⟹ 带退化成一个点 ⟹ 透镜为 null ⟹ 地板把面板顶到 1（深色底图彻底消失）；
+//   · 为绕开上一条加的自校准折扣（GLASS_TIER_REL = 0.75）实测是**无条件打折**、
+//     且目标随皮肤自身对比一起塌陷、没有下限 —— 判据因此变成「永不失败」，
+//     把 0.75 改成 0.3 全部断言照样过。所以它连带被删掉了。
+// 于是这里的模型判据也跟着换：字阶不再拿「带端」去量，而是拿**加固后的令牌**去量，
+// 门槛用实现导出的 GLASS_HARDEN_LC / GLASS_HARDEN_WEAK_LC。口径必须与渲染同源，
+// 否则回归只会逼着实现把刚争来的带宽还回去。
 // **独立的地面真值仍然是像素审计那一节**（`[bg-user-audit:*]` 直接量截图像素），
 // 这一节的模型判据只是「不许在模型层面就说不通」。
 const GUARD_PROBE = () => {
   window.__npGuard = (tokens, scrim, panelOp, Ls) => {
     const T = window.NetPeekTheme;
+    // 上屏的字色 = 加固后的那份（theme-ui.applyCurrent 在置底 + 有底图时就是这么做的），
+    // 所以判据也要拿加固后的表来量 —— 拿原始表量等于在量一份不会上屏的颜色。
+    const hard = T.glassHardenTokens(tokens).tokens;
+    const tiers = [
+      ['text', T.LENS_BODY_LC],
+      ['text2', T.GLASS_HARDEN_LC],
+      ['text3', T.GLASS_HARDEN_WEAK_LC],
+    ];
     return Ls.map((L) => {
       const g = T.backdropGuard(tokens, L, scrim, panelOp);
       const op = Math.max(panelOp, g.floor);
       const band = T.bandOf(tokens);
-      const tiers = T.glassTierTargets(tokens);
       // 两档面板底色都要过判据（实现同款）：panel 管卡片，panel-2 管顶栏 / rail /
       // 表头 / 输入框 —— 顶栏正是像素审计里最糊的那块。
       const surfaces = [tokens.panel, tokens.panel2]
@@ -238,7 +252,7 @@ const GUARD_PROBE = () => {
       const rows = surfaces.map((surf) => {
         const eff = T.effectivePanel({ ...tokens, panel: surf }, L, Math.min(1, scrim + g.autoDim), op);
         const lum = T.luminance(T.hexToRgb(eff));
-        const lcs = tiers.map(([k, min]) => [k, Math.abs(T.apcaLc(tokens[k], eff)), min]);
+        const lcs = tiers.map(([k, min]) => [k, Math.abs(T.apcaLc(hard[k], eff)), min]);
         return {
           surf, eff, lum: Math.round(lum * 1000) / 1000, lcs,
           bandOk: lum >= band[0] - 1e-9 && lum <= band[1] + 1e-9,
@@ -537,10 +551,16 @@ for (const vp of VIEWPORTS) {
         await page.waitForTimeout(500);
         await shoot(page, path.join(outDir, `${vp.tag}-settings-${sec}.png`));
       }
+      // 皮肤卡在「皮肤」分区，而它专属的那一大块（壁纸 / 显示方式 / 四根滑杆 /
+      // 取色）拆到了「背景」分区 —— 选中皮肤之后要换一屏才拍得到那块。
       await page.click('.snav button[data-sec="appearance"]');
       await page.click('.skin-card[data-skin="image"]');
       await page.waitForTimeout(600);
       await shoot(page, path.join(outDir, `${vp.tag}-settings-appearance-image.png`));
+      await page.click('.snav button[data-sec="background"]');
+      await page.waitForTimeout(500);
+      await shoot(page, path.join(outDir, `${vp.tag}-settings-background-image.png`));
+      await page.click('.snav button[data-sec="appearance"]');
       await page.click('.skin-card[data-skin="plain"]');
       await page.waitForTimeout(400);
     } else {
@@ -925,7 +945,13 @@ for (const vp of VIEWPORTS) {
     });
     await page.waitForTimeout(450); // 广播节流 120ms + 落盘节流 300ms，都要等
     // 只淡漆不淡字：.frame 的 opacity 恒为 1，淡出体现在根变量与各表面漆层的
-    // alpha 上（顶栏 panel-2 漆层 × 0.7）。断言旧实现（frame 整层 opacity）会误判。
+    // alpha 上（顶栏 panel-2 漆层 × --paint-op）。
+    // 地板（--ui-paint-floor）是透明窗的读性守卫：无底图时 --paint-op =
+    // max(--ui-opacity, --ui-paint-floor)，地板按皮肤令牌算（theme.uiPaintFloor）、
+    // 不随滑杆动 —— plain 的令牌算出 0.78，所以顶栏 alpha 不会是滑杆值的 0.7，
+    // 而是被地板抬到 0.78。探针断言的口径：根变量与落盘值 = 滑杆值，顶栏漆层
+    // alpha = 当期的 --paint-op（= max(滑杆, 地板)，从这里读回而不是心算地板，
+    // 与渲染同源）。
     const probe = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement).getPropertyValue('--ui-opacity').trim();
       // Chromium 121+ 把 color-mix 的计算值序列化成 color(srgb r g b / a)，alpha=1
@@ -933,10 +959,22 @@ for (const vp of VIEWPORTS) {
       const bgc = getComputedStyle(document.querySelector('.topbar')).backgroundColor;
       const nums = bgc.match(/[\d.]+/g) || [];
       const alpha = nums.length >= 4 ? nums[nums.length - 1] : '1';
-      return { root, alpha };
+      const cs = getComputedStyle(document.documentElement);
+      const paintOp = cs.getPropertyValue('--paint-op').trim();
+      const match = paintOp.match(/max\(\s*([\d.]+),\s*([\d.]+)\s*\)/);
+      const expected = match ? String(Math.max(parseFloat(match[1]), parseFloat(match[2]))) : '1';
+      return {
+        root, alpha, expected,
+        paintOp,
+        uiFloor: cs.getPropertyValue('--ui-paint-floor').trim(),
+        hasBg: document.body.classList.contains('has-bg'),
+        anim: document.documentElement.classList.contains('theme-anim'),
+        skin: (document.querySelector('.skin-card.is-on') || {}).dataset ? document.querySelector('.skin-card.is-on').dataset.skin : '(none)',
+      };
     });
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('netpeek-theme') || '{}').uiOpacity);
-    report.push(`[${vp.tag}] ui-opacity: var=${probe.root} topbarAlpha=${probe.alpha} stored=${stored} ${probe.root === '0.7' && probe.alpha === '0.7' ? 'OK' : 'FAIL'}`);
+    const ok = probe.root === '0.7' && stored === 0.7 && probe.alpha === probe.expected && !probe.hasBg && probe.skin === 'plain';
+    report.push(`[${vp.tag}] ui-opacity: var=${probe.root} topbarAlpha=${probe.alpha} paintOp=${probe.paintOp} expected=${probe.expected} stored=${stored} hasBg=${probe.hasBg} skin=${probe.skin} ${ok ? 'OK' : 'FAIL'}`);
     await page.evaluate(() => {
       const el = document.getElementById('uiOpacity');
       el.value = '1';
@@ -1122,7 +1160,7 @@ for (const vp of VIEWPORTS) {
   await shoot(page, path.join(outDir, 'bg-light-live.png'));
   await page.click('.ri[data-screen="settings"]');
   await page.waitForTimeout(500);
-  await page.click('.snav button[data-sec="appearance"]');
+  await page.click('.snav button[data-sec="background"]');
   await page.waitForTimeout(500);
   await shoot(page, path.join(outDir, 'bg-light-settings.png'));
   await page.close();
@@ -1320,7 +1358,7 @@ const CUSTOM_RED_PNG = (() => {
   await shoot(page, path.join(outDir, 'bg-custom-light-live.png'));
   await page.click('.ri[data-screen="settings"]');
   await page.waitForTimeout(500);
-  await page.click('.snav button[data-sec="appearance"]');
+  await page.click('.snav button[data-sec="background"]');
   await page.waitForTimeout(500);
   await shoot(page, path.join(outDir, 'bg-custom-light-settings.png'));
   await page.close();
@@ -1367,7 +1405,9 @@ if (fs.existsSync(userWall)) {
   await page.waitForTimeout(2600);
   await page.click('.ri[data-screen="settings"]');
   await page.waitForTimeout(500);
-  await page.click('.snav button[data-sec="appearance"]');
+  // 像素審計选「背景」分区：图相关的控件（壁纸网格、四根滑杆、色板、AI 字段）全在这一屏，
+  // 而用户报的“有些图标和字体看不清”正是这类小件——拉拉杆那一屏才是最密的样本。
+  await page.click('.snav button[data-sec="background"]');
   await page.waitForTimeout(600);
 
   // ① 模型侧：迁移后的令牌、守卫给出的地板、合成面落在哪
@@ -1414,16 +1454,22 @@ if (fs.existsSync(userWall)) {
       };
     };
     const low = [ofOp(tokens.panel, 0.4), ofOp(tokens.panel2, 0.4)];
-    // 判定口径用**玻璃字阶**（glassTierTargets）：浅色 60/48/32、深色正文 60 + 次要字
-    // 按物理上限自校准。此前这里写死 APCA_TIERS 的 75/60/40 —— 那套严格档位在「归一化
-    // 玻璃」上本来无解（正文 75 要求合成面亮度 ≥0.63 ⟹ 带只剩 0.21 宽 ⟹ 底图被压成
-    // 粉白雾，正是用户连着两次报的那个缺陷）。口径必须与渲染同源。
+    // 判定口径与渲染同源，但第三代（2026-09-15）把三档拆到了两个机制上，所以这里
+    // 也不再是一张「字阶表」：
+    //   · text          由带的正文契约保证 ⟹ 门槛 LENS_BODY_LC；
+    //   · text2 / text3 由 glassHardenTokens 对着最不利合成面加固 ⟹ 门槛
+    //                   GLASS_HARDEN_LC / GLASS_HARDEN_WEAK_LC。
+    // 关键：这里读到的 tokens 来自**页面上真实的 CSS 变量**，而置底 + 有底图时
+    // theme-ui 写进去的就是加固后的表 —— 所以拿加固档位来量它是同源的，量的正是
+    // 用户眼前那一份颜色。若哪天接线漏了（写进去的是原始表），这三条会当场变红，
+    // 这也正是把它放在这里的价值：它是「加固到底有没有真的上屏」的唯一门禁。
     const TIER_KEYS = ['text', 'text2', 'text3'];
-    const tierMin = (k) => {
-      const hit = T.glassTierTargets(tokens).find(([kk]) => kk === k);
-      return hit ? hit[1] : 0;
+    const TIER_MIN = {
+      text: T.LENS_BODY_LC,
+      text2: T.GLASS_HARDEN_LC,
+      text3: T.GLASS_HARDEN_WEAK_LC,
     };
-    const meetsTiers = (lcs) => lcs.every((v, i) => Math.abs(v) >= tierMin(TIER_KEYS[i]) - 1e-9);
+    const meetsTiers = (lcs) => lcs.every((v, i) => Math.abs(v) >= TIER_MIN[TIER_KEYS[i]] - 1e-9);
     return {
       lightSkin: T.isLightSkin(tokens),
       skinTokens: tokens,
@@ -1440,20 +1486,27 @@ if (fs.existsSync(userWall)) {
     };
   });
 
-  // ③ 地面真值（像素审计）的门槛：minAbsLc ≥ 32 + 无任何元素跌破 APCA 的装饰线 30。
-  //    32 = 玻璃契约里最弱那一档（text3）的目标；30 = APCA 对「装饰性部件」的下限，
-  //    它是这次改动的**硬地板**（旧窄带时代实测量到 60.3，因为底图几乎没透出来）。
-  //    门槛从 40 放到 32 是与 GLASS_TIERS 对齐的结果，不是放水：40 是 APCA_TIERS 里
-  //    text3 的目标，而玻璃契约已明确把最弱档定在 32 —— 语义色数据值（--up #39668f、
-  //    --down #8d5621）不在玻璃契约覆盖范围内，它们现在落在 32.5–34.6（旧值 53.5–53.6），
-  //    `below45` 这个计数会在每次回归里持续把它们暴露出来，不藏。
+  // ③ 地面真值（像素审计）的门槛：minAbsLc ≥ 30 且无任何元素跌破 30。
+  //    30 有两个身份，正好重合，这是它被选中的原因：
+  //      · APCA 对「装饰性部件」的绝对下限（低于它就是渲染了但看不见）；
+  //      · 玻璃加固层里弱字阶那一档的目标（theme.GLASS_HARDEN_WEAK_LC）。
+  //    两者必须相等，否则这个门禁会否掉实现**刚刚兑现**的那条线：加固把 text3 推到
+  //    恰好达标（实测 plain 30.0 / userdark 30.5），门槛留在 32 的话审计会稳定报
+  //    FAIL，而被指控的正是修复本身。这条对应关系由 theme.test 的
+  //    「像素审计门槛与加固档位不漂」一节看住 —— 改 theme.js 那个常量而忘了改这里，
+  //    单测会直接点名这一行。
+  //    其余字色（text2 / 语义色）的目标是 45（GLASS_HARDEN_LC），比这条门槛高得多，
+  //    所以 `below45` 这个计数继续留着：它是「加固是否真的覆盖到了每个键」的哨兵，
+  //    数字不为 0 就说明有元素走在契约覆盖之外（例如新加的组件用了没进
+  //    GLASS_HARDEN_KEYS 的色），不藏。
+  const AUDIT_MIN_LC = 30; // == theme.GLASS_HARDEN_WEAK_LC（漂移由 theme.test 锁住）
   const audit = await pixelAudit(page, outDir, 'settings');
   const auditOk = model.lightSkin && model.migrated && model.tiersOk
     && model.opMigrated                        // 旧版地板逼出的 0.7 已归位到 0.45
     && /contrast\(/.test(model.lens || '')     // 透镜真的写进 CSS，不是只在模型里
     && model.lowOpOk                           // 0.40 的薄面板原地达标（滑杆真的自由了）
     && parseFloat(model.floor) <= 0.5          // 地板退到「只垫底」（旧版这里是 0.93）
-    && audit.minAbsLc >= 32 && audit.below30 === 0;
+    && audit.minAbsLc >= AUDIT_MIN_LC && audit.below30 === 0;
   report.push(`[bg-user-audit] model=${JSON.stringify(model)}`);
   const reportAudit = (tag, a) => {
     report.push(`[bg-user-audit:${tag}] elements=${a.total} minAbsLc=${a.minAbsLc} below30=${a.below30} below45=${a.below45}`);
@@ -1470,7 +1523,7 @@ if (fs.existsSync(userWall)) {
   reportAudit('live', auditLive);
   // 运行页含实时数据，判据与设置页一致（同一组数，别各写一套）：
   // 不许有元素跌破 APCA 的装饰线 30，最差也要 ≥ 玻璃契约里最弱那一档（text3 = 32）。
-  const auditLiveOk = auditLive.below30 === 0 && auditLive.minAbsLc >= 32;
+  const auditLiveOk = auditLive.below30 === 0 && auditLive.minAbsLc >= AUDIT_MIN_LC;
   report.push(`[bg-user-audit] settingsOk=${auditOk} liveOk=${auditLiveOk} `
     + `${auditOk && auditLiveOk ? 'OK' : 'FAIL'}`);
   await shoot(page, path.join(outDir, 'bg-user-audit-live.png'));
@@ -1608,4 +1661,29 @@ server.close();
 fs.writeFileSync(path.join(outDir, 'probe.txt'), report.join('\n\n'));
 console.log(report.join('\n\n'));
 console.log('\nshots:', outDir);
+
+// ---- 判决与退出码 ----
+//
+// 这个脚本一直以 process.exit(0) 结尾 —— 上面 20 多处 `? 'OK' : 'FAIL'` 全都只是
+// 打进报告里的一个字符串。于是它不是门禁，而是一份**需要人读**的报告：谁跑完不去
+// 逐行扫 FAIL，就等于没跑。像素审计（bg-user-audit）是本仓库唯一的地面真值，
+// 它判定失败却仍然退 0，这件事本身比任何一条具体断言都更值得修。
+//
+// 判决口径就是报告里已有的那些标记，不另立一套：任何一行出现 FAIL（含
+// `FAIL(sweepOk=false)` 这种带括号的形式）就整体失败。
+// 用 \b 前缀避免把将来可能出现的 "NOFAIL" 之类词误判。
+const verdicts = report.filter((l) => /\b(?:OK|FAIL)\b/.test(l));
+const failed = report.filter((l) => /\bFAIL/.test(l));
+// 一条判决都没有 == 报告格式漂了（有人改了 push 的写法），这时**不能**当成通过：
+// 「没有失败」和「没有检查」在退出码上必须区分开，否则门禁会静默失效。
+if (verdicts.length === 0) {
+  console.error('\n判决行为 0 —— 报告格式与判定口径已漂移，视为失败（不是「全过」）。');
+  process.exit(2);
+}
+if (failed.length) {
+  console.error(`\n${failed.length}/${verdicts.length} 项判定失败：`);
+  for (const l of failed) console.error('  · ' + l.split('\n')[0].slice(0, 200));
+  process.exit(1);
+}
+console.log(`\n${verdicts.length} 项判定全部通过。`);
 process.exit(0);

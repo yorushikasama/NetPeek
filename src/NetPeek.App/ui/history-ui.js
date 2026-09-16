@@ -12,7 +12,13 @@
 (function () {
   const $ = (id) => window.NetPeekCommon.byId(id, 'history-ui');
   const C = window.NetPeekCharts;
-  const TOP_N = 8;
+  // 排行条数上限。这里曾经是 8，且不是被空间逼出来的 —— .rank-list 本身
+  // overflow-y:auto，snapRankHeight 还专门把高度取整到整行好让它干净地滚动，
+  // 也就是说滚动能力早就建好了却用不上。那个 8 是旧布局（合计还在右栏里）
+  // 留下的常量：布局把合计挪进工具栏后，右栏空间多出来一大截，上限没跟着放。
+  // 用户的原话是「监控页面看到的不止这么点应用」—— 实时屏那边压根不设上限。
+  // 现在给一个只防炸的量级：真实进程数远到不了，列表自己滚。
+  const TOP_N = 200;
   const WEEK_AGG_THRESHOLD = 60; // 超过这个天数按周聚合：90 根 3px 宽的柱读不出也点不中
   // 自定义区间的长度上限。日期框里能敲出 1900 年，而 buildBuckets 会给区间里
   // 每一天都排一根柱 —— 没有上限的话，一次误输入就能让画布去画几万根柱。
@@ -35,8 +41,13 @@
     sumUp: $('histSumUp'),
     sumAll: $('histSumAll'),
     rankTitle: $('histRankTitle'),
+    rankCount: $('histRankCount'),
     rank: $('histRank'),
   };
+
+  // 「其余应用」那一行要用的区间总量（当前排行作用域内的全量合计）。
+  // renderSide 每次算排行时更新，renderRank 用它和已列出的部分做差。
+  let rankTotals = { down: 0, up: 0 };
 
   let days = 30;
   let customRange = null; // { start, end }；生效时 rows 由 history_range_days 查回，不再是「最近 N 天」
@@ -51,15 +62,27 @@
   let loading = false;    // loadRows 进行中，柱图降透明 + 排行空态显示读取中
   let firstDay = null;    // 历史库最早有数据的本地日期（YYYY-MM-DD），打开浮层时从 history_stats 取
 
-  // 图标从最近一帧快照借：历史库只存名字，不存图标。解析走主界面那份
-  // iconOf —— 图标已改按路径缓存（IconUpdates 增量），进程数据里不再带图标本体。
+  // 图标向主界面借：历史库只存名字，不存图标。
+  //
+  // 先查 main.js 的会话级「名称 -> 图标」记忆，查不到再退回扫最近一帧快照。
+  // 只扫当前帧是不够的：历史屏列的是过去 7/30/90 天用过网的应用，其中相当一部分
+  // 此刻已经退出了，而排行恰恰按流量降序 —— 昨天下载最多的那个装机程序排在第一行
+  // 却只有一个首字母徽标。记忆表在 onSnapshot 里只增不减，本次会话见过一次就够。
   function iconFor(name) {
-    const snap = window.NetPeekLive && window.NetPeekLive.lastSnapshot();
+    const live = window.NetPeekLive;
+    if (!live) return '';
+    if (live.iconForName) {
+      const remembered = live.iconForName(name);
+      if (remembered) return remembered;
+    }
+    // 兜底扫当前帧：记忆表是本次会话攒的，刚启动时几乎是空的，
+    // 而这一帧里的进程可能已经带上了图标（IconUpdates 先到、记忆后填）。
+    const snap = live.lastSnapshot && live.lastSnapshot();
     if (!snap) return '';
     const key = String(name).toLowerCase();
     for (const p of snap.Processes || []) {
       if ((p.Name || '').toLowerCase() === key) {
-        const icon = window.NetPeekLive.iconOf(p);
+        const icon = live.iconOf(p);
         if (icon) return icon;
       }
     }
@@ -138,6 +161,13 @@
   }
 
   // 按天或按周分组。按周时组标签用周起始日。
+  //
+  // 周分组对齐自然周（周一起）。老实现从区间起点每 7 天切一刀，于是悬浮卡写着
+  // 「9 月 3 日 当周」而实际是「从 9 月 3 日起数 7 天」—— 用户读到「当周」
+  // 会理解成日历周。第一组和最后一组因此可能不足 7 天，days 数组照实给，
+  // tipTitle 与侧栏标题都按 days.length 说话，不会把半周说成整周。
+  // 后端 history_range 的周桶本来就接受前端传入 anchor 来对齐本地周一，
+  // 说明「对齐自然周」这个口径在项目里已经定了，这一屏只是没跟上。
   function buildBuckets() {
     const keys = customRange ? dayKeysBetween(customRange.start, customRange.end) : dayKeys(days);
     const perDay = new Map();
@@ -155,23 +185,52 @@
         down: perDay.get(k).down, up: perDay.get(k).up,
       }));
     }
-    const out = [];
-    for (let i = 0; i < keys.length; i += 7) {
-      const chunk = keys.slice(i, i + 7);
-      let down = 0;
-      let up = 0;
-      for (const k of chunk) { down += perDay.get(k).down; up += perDay.get(k).up; }
-      out.push({ key: chunk[0], label: labelOf(chunk[0]), days: chunk, down, up });
+    // 按「所属自然周的周一」归组：同一周的日期落进同一个桶，与切片位置无关。
+    const groups = new Map();
+    for (const k of keys) {
+      const monday = mondayOf(k);
+      let g = groups.get(monday);
+      if (!g) { g = { key: monday, days: [], down: 0, up: 0 }; groups.set(monday, g); }
+      g.days.push(k);
+      g.down += perDay.get(k).down;
+      g.up += perDay.get(k).up;
     }
-    return out;
+    // 标签用**组内第一天**而不是周一：区间起点通常落在某周中间，那一组的周一
+    // 在区间之外，拿它当标签会显示一个用户没选的日期（近 90 天档几乎必然如此）。
+    // key 仍是周一 —— 它是分组身份，tickLabels 按它判月份归属。
+    // Map 按插入序，而 keys 本身升序，所以组也是升序 —— 不必再排一次。
+    return Array.from(groups.values(), (g) => ({ ...g, label: labelOf(g.days[0]) }));
   }
 
-  // x 轴只标两端和每个月初那一根（§2.6）
+  // 某个本地日期所属自然周的周一（YYYY-MM-DD）。getDay() 里周日是 0，
+  // 换成「距周一几天」要把 0 当 7 处理，否则周日会被归到下一周。
+  function mondayOf(dayStr) {
+    const d = new Date(`${dayStr}T00:00:00`);
+    const shift = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - shift);
+    return dayKey(d);
+  }
+
+  // x 轴只标两端和「每个月的第一根柱」（§2.6）。
+  //
+  // 不能只认 key 的日号是否为 01：周聚合后组键是周一，极少正好落在月初，
+  // 于是 90 天档（必定走周聚合，见 WEEK_AGG_THRESHOLD）通常只剩首末两个标签，
+  // 中间一片没有时间基准 —— 恰好是最需要刻度的那一档。
+  // 改成按月份变化取第一根：日聚合下与老行为等价（1 号那天就是当月第一根），
+  // 周聚合下每个月给一根，标签仍然稀疏但读得出走到哪个月了。
   function tickLabels() {
     const ticks = [];
+    let lastMonth = '';
     for (let i = 0; i < buckets.length; i++) {
-      const d = buckets[i].key.split('-')[2];
-      if (d === '01') ticks.push({ index: i, text: labelOf(buckets[i].key) });
+      // 按组内第一天判月份、也用它做文案：周聚合时 key 是周一，可能落在上个月，
+      // 拿它标注会给出一个区间里根本没有的日期。
+      const first = buckets[i].days[0];
+      const ym = first.slice(0, 7);
+      if (ym !== lastMonth) {
+        lastMonth = ym;
+        // 第一根柱已经由 xLabels 标了，重复标一次只会和它叠字
+        if (i > 0) ticks.push({ index: i, text: labelOf(first) });
+      }
     }
     return ticks;
   }
@@ -188,9 +247,11 @@
       xLabels: [buckets[0].label, buckets[buckets.length - 1].label],
       tickLabels: tickLabels(),
       selectedIndex: selected,
-      // 悬停小卡：两个系列的名称；周聚合时标题标「当周」，周合计不被读成单日
+      // 悬停小卡：两个系列的名称。周聚合的标题必须说清是一组天数而不是某一天，
+      // 否则一周的合计会被读成单日用量（差 7 倍）。组已对齐自然周，但首尾两组
+      // 可能不足 7 天，所以标题按 days 的实际长度说话，不写死「当周」。
       seriesNames: ['下载', '上传'],
-      tipTitle: (b) => (b.days.length > 1 ? `${b.label} 当周` : b.label),
+      tipTitle: (b) => (b.days.length > 1 ? `${b.label}（${b.days.length} 天合计）` : b.label),
     });
   }
 
@@ -204,15 +265,19 @@
     setTotal(els.sumDown, down);
     setTotal(els.sumUp, up);
     setTotal(els.sumAll, down + up);
+    // 「其余 N 个应用」那一行要拿它做差。用柱图的合计而不是再遍历一次 pool：
+    // 顶部三个数就是从 buckets 来的，同源才能保证「列出的 + 其余 = 顶部合计」对得上。
+    rankTotals = { down, up };
 
     if (selected >= 0) {
       const b = buckets[selected];
       const many = b.days.length > 1;
+      // 标题带上实际天数：首尾两组可能被区间边界截短，说「一周」会多算。
       els.rangeTitle.textContent = many
-        ? `${b.label} 起一周`
+        ? `${b.label} · ${b.days.length} 天`
         : `${b.label} · ${weekdayOf(b.key)}`;
       els.rangeSub.textContent = '点柱状图空白处取消选中';
-      els.rankTitle.textContent = many ? '本周应用排行' : '当日应用排行';
+      els.rankTitle.textContent = many ? '这几天的应用排行' : '当日应用排行';
     } else if (customRange) {
       // 自定义区间不能再说「近 N 天」：区间可能整段在过去，而且它不是从今天倒数的。
       els.rangeTitle.textContent = `${customRange.start} ~ ${customRange.end}`;
@@ -224,21 +289,35 @@
       els.rankTitle.textContent = '应用排行';
     }
 
-    // 应用排行：按下载量降序，行背景一条极淡的琥珀渐变表示占比（同 §2.5）。
+    // 应用排行：按「上传 + 下载」降序，行背景一条极淡的琥珀渐变表示占比（同 §2.5）。
     // 未选中柱时按整个当前区间过滤 —— 不能直接遍历 rows：history_daily 的截断点是
     // 「现在往前推 N 天」，跨天的那个窗口比 dayKeys(N) 多出小半天，排行会比柱图多算一截。
+    //
+    // 排序键从「只看下载」改成合计：上传重、下载轻的应用（网盘同步、直播推流、
+    // 做种、备份）在实时屏的上传列很显眼，按下载排却可能整个掉出榜外，
+    // 而卡头那三个字「按下载」推断不出「有应用因此被隐掉了」。
+    //
+    // 分组键归一到小写：库里同一个应用可能存过 Chrome.exe 和 chrome.exe 两种写法
+    //（进程名来自采集端，大小写不保证稳定），不归一就会拆成两行各分走一半流量，
+    // 于是两行都可能被挤出榜。实时屏的应用聚合视图（main.js viewMode==='app'）
+    // 用的就是小写键，这里对齐它。未归因流量在库里是空串，一并在聚合前归一到
+    // UNATTR 标签 —— 老实现靠渲染时 `app.name || unattrName()` 兜，
+    // 那会让空串和真的叫这个名字的应用分到两行。
     const pool = selected >= 0 ? rows.filter((r) => dayFilter.has(r.day)) : filteredRows();
     const byApp = new Map();
     for (const r of pool) {
-      const cur = byApp.get(r.name) || { down: 0, up: 0 };
+      const label = r.name || unattrName();
+      const key = String(label).toLowerCase();
+      const cur = byApp.get(key) || { name: label, down: 0, up: 0 };
       cur.down += r.down;
       cur.up += r.up;
-      byApp.set(r.name, cur);
+      byApp.set(key, cur);
     }
-    const ranked = Array.from(byApp, ([name, v]) => ({ name, ...v }))
-      .sort((a, b) => b.down - a.down)
-      .slice(0, TOP_N);
-    renderRank(ranked, ranked.length ? ranked[0].down : 0);
+    const all = Array.from(byApp.values()).sort((a, b) => (b.down + b.up) - (a.down + a.up));
+    const ranked = all.slice(0, TOP_N);
+    // 占比条按合计取，与排序键同源；否则「最长的条」不是第一行，读起来像排错了。
+    const peak = ranked.length ? ranked[0].down + ranked[0].up : 0;
+    renderRank(ranked, peak, all.length);
   }
 
   // 合计数字：数值 20px、单位 12px。一列只有 116px，整串按 20px 排会溢出，
@@ -262,7 +341,11 @@
     return `${escapeHtml(s.slice(0, i))}<span class="u">${escapeHtml(s.slice(i + 1))}</span>`;
   }
 
-  function renderRank(list, peak) {
+  // total = 归组后的应用总数（可能多于 list.length）。截断必须说出来：
+  // 顶部合计是按整个区间**所有**应用算的，把列出的这些行加起来永远凑不出那个数，
+  // 而界面不解释差额从哪来时，最自然的解读是「数据错了」。
+  function renderRank(list, peak, total) {
+    els.rankCount.textContent = total ? `${total} 个应用` : '';
     if (!list.length) {
       els.rank.replaceChildren(Object.assign(document.createElement('div'), {
         className: 'hint-row',
@@ -276,20 +359,38 @@
     for (const app of list) {
       const row = document.createElement('div');
       row.className = 'rank-row';
-      const share = peak > 0 ? Math.round((app.down / peak) * 100) : 0;
+      const share = peak > 0 ? Math.round(((app.down + app.up) / peak) * 100) : 0;
       row.style.setProperty('--share', `${share}%`);
       const icon = iconFor(app.name);
-      const name = app.name || unattrName();
+      // 上传与下载分两列给：只显示下载时，一个上传 8 GB、下载 20 MB 的应用
+      // 在榜上显示「20 MB」，看不出它凭什么排在前面。
       row.innerHTML = `
         ${icon
           ? `<img class="rank-icon" src="${icon}" alt="" />`
           : `<span class="rank-icon is-placeholder">${escapeHtml(initial(app.name))}</span>`}
-        <span class="rank-name">${escapeHtml(name)}</span>
-        <span class="rank-value">${valueHtml(app.down)}</span>`;
+        <span class="rank-name" title="${escapeHtml(app.name)}">${escapeHtml(app.name)}</span>
+        <span class="rank-value is-down" title="下载 ${escapeHtml(fmt(app.down))}">${valueHtml(app.down)}</span>
+        <span class="rank-value is-up" title="上传 ${escapeHtml(fmt(app.up))}">${valueHtml(app.up)}</span>`;
       frag.appendChild(row);
+    }
+    if (list.length < total) {
+      // 余下应用的合计也给出来，让「列出的 + 其余 = 顶部合计」这笔账能对上。
+      const restDown = restOf(list, 'down');
+      const restUp = restOf(list, 'up');
+      frag.appendChild(Object.assign(document.createElement('div'), {
+        className: 'hint-row is-rest',
+        textContent: `其余 ${total - list.length} 个应用 · ↓ ${fmt(restDown)} ↑ ${fmt(restUp)}`,
+      }));
     }
     els.rank.replaceChildren(frag);
     requestAnimationFrame(snapRankHeight);
+  }
+
+  // 「其余应用」那一行的合计：区间总量减去已列出的部分。直接用总量做差，
+  // 不再遍历一遍 pool —— 两处各算一次迟早在某个过滤条件上漂移。
+  function restOf(list, field) {
+    const listed = list.reduce((s, a) => s + a[field], 0);
+    return Math.max(0, rankTotals[field] - listed);
   }
 
   // 排行列表高度取整到整行。检查栏 324px 的净高放不下「头部 + 合计 + 8×32 排行」，
@@ -318,27 +419,41 @@
     return rows.filter((row) => keys.has(row.day));
   }
 
+  // 查询代号。连点「近 7 天 → 近 90 天」时两次 invoke 并发，先发的可能后回；
+  // 而 await 之后的 buildBuckets 读的是**当前**的 days/customRange，rows 却是
+  // 过期那次的结果 —— 柱图会按 90 天排格子却填 7 天的数据，合计和排行一起错，
+  // 且没有任何报错。只认最后一次发出的查询，过期结果整份丢掉。
+  // （main.js 的 render30Day 早就有同一套守卫，这里是漏的那处。）
+  let loadSeq = 0;
+
   async function loadRows() {
+    const seq = ++loadSeq;
     // 加载态：柱图降透明，排行区如果还空着就把提示换成「读取中」。
     // 有旧数据时保留旧图不动 —— 换档期间闪一帧空图比沿用旧图更糟。
     loading = true;
     els.canvas.classList.add('is-loading');
-    if (!els.rank.querySelector('.rank-row')) renderRank([], 0);
+    if (!els.rank.querySelector('.rank-row')) renderRank([], 0, 0);
+    // 档位在发请求这一刻就固定下来，不留到 await 之后再读全局：
+    // 结果回来时全局可能已经是下一次点击的档位了。
+    const forRange = customRange;
+    const forDays = days;
     // 自定义区间必须走 history_range_days：history_daily 只认「从今天往前数 N 天」，
     // 拿它查一个过去的区间只会取回与所选窗口零重叠的数据，柱图整片是空的。
+    let next;
     try {
-      const raw = customRange
+      const raw = forRange
         ? await window.__TAURI__.core.invoke('history_range_days', {
-            start: customRange.start,
-            end: customRange.end,
+            start: forRange.start,
+            end: forRange.end,
           })
-        : await window.__TAURI__.core.invoke('history_daily', { days });
-      rows = JSON.parse(raw || '[]').filter((row) => row && typeof row.day === 'string');
-      windowDays = customRange ? 0 : days;
+        : await window.__TAURI__.core.invoke('history_daily', { days: forDays });
+      next = JSON.parse(raw || '[]').filter((row) => row && typeof row.day === 'string');
     } catch {
-      rows = []; // 浏览器预览或库不可用：画空坐标轴，不报错弹窗
-      windowDays = customRange ? 0 : days;
+      next = []; // 浏览器预览或库不可用：画空坐标轴，不报错弹窗
     }
+    if (seq !== loadSeq) return; // 期间又换了档位，这份结果作废（loading 态交给后发的那次收）
+    rows = next;
+    windowDays = forRange ? 0 : forDays;
     loading = false;
     els.canvas.classList.remove('is-loading');
     loaded = true;
@@ -348,13 +463,24 @@
     renderSide();
   }
 
+  // 导出跟随屏幕上当前看到的范围。选中某一天后原来仍导出整个区间：
+  // 屏幕显示的是那一天的合计和排行，下载下来的却是 90 天，而文件名里也看不出来。
   function exportCsv() {
-    const exportRows = filteredRows();
+    const scopeKeys = selected >= 0 ? buckets[selected].days : activeDayKeys();
+    const keySet = new Set(scopeKeys);
+    const exportRows = rows.filter((r) => keySet.has(r.day));
     const header = '日期,应用,下载字节,上传字节';
     const lines = exportRows.map((r) => `${r.day},"${String(r.name).replace(/"/g, '""')}",${r.down},${r.up}`);
     const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
-    const keys = activeDayKeys();
-    const suffix = customRange && keys.length ? `${keys[0]}_${keys[keys.length - 1]}` : `${days}d`;
+    // 文件名说清导出的到底是哪一段：单日给日期，多天给起止，预设档给天数。
+    let suffix;
+    if (scopeKeys.length === 1) {
+      suffix = scopeKeys[0];
+    } else if (selected >= 0 || customRange) {
+      suffix = `${scopeKeys[0]}_${scopeKeys[scopeKeys.length - 1]}`;
+    } else {
+      suffix = `${days}d`;
+    }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `netpeek-history-${suffix}.csv`;
@@ -509,6 +635,18 @@
   });
 
   window.addEventListener('netpeek-themechange', () => { if (buckets.length) drawChart(); });
+
+  // 设置屏「清空历史」之后，这一屏缓存的三样东西全部过期，而它们都没有自然的失效点：
+  //   - firstDay 一旦取到就永久留着（applyDateBounds 有 `if (firstDay) return` 的快路径），
+  //     于是日期框的 min 还锁在已被删掉的那一天，提交校验还会说「历史库最早记录是 X」；
+  //   - inspectorRows / inspectorSpan 是检查栏 30 天曲线的独立缓存，同样不会自己重查。
+  // 清完之后如果人还在历史屏，顺手重拉一次，别让屏上继续摆着已经删掉的数据。
+  window.addEventListener('netpeek-historycleared', () => {
+    firstDay = null;
+    inspectorRows = null;
+    inspectorSpan = 0;
+    loadRows();
+  });
 
   window.NetPeekHistoryUI = {
     // 进入历史屏时拉一次；库每整分钟才落一次，不需要更勤

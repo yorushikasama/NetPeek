@@ -158,6 +158,40 @@ section('格式化实现只有一份');
   }
 }
 
+section('启动层不参与全局不透明度（幕布必须实心）');
+{
+  // 用户报的缺陷：「开机动画不应该被应用不透明度」。
+  // 原实现给 .np-boot 的底色写了 color-mix(... var(--ui-opacity) ...)，注释里的
+  // 理由是「与 .frame 逐字一致，交接时才没有色差」。两处都站不住：
+  //   ① 算错了。启动层是 .frame 的子节点、盖在它上面而不是替换它，两层各铺 a 份
+  //      底色的合成是 (2−a)·a·bg + (1−a)²·D —— a=0.5 时等效 0.75，从来没「一致」过；
+  //   ② 更要紧的是不安全，与文件头约束 3（禁止把这层从透明淡进来）同一个坑：
+  //      50% 档下幕布压不住底下的界面，用户会透过启动页看到空表格与「采集服务未
+  //      运行」，而这层存在的全部意义就是把没就绪的样子挡住。观感还更差 ——
+  //      首帧用 tokens.css 缺省的 1，等 theme-ui init 把用户的 0.5 写进根节点，
+  //      幕布会在动效播到一半时忽然变透。
+  // 所以这条断言钉的是「幕布的底色里不出现 --ui-opacity」，而不是某个具体写法。
+  const css = readUi('boot.css');
+  // 取 .np-boot 的规则块。`\s*\{` 紧跟选择器这一条就够把变体全排掉了：
+  // .np-boot.is-out / .np-boot.preset-chrome / .np-boot.is-light-bg 后面接的是 `.`，
+  // `.np-boot,` 与 `.np-boot *` 接的是 `,` / ` *`，都匹配不上。
+  const blocks = [...css.matchAll(/\.np-boot\s*\{([^}]*)\}/g)].map((m) => m[1]);
+  ok(blocks.length > 0, 'boot.css 里找到 .np-boot 的规则块');
+  const decls = blocks.join('\n');
+  const bg = [...decls.matchAll(/^\s*(background(?:-color)?)\s*:([^;]*);/gm)].map((m) => m[2]);
+  ok(bg.length > 0, '幕布声明了底色（不靠继承，否则透明窗上就是桌面直接透进来）');
+  for (const v of bg) {
+    ok(!/--ui-opacity/.test(v), `幕布底色不含 --ui-opacity（实测值：${v.trim()}）`);
+  }
+  // opacity 同样不能挂在幕布上（另一个入口：整层半透 == 露出半成品）。
+  // is-out 那条 opacity: 0 是卸幕状态切换，不在 .np-boot 基础块里，所以不受影响。
+  for (const m of decls.matchAll(/^\s*opacity\s*:([^;]*);/gm)) {
+    ok(false, `幕布基础样式不该有 opacity（实测：${m[1].trim()}）`);
+  }
+  // 卸幕那一段必须还在：断言① 别把「实心」修成「永不淡出」。
+  ok(/\.np-boot\.is-out\s*\{[^}]*opacity:\s*0/.test(css), '卸幕仍走 is-out 的淡出');
+}
+
 section('vendor 库必须随页加载');
 {
   // theme.js 的色度学与取色委托给 vendor 里的 UMD 构建。加载顺序断在契约里：

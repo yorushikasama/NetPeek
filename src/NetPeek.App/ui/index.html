@@ -268,8 +268,10 @@
               <span class="is-up">↑ <b id="histSumUp">—</b></span>
               <span class="is-total">合计 <b id="histSumAll">—</b></span>
             </div>
-            <span class="sp"></span>
-            <button type="button" class="btn" id="histExport">
+            <!-- 这里原来是 <span class="sp">，但 .sp 只在 .card-head / .rc-head 下
+                 才有 flex:1，工具栏里没有匹配规则 —— 导出按钮并没有被推到右端，
+                 而是紧跟在合计后面 12px。改用真正生效的 margin-left:auto。 -->
+            <button type="button" class="btn hist-export" id="histExport">
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4" /><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>导出 CSV
             </button>
           </div>
@@ -308,10 +310,16 @@
 
       <aside class="sidebar">
         <div class="rc is-fill">
+          <!-- 排序口径从「按下载」改成「按合计」：只按下载排会把上传重、下载轻的
+               应用（网盘同步、直播推流、做种、备份）整个挤出榜，而卡头那三个字
+               推断不出「有应用因此被隐掉了」。条数挂在标题右侧 —— 顶部合计是按
+               整个区间所有应用算的，列表被截断时必须说出来，否则把列出的行加起来
+               永远凑不出那个数，最自然的解读是「数据错了」。 -->
           <div class="rc-head">
             <h5 id="histRankTitle">应用排行</h5>
+            <span class="rank-count" id="histRankCount"></span>
             <span class="sp"></span>
-            <span class="rc-aside">按下载</span>
+            <span class="rc-aside">按合计</span>
           </div>
           <div class="rank-list" id="histRank"></div>
         </div>
@@ -322,7 +330,8 @@
     <section class="screen screen-settings" data-screen="settings" hidden>
       <div class="snav" id="settingsNav" role="tablist" aria-label="设置分区">
         <button type="button" class="is-on" data-sec="general" role="tab" aria-selected="true">常规</button>
-        <button type="button" data-sec="appearance" role="tab" aria-selected="false">外观</button>
+        <button type="button" data-sec="appearance" role="tab" aria-selected="false">皮肤</button>
+        <button type="button" data-sec="background" role="tab" aria-selected="false">背景</button>
         <button type="button" data-sec="data" role="tab" aria-selected="false">数据</button>
         <button type="button" data-sec="alerts" role="tab" aria-selected="false">提醒</button>
         <button type="button" data-sec="service" role="tab" aria-selected="false">服务</button>
@@ -357,7 +366,9 @@
           </div>
         </div>
 
-        <!-- 外观：皮肤 = 整套 token 的预设包 -->
+        <!-- 皮肤 = 整套 token 的预设包。背景图那一大套（选图、显示方式、四根滑杆、
+             取色、AI）拆到下面的「背景」分区：它们全都以「跟随背景图」皮肤为前提，
+             和这里的「选一套配色」不是同一件事，挤在一屏时也是全设置屏唯一装不下的一屏。 -->
         <div class="sgroup" data-sec="appearance" hidden>
           <h4>皮肤</h4>
           <p>整套视觉 token 的预设包，结构与布局不变。选「跟随背景图」可从图片提取主色。</p>
@@ -399,13 +410,61 @@
             </div>
           </div>
 
-          <!-- 跟随背景图皮肤的专属区：背景图 + 面板微调 + AI 取色 -->
+          <!-- 自定义皮肤编辑器：在当前皮肤基础上改 token，命名另存 -->
+          <div class="custom-skin-block" id="customSkinBlock">
+            <h5>自定义皮肤</h5>
+            <p class="note">改动当场生效并可另存为自己的皮肤；下载与上传语义锁定，可调明度不能换语义。</p>
+            <div class="swatches">
+              <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
+              <label class="swatch"><input type="color" id="cPanel" /><span>面板</span></label>
+              <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
+              <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
+              <label class="swatch" title="交互强调：选中条 / 主按钮 / 开关"><input type="color" id="cAccent" /><span>强调</span></label>
+              <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
+                <input type="color" id="cDown" /><span>下载 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
+              <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
+                <input type="color" id="cUp" /><span>上传 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
+              <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
+              <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
+              <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
+              <label class="swatch"><input type="color" id="cBorder" /><span>边线</span></label>
+            </div>
+            <div class="bg-actions is-spaced">
+              <button type="button" class="btn" data-preset="plain">朴素</button>
+              <button type="button" class="btn" data-preset="light">浅色</button>
+              <button type="button" class="btn" data-preset="amber">琥珀</button>
+            </div>
+            <!-- 对比度守卫的回执。改色当场生效，读不出来的颜色会被提亮到 4.5:1，
+                 这里把「动了哪一项」说出来 —— 静默改写用户挑的颜色是最不该做的。 -->
+            <div class="note is-warn" id="guardNote" hidden></div>
+            <div class="bg-actions">
+              <input type="text" id="themeName" placeholder="皮肤名称" class="text-input" />
+              <button type="button" class="btn is-primary" id="themeSave">另存</button>
+            </div>
+            <div class="note" id="themeHint"></div>
+            <div class="theme-list" id="themeList"></div>
+            <div class="note" id="themeEmpty">还没有另存的皮肤。上面改出满意的配色后起个名字存下来，随时可以切回。</div>
+            <button type="button" class="btn" id="themeReset">还原默认</button>
+          </div>
+        </div>
+
+        <!-- 背景：整块以「跟随背景图」皮肤为前提。它原来是外观屏里的第三层嵌套，
+             而外观是全设置屏唯一在 940×620（窗口下限）装不下的一屏 —— 拆出来之后
+             两屏都只剩一层结构，且都在最小窗口里放得下。
+             #imageSkinBlock 的 hidden 由 theme-ui.renderSkinCards 按皮肤切，
+             这里不需要额外的 JS：皮肤不是「跟随背景图」时，末尾那条说明由
+             CSS 的 [hidden] ~ 兄弟选择器接管（styles.css .bg-needs-skin）。 -->
+        <div class="sgroup" data-sec="background" hidden>
+          <h4>背景</h4>
+          <p>壁纸与它的呈现方式。仅「跟随背景图」皮肤使用这里的设置。</p>
           <div class="image-skin-block" id="imageSkinBlock" hidden>
             <div class="srow">
               <div class="t"><b>背景图</b><small>铺在整个窗口底层，面板微微透出</small></div>
-              <div class="bg-thumb" id="bgThumb" hidden></div>
-              <button type="button" class="btn" id="bgPick">选择图片…</button>
-              <button type="button" class="btn ghost" id="bgClear">移除</button>
+              <div class="srow-actions">
+                <div class="bg-thumb" id="bgThumb" hidden></div>
+                <button type="button" class="btn" id="bgPick">选择图片…</button>
+                <button type="button" class="btn ghost" id="bgClear">移除</button>
+              </div>
               <input type="file" id="bgFile" accept="image/*" hidden />
             </div>
             <div class="note truncate" id="bgStatus">未设置背景（使用面板底色）</div>
@@ -486,7 +545,7 @@
 
             <!-- 强调色色板：取色管线按「彩度 × 占比」评分挑选；自动选中的带环，
                  点任何一颗都把交互强调切到它 -->
-            <div class="srow">
+            <div class="srow is-full">
               <div class="t"><b>强调色</b><small>从背景图提取的候选，点色板可换交互强调</small></div>
             </div>
             <div class="pal-row" id="palRow" hidden></div>
@@ -509,42 +568,11 @@
               <div class="note" id="aiStatus"></div>
             </div>
           </div>
-
-          <!-- 自定义皮肤编辑器：在当前皮肤基础上改 token，命名另存 -->
-          <div class="custom-skin-block" id="customSkinBlock">
-            <h5>自定义皮肤</h5>
-            <p class="note">改动当场生效并可另存为自己的皮肤；下载与上传语义锁定，可调明度不能换语义。</p>
-            <div class="swatches">
-              <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
-              <label class="swatch"><input type="color" id="cPanel" /><span>面板</span></label>
-              <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
-              <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
-              <label class="swatch" title="交互强调：选中条 / 主按钮 / 开关"><input type="color" id="cAccent" /><span>强调</span></label>
-              <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
-                <input type="color" id="cDown" /><span>下载 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
-              <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
-                <input type="color" id="cUp" /><span>上传 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
-              <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
-              <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
-              <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
-              <label class="swatch"><input type="color" id="cBorder" /><span>边线</span></label>
-            </div>
-            <div class="bg-actions is-spaced">
-              <button type="button" class="btn" data-preset="plain">朴素</button>
-              <button type="button" class="btn" data-preset="light">浅色</button>
-              <button type="button" class="btn" data-preset="amber">琥珀</button>
-            </div>
-            <!-- 对比度守卫的回执。改色当场生效，读不出来的颜色会被提亮到 4.5:1，
-                 这里把「动了哪一项」说出来 —— 静默改写用户挑的颜色是最不该做的。 -->
-            <div class="note is-warn" id="guardNote" hidden></div>
-            <div class="bg-actions">
-              <input type="text" id="themeName" placeholder="皮肤名称" class="text-input" />
-              <button type="button" class="btn is-primary" id="themeSave">另存</button>
-            </div>
-            <div class="note" id="themeHint"></div>
-            <div class="theme-list" id="themeList"></div>
-            <div class="note" id="themeEmpty">还没有另存的皮肤。上面改出满意的配色后起个名字存下来，随时可以切回。</div>
-            <button type="button" class="btn" id="themeReset">还原默认</button>
+          <!-- 皮肤不是「跟随背景图」时上面整块是 hidden 的，这一屏会变成一个只有
+               标题的空屏。这条说明兜住那个状态并给出去处；显隐全靠上面那块的
+               [hidden] ~ 兄弟选择器，不需要 JS（见 styles.css .bg-needs-skin）。 -->
+          <div class="note bg-needs-skin">
+            背景图只在「跟随背景图」皮肤下生效。到「皮肤」分区选中它，这里就会出现壁纸、显示方式与取色选项。
           </div>
         </div>
 
@@ -607,9 +635,10 @@
           <p>NetPeekCollector 以 LocalSystem 运行，ETW 内核会话需要管理员权限。</p>
           <div class="srow">
             <div class="t"><b>状态</b><small id="svcEventsLost"></small></div>
-            <div class="srow-actions">
-              <span class="note" id="svcStatus">未连接采集服务</span>
-            </div>
+            <!-- 状态是读数不是按钮：原来它裹在 .srow-actions（按钮容器）里，于是一个
+                 39px 宽的「监控中」被推到离标签 600px 开外，读作一段游离的文字。
+                 .sval 是值格 —— 定宽控件列里右对齐收尾，与同屏按钮共享右边线。 -->
+            <div class="sval"><span class="note" id="svcStatus">未连接采集服务</span></div>
           </div>
           <div class="srow">
             <div class="t"><b>暂停 / 恢复</b><small>暂停只停止累计与落库，服务本身不退出，恢复后从当前时刻接着算</small></div>
@@ -637,13 +666,17 @@
               <span class="note">v0.1.0 · ETW 采集服务（LocalSystem）+ Tauri 2 界面</span>
             </span>
           </div>
+          <!-- .sval：只读的值，不是控件。原来这两行直接把 .note 摆在控件列的位置上、
+               右对齐，读起来和隔壁分区里的下拉、按钮同一个位置同一个重量 ——
+               看上去像能点。.sval 把它们改回左对齐的字（见 styles.css），
+               「这是一条信息」和「这是一个入口」在版式上分开。 -->
           <div class="srow">
             <div class="t"><b>数据目录</b></div>
-            <div class="note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
+            <div class="sval note num" id="aboutDataDir">%APPDATA%\com.netpeek.app</div>
           </div>
           <div class="srow">
             <div class="t"><b>国家/地区库</b><small>每月随版本更新</small></div>
-            <div class="note">DB-IP Country Lite（© DB-IP.com，CC BY 4.0）</div>
+            <div class="sval note">DB-IP Country Lite（© DB-IP.com，CC BY 4.0）</div>
           </div>
           <h4 class="is-spaced">归因边界</h4>
           <div class="attrib-note">

@@ -310,7 +310,11 @@
     const T = window.NetPeekTheme;
     if (!T || !payload || !payload.tokens) return;
     try {
-      T.applyTokens(payload.tokens, { silent: true });
+      // solo: true —— 小窗只有一层漆（面板直接压在桌面上，body 是透明的），
+      // 主窗是两层（.frame 的 --bg 再垫一次）。同一个漆层不透明度在这里漏进来的
+      // 桌面是主窗的两倍，所以 --ui-paint-floor 必须按单层结构单独算；
+      // 拿主窗那份铺到这里，等于让小窗超支一倍。
+      T.applyTokens(payload.tokens, { silent: true, solo: true });
       // 全局界面不透明度随同一次广播过来；缺省（旧主界面）不动本地值
       if (payload.uiOpacity != null) T.applyUiOpacity(payload.uiOpacity);
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }

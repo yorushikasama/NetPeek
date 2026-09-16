@@ -235,6 +235,11 @@
       try {
         await invoke('clear_history');
         await refreshStats();
+        // 广播出去：历史屏缓存了「最早落库日」（给日期框设 min，并在区间早于它时
+        // 给出「历史库最早记录是 X」的提示），以及检查栏 30 天曲线的行。
+        // 清空之后这两份缓存都指向已经不存在的数据 —— 不通知的话，
+        // 日期框会继续把 min 钉在一个已删掉的日期上。
+        window.dispatchEvent(new CustomEvent('netpeek-historycleared'));
       } catch {
         els.histStats.textContent = '清空失败（浏览器预览模式不可用）';
         els.histStats.className = 'note is-error';

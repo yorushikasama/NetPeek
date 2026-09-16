@@ -663,30 +663,61 @@ const MIN_PANEL_OP = 0.30;
 // 行程上都成立 —— 拖到最低时正文字阶恰好是 LENS_BODY_LC，往上拖只会更好。
 // （若取默认档 0.45，拖到下限就会比契约低一档，用户看到的是「越透明字越虚」。）
 const LENS_DESIGN_OP = MIN_PANEL_OP;
-// 反解带端时要求各字阶守住的下限（「玻璃字阶」）：档位与 APCA_TIERS 同构，只是浅色
-// 正文那一档从严格的 75 降到 60 —— 60 是 APCA 对 16px 正文的「可用」线，而 75 要求
-// 合成面亮度 ≥ 0.63，会把浅色玻璃钉回近白（带只剩 0.23 宽，就是那块粉白雾）。
-// 反解取各档里最严的那个（各档 |Lc| 对亮度同向单调，AND 就是最保守那条线）。
+// 正文契约：合成面上主文字（--text）必须守住的 |Lc|。60 是 APCA 对 16px 正文的
+// 「可用」线；严格表的 75 要求浅色合成面亮度 ≥ 0.63，会把玻璃钉回近白（带只剩
+// 0.23 宽，就是用户两次报上来的那块粉白雾）。
+//
+// 2026-09-16 —— 带的判据从「多档字阶 AND + 自校准折扣」收敛成**两条**：
+// 正文契约 + 中调护栏（下面两个常量）。其余所有字色不再参与反解，改由玻璃加固层
+// （glassHardenTokens）对着最不利合成面逐键校 —— 这一步不花带宽。
+//
+// 为什么必须换掉旧口径（三个实测事实）：
+// ① 旧口径把 text2/text3 也写进反解，而它们在深色皮肤上贴着物理天花板（深色次要
+//    字是一枚中灰，压近黑底 |Lc| 上限 ≈43，声明档却写 45），于是 meets 恒假、带退化
+//    成一个点、透镜变 null、守卫把面板地板顶到 1 —— 就是 b0c3db2 修的「深色全不透明」。
+// ② 为绕开①加的自校准折扣（旧 GLASS_TIER_REL = 0.75）实测**不是兜底而是无条件
+//    打折**：plain 的 text2 物理上限 50.3、声明 45 明明可达，实际目标却被折到 37.7。
+//    折扣让契约变成永不失败的判据 —— 构造一套低对比深色皮肤，目标会一起塌到
+//    text 29.6 / text2 14.0，系统认为完全达标（实测 text3 只剩 Lc 9.5）。
+// ③ 旧口径下带的决定权偶然落在「被折扣后的 text2」上，纯属巧合：谁的折后目标
+//    最紧，带就由谁定。这解释了为什么四轮返工每次都在别处冒出新问题。
+//
+// 新口径下带宽不降反升（实测 plain 0.305→0.389、light 0.182→0.367），因为卡住带的
+// 那个折后 text2 走了，接手的是一条有明确物理含义的线。
 const LENS_BODY_LC = 60;
-const GLASS_TIERS = {
-  light: [['text', LENS_BODY_LC], ['text2', 48], ['text3', 32]],
-  dark: [['text', LENS_BODY_LC], ['text2', 45]],
-};
+// 中调护栏：合成面自己的亮度必须留在本方向的表面区里 —— 深色皮肤 ≤ 0.10、
+// 浅色皮肤 ≥ 0.40（相对亮度）。这是明度带最初存在的理由（Mica 的 tonal band）：
+// 2026-09-15 实测过一次反例 —— 合成面滑到 #ada4a1（L 0.36）时「既不是浅色面板也
+// 不是深色面板」，比值判定还报达标，顶栏状态字实测只有 Lc 36。
+//
+// 护栏与正文契约取更严的那条（两者对亮度同向单调，AND 即最保守）。实测里深色侧
+// 总是护栏更紧（正文在护栏端还有 Lc 72–74 的富余），浅色侧总是正文契约更紧 ——
+// 这个不对称是对的：深色皮肤的亮字在中调面上会先失去「表面感」，浅色皮肤的暗字
+// 先失去对比度。
+//
+// 阈值怎么定的（扫了 0.10/0.12/0.15 × 0.40/0.42/0.45 九组）：0.10/0.40 在「带最宽」
+// 与「加固位移最小」两头同时最优。放宽到 0.15 带只多 0.10，但加固位移从 ≤50 涨到
+// ≥57、字阶被压平（text2 的原始 Lc 掉到 24.6，加固要把它推 39/255）。
+const GLASS_MID_MAX_DARK = 0.10;
+const GLASS_MID_MIN_LIGHT = 0.40;
 const LENS_BAND_TOP = 0.99;           // 浅色带顶（通道值）：留一点白，不烧成纯色
 const LENS_BAND_BOTTOM_DARK = 0.05;   // 深色带底（通道值）：留一点黑，暗部不压死
-// 自校准系数（关键）：每档的**实际**目标不是上面的声明档位，而是
-// min(声明档位, 该档在「对比最强端」上物理可得对比 × 本系数)。
+// 玻璃加固的目标 |Lc|：合成面上除正文以外的所有文字/图标色都要守住这条线。
+// 45 是 APCA 对「非正文但仍需读」（次要说明、数据单位、语义色数字）的可用线，
+// 也正好是旧 APCA_TIERS.dark 里那一档的值 —— 换句话说加固把旧口径**声明过但
+// 从未真正守住**的那条线兑现了。
+const GLASS_HARDEN_LC = 45;
+// 弱字阶（--text-3）单独一档：它的设计意图本来就是「弱」—— 实测三套出厂皮肤在
+// 纯面板上只有 Lc 23–25，把它推到 45 等于取消这个层级（字阶会从 88/48/23 压成
+// 90/75/55，层级信息全平）。旧口径下它在合成面上的实测值是 Lc 7.6–13.9，
+// 那已经是「渲染了但看不见」。
 //
-// 为什么必须自校准 —— 2026-09-15 用户第二次报缺陷的深色那一半，根因就在这里：
-// 深色皮肤的次要字是一枚中灰（实测 token #9b8f8b），压在近黑底上时 |Lc| 的物理
-// 上限只有 ≈43，连纯黑都只给到 43.3；而声明档位写着 45。于是 meets(带底) 恒假，
-// lensBand 返回退化的 [0.05,0.05]，lensParams 因斜率 0 返回 null，lensOf 变 null，
-// backdropGuard 退回「无透镜」分支把面板地板顶到 1 —— 面板全不透明，底图彻底看不见。
-// 打顶之后 meets(最强端) **恒真**（该端的实测对比 ≥ 自身 × 0.75），带不可能退化。
-// 取 0.75 而不是更低：浅色那三档的物理余量本来就大（白底上 text 98 / text2 90 /
-// text3 76，×0.75 后分别是 73/67/57，全都高于声明档位），所以浅色的反解结果
-// 一格不动；只有深色那枚贴着天花板的次要字被真正松到 32.25。
-const GLASS_TIER_REL = 0.75;
+// 30 而不是 25：30 是 APCA 给「装饰性 / 非必读部件」的下限，也是 preview-v2 的
+// 像素审计一直在用的硬地板（`below30 === 0`）。取 25 会让模型层自认达标、而
+// 同一批像素在审计里判失败 —— 两套口径对同一件事给出相反结论，是这套主题系统
+// 反复踩的那类缺陷（回归拿另一套档位去量玻璃）。实测代价也确认了它便宜：
+// 五套皮肤 25→30 的字阶顺序全部保持，最大位移只从 55 涨到 62/255。
+const GLASS_HARDEN_WEAK_LC = 30;
 
 // 彩度补偿：contrast(c) 把彩度按 ≈2c 缩（相对亮度之比），saturate 补回来。
 // 钳在 [0.7, 2.6]：auto-levels 在大斜率时 c 接近 1，此时不是要补而是略微收一点。
@@ -709,18 +740,9 @@ function lensParams(t0, t1) {
   };
 }
 
-// 明度带的两端（通道值 0..1）：在 LENS_DESIGN_OP 下反解 —— 合成面（带上的灰与
-// 最不利那档面板按该不透明度调和）要让 GLASS_TIERS 里**每一档**字阶都达标。
-// 浅色皮肤合成面越亮暗字越好读 → 解**最小**的带底；深色皮肤对称，解**最大**的带顶。
-// 最不利的那档：浅色怕「更暗」（暗字没地方落）取更暗的面板，深色取更亮的。
-//
-// 为什么浅色正文那一档取 60 而不是严格表的 75：75 要求合成面亮度 ≥ 0.63，浅色玻璃
-// 会被钉回近白、带只剩 0.23 宽 —— 那就是用户看到的那块粉白雾。60 是 APCA 对正文字阶
-// 的「可用」线，换来的是宽出一倍多的带，底图的形从「没有」变成「看得见」。
-// 这是用户明确要的那一头：他两次的原话都是「底图透不出来」，没有一次说字看不清
-// （字看不清的那次是 0.2 亮纱 + 中调合成面，另一个成因，已由纱的折算解决）。
-// 最不利那档面板底色：浅色皮肤怕「更暗」（暗字没地方落）取更暗的，深色取更亮的。
-// lensBand 的反解与 glassTierTargets 共用这一份，避免两处口径漂移。
+// 最不利那档面板底色：面板底色有两档（--panel 卡片 / --panel-2 顶栏·rail·表头·
+// 输入框），后者凹一档。浅色皮肤怕「更暗」（暗字没地方落）取更暗的，深色取更亮的。
+// 带的反解、护栏判定、加固层的目标底色共用这一份，避免三处口径漂移。
 function worstSurface(tokens) {
   const p1 = hexToRgb(tokens.panel);
   const p2 = /^#[0-9a-f]{6}$/i.test(tokens.panel2 || '') ? hexToRgb(tokens.panel2) : p1;
@@ -729,46 +751,64 @@ function worstSurface(tokens) {
     : (luminance(p1) >= luminance(p2) ? p1 : p2);
 }
 
-// 玻璃字阶的**实际**目标（自校准后）：[[key, 目标], …]。见 GLASS_TIER_REL 的长注释。
-// 单独导出是给回归脚本用的 —— 回归脚本此前拿 APCA_TIERS（浅色 75/60/40、深色次要字
-// 45）去量玻璃合成面，那套严格档位在玻璃上本来就不可能满足：浅色 75 要求合成面亮度
-// ≥0.63（带只剩 0.21 宽，就是用户两次抱怨的那块「粉白雾」），深色 45 超过那枚中灰
-// 的物理上限 ≈43。判定口径必须与渲染同源，否则回归只会逼着实现把带宽还回去。
-function glassTierTargets(tokens) {
+// 带的两条判据，导出成一份数据供回归脚本使用（判定口径必须与渲染同源，否则回归
+// 只会逼着实现把带宽还回去 —— 2026-09-15 踩过：回归拿 APCA_TIERS 的 75/60/40 去量
+// 玻璃合成面，那套档位在归一化玻璃上无解）。
+// 返回 { bodyLc, midMax, midMin }：正文契约档 + 中调护栏的方向化边界（另一侧为 null）。
+function glassContract(tokens) {
   const light = isLightSkin(tokens);
+  return {
+    bodyLc: LENS_BODY_LC,
+    midMax: light ? null : GLASS_MID_MAX_DARK,
+    midMin: light ? GLASS_MID_MIN_LIGHT : null,
+  };
+}
+
+// 合成面（带上某点的灰与最不利那档面板按设计不透明度调和）—— lensBand 的反解、
+// 护栏判定、加固层的目标底色全部走这一个函数，避免三处口径漂移。
+function glassComposite(tokens, t, op = LENS_DESIGN_OP) {
   const surf = worstSurface(tokens);
-  const tBest = light ? LENS_BAND_TOP : LENS_BAND_BOTTOM_DARK;
-  const op = LENS_DESIGN_OP;
-  const g = tBest * 255;
-  const bestHex = rgbToHex({
+  const g = clamp(t, 0, 1) * 255;
+  return rgbToHex({
     r: g + (surf.r - g) * op, g: g + (surf.g - g) * op, b: g + (surf.b - g) * op,
   });
-  return (light ? GLASS_TIERS.light : GLASS_TIERS.dark)
-    .filter(([k]) => /^#[0-9a-f]{6}$/i.test(tokens[k] || ''))
-    .map(([k, declared]) => [k, Math.min(declared, GLASS_TIER_REL * Math.abs(apcaLc(tokens[k], bestHex)))]);
+}
+
+// 加固层的目标底色：带的**最不利那一端**上的合成面。浅色皮肤最不利 = 带底（最暗，
+// 暗字最难读）、深色皮肤 = 带顶（最亮，亮字最难读）。加固对着它校，于是整条带上
+// 每一点都达标 —— 与「透镜输出结构上不越带」那条不变量配合，覆盖的是**每个像素**。
+function glassWorstComposite(tokens) {
+  const [t0, t1] = lensBand(tokens);
+  return glassComposite(tokens, isLightSkin(tokens) ? t0 : t1);
 }
 
 function lensBand(tokens) {
   const light = isLightSkin(tokens);
-  const surf = worstSurface(tokens);
-  const op = LENS_DESIGN_OP;
-  const composite = (t) => {
-    const g = t * 255;
-    return { r: g + (surf.r - g) * op, g: g + (surf.g - g) * op, b: g + (surf.b - g) * op };
-  };
-  // 「对比最强端」：浅色皮肤要暗字落在最亮处、深色皮肤要亮字落在最暗处。契约锚在
-  // 它上面 —— 另一端只可能更差。配上 GLASS_TIER_REL，各档目标 ≤ 这一端的实测对比，
-  // 所以 meets(tBest) 恒真，二分一定有解（也就不可能再退化成「一个点」）。
-  const tiers = glassTierTargets(tokens);
+  const { bodyLc, midMax, midMin } = glassContract(tokens);
+  const composite = (t) => hexToRgb(glassComposite(tokens, t));
+  // 两条判据取 AND（都对亮度同向单调，AND 即最保守那条线）：
+  //   ① 正文契约：合成面上 --text 的 |Lc| ≥ bodyLc
+  //   ② 中调护栏：合成面自己的亮度留在本方向的表面区里
+  // 其余字色**不在这里** —— 它们由 glassHardenTokens 对着最不利合成面加固，不花带宽。
   const meets = (t) => {
-    const hex = rgbToHex(composite(t));
-    return tiers.every(([k, min]) => Math.abs(apcaLc(tokens[k], hex)) >= min);
+    const rgb = composite(t);
+    const L = luminance(rgb);
+    if (midMax != null && L > midMax + 1e-9) return false;
+    if (midMin != null && L < midMin - 1e-9) return false;
+    if (/^#[0-9a-f]{6}$/i.test(tokens.text || '')) {
+      if (Math.abs(apcaLc(tokens.text, rgbToHex(rgb))) < bodyLc) return false;
+    }
+    return true;
   };
   if (light) {
     let lo = 0;
     let hi = LENS_BAND_TOP;
-    // 兜底（自校准之后走不到）：退化成整条带 = 恒等透镜，仍是一个**有效**透镜，
-    // 绝不会变成 null 把面板地板顶到 1。宁可「不归一化」，也不能「没有透镜」。
+    // 铁律兜底：正常皮肤走不到这里（带顶近白，浅色皮肤的暗字在它上面 |Lc| 远超 60，
+    // 护栏的 midMin 也必然满足），只有病态皮肤（浅色方向却配了一枚亮正文）会落进来。
+    // 那时退化成整条带 = 恒等透镜 —— 仍是一个**有效**透镜，绝不返回 null。
+    // 返回 null 会让 backdropGuard 退回「无透镜」分支把面板地板顶到 1，底图彻底
+    // 消失（2026-09-15 的「深色变全不透明」就是这条链）。宁可「不归一化」，
+    // 也不能「没有透镜」。加固层在这种皮肤上照样对着最不利合成面兜住字色。
     if (!meets(hi)) return [0, LENS_BAND_TOP];
     for (let i = 0; i < 18; i++) {
       const mid = (lo + hi) / 2;
@@ -778,6 +818,8 @@ function lensBand(tokens) {
   }
   let lo = LENS_BAND_BOTTOM_DARK;
   let hi = 1;
+  // 同上的铁律兜底。深色侧带底 0.05 是近黑，亮正文在它上面 |Lc| 通常 90+，护栏的
+  // midMax 也满足，所以正常皮肤走不到。
   if (!meets(lo)) return [LENS_BAND_BOTTOM_DARK, 1];
   for (let i = 0; i < 18; i++) {
     const mid = (lo + hi) / 2;
@@ -792,6 +834,97 @@ function lensBand(tokens) {
 function lensOf(tokens) {
   const [t0, t1] = lensBand(tokens);
   return lensParams(t0, t1);
+}
+
+// ---------- 玻璃加固：除正文以外的字色对着合成面校 ----------
+//
+// 带只承载两条判据（正文契约 + 中调护栏，见 lensBand），其余字色在这里解决。
+// 分开的理由是这两件事花的**不是同一份预算**：带宽是「底图的形」的预算 —— 每多让
+// 一档字阶去解带，带就窄一截，用户看到的就是「底图透不出来」；而把字色本身往对比
+// 方向推一点是**零带宽代价**的。
+//
+// 2026-09-15 之前的四轮返工全在推带（面板下限 0.88→0.30、正文档位 APCA 75→60、
+// 声明档位→×0.75 自校准、守卫整体退休），带已经榨干了，而字色这根杠杆一次没动过。
+// 实测：把缺失档位塞回带里，深色侧 text3@32 直接无解（带退化 → 透镜 null → 地板
+// 顶到 1，原地重现 2026-09-15 20:00 修掉的那个缺陷）、放宽到 25 带宽从 0.305 塌到
+// 0.031、语义色 @45 塌到 0.003。同一批档位交给加固：位移 ≤50/255、字阶顺序全部
+// 保持、带宽反而从 0.305 升到 0.389（护栏比旧的「被折扣的 text2」更宽松地圈住带）。
+//
+// 施加范围（theme-ui.applyCurrent）：**只在置底 + 有底图**时。没有底图时面板是实底，
+// 出厂皮肤手写的 88/48/23 字阶就是设计意图本身，不该被动；贴膜模式没有面板级透镜、
+// 走 wrapFloor 那条独立判据；小窗是透明窗 + 实底面板，同理拿原始表。
+
+// 需要加固的键：实际会作为**文字 / 图标色**压在合成面上的那些。
+// 不在内的三个都是有意的：
+//   --text     由带的正文契约保证（≥ LENS_BODY_LC），加固再推一遍是重复劳动；
+//   --accent   全仓库只作背景（按钮底 styles.css:728、开关 :1363、选区 :28）与
+//              原生控件的 accent-color(:1641)，从不作为压在玻璃上的文字色 ——
+//              把它一起加固的结果是 amber 的品牌琥珀 #d98a3d 被洗成 #efc8a6，
+//              给一个不存在的场景做补偿；
+//   --sel-bar / --line* 同理，是指示条与边线，不是文字。
+const GLASS_HARDEN_KEYS = ['text2', 'text3', 'up', 'down', 'ok', 'warn', 'error'];
+
+// 把前景色沿「远离底色」的方向推到 |Lc| 达标，走 OKLab 混色（与 ensureContrast
+// 同一条路）：色相与彩度尽量保住、主要动明度 —— 语义色推完还得认得出是橙是蓝。
+//
+// 不用二分：|Lc| 对混比**不是单调**的。前景若起步在底色的「另一侧」（如深底上比
+// 底还暗一点的弱字阶），往白推的过程里 |Lc| 会先降到 0（跨过底色）再升，二分会
+// 收敛到错的一侧。逐步扫描取第一个达标点，既避开这个坑，又天然给出最小位移。
+// 判定用**取整后**的十六进制值：未取整达标、取整后跌破是踩过的坑（§2.47）。
+function ensureApca(fgHex, bgHex, min) {
+  if (!/^#[0-9a-f]{6}$/i.test(fgHex || '') || !/^#[0-9a-f]{6}$/i.test(bgHex || '')) return fgHex;
+  if (Math.abs(apcaLc(fgHex, bgHex)) >= min) return fgHex;
+  const fg = hexToRgb(fgHex);
+  // 底色偏暗 → 往白推；偏亮 → 往黑推。0.4 的门限与 ensureContrast 同源。
+  const target = luminance(hexToRgb(bgHex)) < 0.4 ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+  const STEPS = 256; // 步长 ≈1/255，与通道量化同一格，再细没有意义
+  for (let i = 1; i <= STEPS; i++) {
+    const hex = rgbToHex(mixOk(fg, target, i / STEPS));
+    if (Math.abs(apcaLc(hex, bgHex)) >= min) return hex;
+  }
+  // 推到端点仍不达标：返回端点（纯白 / 纯黑），这是这个色相能给的极限。
+  // 不返回原色 —— 原色是**已知不达标**的那个值，端点至少是最接近达标的。
+  return rgbToHex(target);
+}
+
+// 加固后的令牌表 + 回执。回执（adjusted）不是可选的：guardTokens 当年的教训是
+// 「预览到的和存下来的不是一个东西」两头都不诚实，UI 要能把「这个色我替你推了」
+// 说出来（theme-ui 的 opFloorNote）。
+//
+// 缓存：拖滑杆不会走到这里（applyBackdropOnly 只重铺 backdrop、不重算令牌），
+// 但换肤 / 编辑器逐帧改色会 —— 一次 7 键 × 最多 256 步的 OKLab 往返不该白算两遍。
+//
+// 缓存的是**决定**（哪个键推成哪个值），不是整张令牌表。这个区别不是洁癖，是
+// 一个实测缺陷：键只能覆盖参与计算的那几个值（panel/panel2/text + 7 个字色），
+// 而整表里还有 accent / bg / line* / sel-bar 等一大票**穿过去**的键。缓存整表时，
+// 两套皮肤只要计算输入逐位相同、却在某个穿透键上不同（例如同一套深色底 + 字色、
+// 只有强调色不一样 —— 用户在编辑器里单独改 accent 就是这个形状），后来的那次会
+// 命中前一次的表，把**别人的** accent 一起拿回去上屏。单测实测到的就是这一幕：
+// 派生暗红的 accent #f0e5e2 被返回成 #f2ecea。
+// 把决定叠回调用方自己的表，穿透键就永远来自调用方，结构上不可能串味。
+const hardenCache = new Map();
+function glassHardenTokens(tokens) {
+  if (!tokens || !/^#[0-9a-f]{6}$/i.test(tokens.panel || '')) return { tokens, adjusted: [] };
+  const ck = [tokens.panel, tokens.panel2, tokens.text, ...GLASS_HARDEN_KEYS.map((k) => tokens[k])].join('|');
+  let plan = hardenCache.get(ck);
+  if (!plan) {
+    const bg = glassWorstComposite(tokens);
+    plan = [];
+    for (const k of GLASS_HARDEN_KEYS) {
+      if (!/^#[0-9a-f]{6}$/i.test(tokens[k] || '')) continue;
+      // 弱字阶单独一档：把它推到 45 等于取消这个层级（字阶会从 88/48/23 压成
+      // 90/75/55，层级信息全平）。见 GLASS_HARDEN_WEAK_LC。
+      const min = k === 'text3' ? GLASS_HARDEN_WEAK_LC : GLASS_HARDEN_LC;
+      const fixed = ensureApca(tokens[k], bg, min);
+      if (fixed.toLowerCase() !== String(tokens[k]).toLowerCase()) plan.push([k, fixed]);
+    }
+    // 上限只为防编辑器逐帧改色把表撑大；主题表数量级是个位数，1024 远够。
+    if (hardenCache.size > 1024) hardenCache.clear();
+    hardenCache.set(ck, plan);
+  }
+  const out = { ...tokens };
+  for (const [k, v] of plan) out[k] = v;
+  return { tokens: out, adjusted: plan.map(([k]) => k) };
 }
 
 // 写进 CSS 变量（applyBackdrop 用）。数值与守卫模型同源，不手抄两遍。
@@ -1031,6 +1164,112 @@ function backdropGuard(tokens, backdropLum, scrim, panelOpacity, lens = lensOf(t
   };
 }
 
+// ---------- 透明窗上的可读性：全局界面不透明度的漆层地板 ----------
+//
+// 上面那一整套（透镜 / 带 / 加固 / 守卫）管的都是「面板 vs 应用内底图」。它们对
+// **面板 vs 桌面**这件事是主动放弃管辖的，三处都写明过：透镜只在「置底 + 有底图」
+// 施加、无底图时 --paint-op 直接等于 --ui-opacity、地板 --panel-op-floor 只在有图
+// 的分支里参与。于是全局界面不透明度是一条**完全没有守卫的旁路**：窗口本身
+// transparent:true，滑杆拉低之后桌面和别的窗口直接顶到面板文字后面。
+// 2026-09-15 用户截图实测：没设底图 + 滑杆拉低，壁纸与另一个终端窗口的正文清晰
+// 地透在顶栏那行元信息与图表轴标签后面。
+//
+// 为什么此前三条验收链一条都没抓到：preview-v2 / _probe-glass 都在 Playwright 的
+// 无头页面里渲染，页面背后是浏览器的合成底（白 / 透明），**不存在「桌面」这个图层**；
+// 像素审计量的也是那张合成图。桌面亮度这个量在 webview 里根本采不到 —— 这既是
+// 当初把它排除在守卫之外的现实原因，也是这里必须取「最坏桌面」的原因：
+// 深色皮肤假设纯白桌面（亮字最难落脚），浅色皮肤假设纯黑，互为镜像。
+//
+// 判据是**相对保留**而不是绝对档位，这一条是本节的关键，也是唯一不会退化的形式：
+// 深色皮肤的弱字阶在**不透明**面板上本来就只有 Lc 23–25（那是字阶层级的设计意图），
+// 拿 APCA 的 30/45 这类绝对表去要求它，f=1（面板全不透明）时就已经不达标 ——
+// 实测五套皮肤里 plain / amber / lowcontrast 三套「全达标最小不透明度 = null」，
+// 也就是**连 1.0 都解不出来**。那正是 b0c3db2 修掉的那个缺陷的形状：判据无解 →
+// 地板顶到 1 → 滑杆被系统拿走。相对保留没有这个问题：地板处的对比一定 ≥ ρ 倍的
+// 不透明基线，而 ρ<1 让 f=1 恒过，所以扫描不可能退化。
+const UI_PAINT_RETAIN = 0.75;
+// 全局不透明度滑杆的下限（index.html 的 range min、applyUiOpacity 与 migrateState
+// 的钳制共用这一个数）。地板的推导要用到它：漆层地板管的是「漆」，窗口底色与底图
+// 仍然一路淡到这个下限 —— 桌面从缝隙、圆角外、底图后面透上来，那是滑杆的主要观感。
+const UI_OPACITY_MIN = 0.5;
+
+// 最坏桌面：桌面亮度在 webview 里采不到，只能取「对本皮肤方向最不利」的那一端。
+function worstDesktop(tokens) {
+  return isLightSkin(tokens) ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
+}
+
+// 文字实际压着的那个合成面。两种层结构（都按滑杆拖到下限、漆层落在 f 的最坏情形算）：
+//   主窗（两层漆）：.frame 先铺 --bg × u，各表面再铺 --panel × f
+//     ⟹ C = f·P + (1−f)·u·BG + (1−f)(1−u)·D，桌面权重 (1−f)(1−u)
+//   小窗 / 能量球（单层漆，solo）：面板直接压在桌面上，body 是透明的
+//     ⟹ C = f·P + (1−f)·D，桌面权重 (1−f)
+// 同一个 f 在两种结构下漏进来的桌面差一倍，所以地板必须分别算 —— 拿主窗那份去铺
+// 小窗，等于让小窗超出预算一倍。
+//
+// u 钉在下限而不是跟着当前滑杆值走：地板要是随 u 变，实测会**非单调** —— 漏光预算
+// 那一版里 plain 的地板在 u=0.68 触底 0.676、再回升到 u=0.50 处的 0.790，也就是
+// 「越往透明拖，面板越不透明」。那与「滑杆被系统拿走」是同一类缺陷。钉死在下限
+// 换来的是一条平地板：单调（对 u 恒定）、且因 u ≥ 0.5 有 (1−u) ≤ 0.5，桌面权重
+// 已经只有单层结构的一半。
+function uiComposite(tokens, surfHex, f, solo) {
+  const P = hexToRgb(surfHex);
+  const D = worstDesktop(tokens);
+  if (solo) return mix(P, D, 1 - f);
+  const u = UI_OPACITY_MIN;
+  const BG = hexToRgb(tokens.bg);
+  const rest = 1 - f;
+  return {
+    r: f * P.r + rest * u * BG.r + rest * (1 - u) * D.r,
+    g: f * P.g + rest * u * BG.g + rest * (1 - u) * D.g,
+    b: f * P.b + rest * u * BG.b + rest * (1 - u) * D.b,
+  };
+}
+
+// 参与判据的字色：实际会作为文字 / 图标色压在漆层上的那些（与 GLASS_HARDEN_KEYS
+// 同一口径，另外把 --text 也算进来 —— 这里没有「带的正文契约」替它兜着）。
+// --accent 仍然不在内：全仓库只作按钮底与 accent-color，从不作压在漆上的文字色。
+const UI_PAINT_KEYS = ['text', 'text2', 'text3', 'up', 'down', 'ok', 'warn', 'error'];
+
+// 漆层地板：桌面漏进来之后，每一档字色仍要保住它在**不透明面板**上那份对比的 ρ 倍。
+// 两档面板底色（--panel 卡片 / --panel-2 顶栏·rail·表头）都要过，取更严的那个 ——
+// 用户截图里最先糊的 `.top-meta`（顶栏那行「已采集 74:02:27 · 128 个进程」）与图表
+// 轴标签正是坐在 panel-2 上，而 panel-2 比 panel 凹一档。
+//
+// 不加「中调护栏」那条判据：它是明度带（Mica tonal band）在**归一化底图**上的规则，
+// 这条路上没有带，面板色就是皮肤的设计意图本身。更要紧的是它能在 f=1 处失败
+// （中调面板的自定义皮肤），那就又把地板顶到 1 —— 而实测五套皮肤的护栏预算
+// （λ 0.24–0.31）本来就比保留预算（0.075–0.11）宽一倍以上，加它对真实皮肤零影响、
+// 只带来退化风险。
+//
+// 扫描而不二分：|Lc| 对混比不是单调的（前景若起步在底色的另一侧，跨过底色时 |Lc|
+// 会先降到 0 再升），二分会收敛到错的一侧 —— 与 ensureApca 同一个坑、同一个对策。
+function uiPaintFloor(tokens, solo = false) {
+  const surfaces = [tokens.panel];
+  if (/^#[0-9a-f]{6}$/i.test(tokens.panel2 || '')) surfaces.push(tokens.panel2);
+  const targets = [];
+  for (const surf of surfaces) {
+    if (!/^#[0-9a-f]{6}$/i.test(surf || '')) continue;
+    for (const k of UI_PAINT_KEYS) {
+      const fg = tokens[k];
+      if (!/^#[0-9a-f]{6}$/i.test(fg || '')) continue;
+      // 基线 = 该字色在这块**不透明**面板上的实测对比，目标是它的 ρ 倍。
+      targets.push([fg, surf, Math.abs(apcaLc(fg, surf)) * UI_PAINT_RETAIN]);
+    }
+  }
+  if (!targets.length) return 1;
+  const meets = (f) => targets.every(([fg, surf, min]) => (
+    Math.abs(apcaLc(fg, rgbToHex(uiComposite(tokens, surf, f, solo)))) >= min - 1e-9
+  ));
+  // 从 1 往下扫 0.01 一格（与滑杆步长、CSS 两位小数同一格），取最后一个仍达标的 f。
+  let f = 1;
+  for (let i = 100; i >= 0; i--) {
+    const cand = i / 100;
+    if (!meets(cand)) break;
+    f = cand;
+  }
+  return f;
+}
+
 // ---------- 内置壁纸 ----------
 
 // 三张图此前躺在 ui/wallpapers/ 里没有任何代码引用（253 KB 死资源），
@@ -1207,6 +1446,11 @@ function applyTokens(tokens, opts = {}) {
   set('--accent', t.accent);
   set('--accent-ink', t.accentInk);
   set('--sel-bar', t.selBar);
+  // 透明窗上的漆层地板（uiPaintFloor）：与令牌同源、同一次上屏写入 —— 它只依赖
+  // 这张表（字色 × 面板色 × 皮肤方向），不依赖滑杆位置，所以拖滑杆不必重算，
+  // 换肤则必须重算。opts.solo 区分层结构：主窗两层漆、小窗/能量球一层漆
+  // （mini.js 传 solo: true），同一个 f 在单层结构下漏进来的桌面是两倍。
+  set('--ui-paint-floor', String(uiPaintFloor(t, !!opts.solo)));
   // colorScheme 跟着原生控件（滚动条、date input、勾选框）走
   const dark = luminance(hexToRgb(t.text)) > 0.5;
   root.style.colorScheme = dark ? 'dark' : 'light';
@@ -1426,7 +1670,12 @@ function configStorage() {
         try { return JSON.parse(localStorage.getItem('netpeek-theme') || 'null'); } catch { return null; }
       }
       const raw = await window.__TAURI__.core.invoke('load_theme_config');
-      try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+      try { return raw ? JSON.parse(raw) : null; } catch (e) {
+        // 配置文件损坏（Rust 侧已备份为 theme-config.json.corrupt-<ts> 并回退空串）。
+        // 这里必须出声：静默回退 = 用户自改的皮肤「凭空消失」还没任何提示。
+        console.warn('[NetPeek] 主题配置损坏，已回退默认值（原文件已备份，可手动找回）：', e);
+        return null;
+      }
     },
     async save(cfg) {
       if (!hasTauri) {
@@ -1739,9 +1988,16 @@ window.NetPeekTheme = {
   lensFromImage,
   LENS_DESIGN_OP,
   LENS_BODY_LC,
-  GLASS_TIERS,
-  GLASS_TIER_REL,
-  glassTierTargets,
+  GLASS_MID_MAX_DARK,
+  GLASS_MID_MIN_LIGHT,
+  GLASS_HARDEN_LC,
+  GLASS_HARDEN_WEAK_LC,
+  GLASS_HARDEN_KEYS,
+  glassContract,
+  glassComposite,
+  glassWorstComposite,
+  glassHardenTokens,
+  ensureApca,
   worstSurface,
   chromaComp,
   MIN_IMG_RANGE,
@@ -1749,6 +2005,12 @@ window.NetPeekTheme = {
   backdropFloor,
   backdropGuard,
   wrapFloor,
+  UI_PAINT_RETAIN,
+  UI_OPACITY_MIN,
+  UI_PAINT_KEYS,
+  worstDesktop,
+  uiComposite,
+  uiPaintFloor,
   scrimTint,
   isLightSkin,
   veilOf,

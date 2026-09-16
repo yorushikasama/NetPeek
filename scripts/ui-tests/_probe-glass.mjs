@@ -162,7 +162,8 @@ for (const mode of ['light', 'dark']) {
     // 面板滑杆拉到最低 + 切深浅（都走真实控件：设置页的外观分区），再回运行页量。
     await page.click('.ri[data-screen="settings"]');
     await page.waitForTimeout(500);
-    await page.click('.snav button[data-sec="appearance"]');
+    // 面板滑杆与深浅偏好现在在「背景」分区（外观屏拆成皮肤/背景两屏）
+    await page.click('.snav button[data-sec="background"]');
     await page.waitForTimeout(600);
     await page.evaluate(() => {
       const el = document.querySelector('#stdOpacity');
@@ -215,24 +216,38 @@ for (const mode of ['light', 'dark']) {
       const worst = light
         ? (T.luminance(p1) <= T.luminance(p2) ? tokens.panel : tokens.panel2)
         : (T.luminance(p1) >= T.luminance(p2) ? tokens.panel : tokens.panel2);
-      // 反解为什么退化：把原始 token、皮肤方向、以及各 t 处 meets() 的判定打出来。
+      // 反解为什么落在这里：把原始 token、皮肤方向、以及各 t 处两条判据的实测值
+      // 打出来。带的判据现在只有两条（正文契约 + 中调护栏），所以 trace 里
+      // 「lum 越界」与「lc[0] 不足」就是带端的全部成因 —— 不用再猜是哪个字阶卡的。
       const raw = tokens;
-      const tiersRaw = (light ? T.GLASS_TIERS.light : T.GLASS_TIERS.dark)
-        .map(([k, min]) => [k, min, raw[k], /^#[0-9a-f]{6}$/i.test(raw[k] || '')]);
+      const contract = T.glassContract(raw);
       const probeT = [0.05, 0.1, 0.2, 0.35, 0.5, 0.64, 0.8, 0.99];
       const trace = probeT.map((t) => {
         const c = comp(t, worst);
-        return [t, c.lum, c.lc];
+        // 每个 t 处标注两条判据各自过不过，省得回头拿 lum 去心算护栏
+        const okMid = contract.midMax != null ? c.lum <= contract.midMax
+          : (contract.midMin != null ? c.lum >= contract.midMin : true);
+        const okBody = c.lc[0] >= contract.bodyLc;
+        return [t, c.lum, c.lc, okMid ? 'mid✓' : 'mid✗', okBody ? 'body✓' : 'body✗'];
       });
-      // 自校准后的**实际**目标 = min(声明档位, 该档在最有利端实测对比 × GLASS_TIER_REL)
-      const tBest = light ? band[1] : band[0];
-      const bestLc = comp(tBest, worst).lc;
-      const eff = ['text', 'text2', 'text3'].map((k, i) => [
-        k, Math.round(Math.min(
-          (light ? T.GLASS_TIERS.light : T.GLASS_TIERS.dark).find(([kk]) => kk === k)?.[1] ?? 0,
-          T.GLASS_TIER_REL * bestLc[i],
-        ) * 10) / 10,
-      ]);
+      // 加固层的回执：哪些键被推了、推成什么、位移多少（第三代把「其余字阶达标」
+      // 从带里搬到了这里，所以量尺也得跟着搬 —— 否则探针只能看见带、看不见字色）。
+      const worstBg = T.glassWorstComposite(raw);
+      const hard = T.glassHardenTokens(raw);
+      const hardRows = T.GLASS_HARDEN_KEYS.map((k) => {
+        const before = raw[k];
+        const after = hard.tokens[k];
+        if (!/^#[0-9a-f]{6}$/i.test(before || '')) return [k, before, '(跳过：非 hex)'];
+        const a = rgbOf(before);
+        const b = rgbOf(after);
+        const shift = Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+        return [
+          k, before, after,
+          Math.round(Math.abs(T.apcaLc(before, worstBg))),
+          Math.round(Math.abs(T.apcaLc(after, worstBg))),
+          shift,
+        ];
+      });
       return {
         light, lens: lf, op: Math.round(op * 1000) / 1000,
         band: band.map((x) => Math.round(x * 1000) / 1000),
@@ -242,7 +257,8 @@ for (const mode of ['light', 'dark']) {
         cardBg: csCard ? csCard.backgroundColor : '',
         worstLo: comp(band[0], worst),
         worstHi: comp(band[1], worst),
-        isLight: T.isLightSkin(raw), raw, tiersRaw, trace, eff, bestLc, rel: T.GLASS_TIER_REL,
+        isLight: T.isLightSkin(raw), raw, trace,
+        contract, worstBg, hardRows, hardAdjusted: hard.adjusted,
       };
     });
     const box = await page.evaluate(() => {
@@ -264,9 +280,11 @@ for (const mode of ['light', 'dark']) {
       + ` 亮端 lum=${info.worstHi.lum} Lc=${JSON.stringify(info.worstHi.lc)}`);
     push(`    底图在面板上的形: meanΔ=${mm.mean} p2p=${mm.p2p} sd=${mm.sd}  (box=${JSON.stringify(box)})`);
     push(`    isLightSkin=${info.isLight} raw=${JSON.stringify(info.raw)}`);
-    push(`    tiers=${JSON.stringify(info.tiersRaw)}  (k, 声明档位, 实值, 是否通过 hex 过滤)`);
-    push(`    REL=${info.rel} 自校准后实际目标=${JSON.stringify(info.eff)} (最有利端实测 Lc=${JSON.stringify(info.bestLc)})`);
-    push(`    meets 轨迹 t→[lum, [text,text2,text3]|Lc]: ${JSON.stringify(info.trace)}`);
+    push(`    契约=${JSON.stringify(info.contract)}  (bodyLc=正文档，midMax/midMin=中调护栏，另一侧为 null)`);
+    push(`    加固底色（带最不利端的合成面）=${info.worstBg} 被推的键=${JSON.stringify(info.hardAdjusted)}`);
+    push(`    加固明细 [键, 原色, 加固后, 原 Lc, 后 Lc, 最大通道位移]:`);
+    for (const r of info.hardRows) push(`      ${JSON.stringify(r)}`);
+    push(`    带端判据轨迹 t→[lum, [text,text2,text3]|Lc, 护栏, 正文]: ${JSON.stringify(info.trace)}`);
     await page.close();
   }
 }

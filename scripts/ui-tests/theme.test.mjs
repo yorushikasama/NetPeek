@@ -7,7 +7,12 @@
 // 所以这里重点锁三件事：resolveSkin 认得全部来源、派生键跟着核心键走、
 // 上屏的颜色一定过对比度守卫。
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadScripts, eq, ok, section, report } from './_harness.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 // theme.js 的色度学（luminance/contrast）委托给 vendor/chroma.min.js（UMD 在沙箱里
 // 挂到 window 上），所以 vendor 必须和 theme.js 一起进沙箱 —— 这里测的就是真实链路。
@@ -108,14 +113,30 @@ section('guardTokens：上屏的颜色一定过对比度');
   eq(good.adjusted.length, 0, '出厂皮肤本来就合格，不该被动一个键');
 }
 
-section('glass lens：带端由可读性契约反解，带宽就是底图的形');
+section('glass lens：带 = 正文契约 + 中调护栏，带宽就是底图的形');
 {
-  // 这一节替换掉「窄带」时代的契约。旧版把带写死成浅色 [0.85, 1] 通道 —— 一条
-  // 0.15 宽、贴着纯白的窄带，底图自己的形在里面只剩几个灰阶（实测面板上只剩
-  // p2p 6/255），用户因此连着两次报「不透明度拉到最低也透不出底图」。
-  // 现在带端由 theme.lensBand 反解：在设计不透明度（取滑杆下限，于是契约在整个
-  // 滑杆行程上都成立）下，最不利那档面板上 GLASS_TIERS 每一档都要达标。
-  // 带宽 = 底图的形能用的空间，所以这一节主要钉「带够宽」+「带端刚好卡在那条线上」。
+  // 这一节的判据在 2026-09-15 之后又换过一次，换的理由值得留在这里：
+  //
+  // 【第一代】带写死成浅色 [0.85, 1] 通道 —— 一条 0.15 宽、贴着纯白的窄带，底图的形
+  //   在里面只剩几个灰阶（实测面板上 p2p 6/255）。用户两次报「不透明度拉到最低也
+  //   透不出底图」。
+  // 【第二代】带端改成按「GLASS_TIERS 每一档都达标」反解，并为了让深色那枚贴天花板的
+  //   中灰有解，加了 GLASS_TIER_REL = 0.75 的自校准折扣。带宽拿回来了，但留下两个洞：
+  //   ① 折扣实测**不是兜底而是无条件 25% 打折**（plain 的 text2 物理上限 50.3、声明
+  //      45 明明可达，实际目标却被打到 37.7），而且目标随皮肤自身对比一起塌陷、没有
+  //      下限 —— 构造一套低对比深色皮肤，目标会掉到 text 29.6 / text2 14.0 而系统
+  //      认为完全达标；
+  //   ② 契约只声明了 text / text2（深色）两档，text3 与全部语义色**不在里面**，实测
+  //      在默认 plain 皮肤上 text3 只有 Lc 13.1、error 32.6 —— 渲染了但看不见。
+  //   而把缺失档位塞回带里是死路：深色侧 text3@32 直接无解（带退化 → 透镜 null →
+  //   地板顶到 1，原地重现 20:00 那个缺陷）、放宽到 25 带宽从 0.305 塌到 0.031。
+  // 【第三代 = 现在】带**只**承载两条与「表面本身」有关的判据：正文契约（≥ LENS_BODY_LC）
+  //   与中调护栏（合成面亮度留在本方向的表面区里）。其余字色改由 glassHardenTokens
+  //   对着「带的最不利端上的合成面」逐键加固 —— 不花带宽。实测两个轴同时变好：
+  //   带宽 plain 0.305 → 0.389、light 0.182 → 0.367，而全部字色首次真正达标。
+  //
+  // 所以这一节钉的是：带由那两条判据决定（而不是被某个字色偶然卡住）、带够宽、
+  // 折扣不再存在、退化在结构上不可达。
   const light = T.expandTokens({
     bg: '#f5e4df', panel: '#f8eeeb', text: '#2a2c30', accent: '#2a2c30',
     down: '#8d5621', up: '#39668f', ok: '#1f6f44', warn: '#8a6608', error: '#b3352b',
@@ -125,54 +146,51 @@ section('glass lens：带端由可读性契约反解，带宽就是底图的形'
     down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
   }, { tightRamp: true });
 
-  const hexOf = (c) => '#' + ['r', 'g', 'b'].map((k) => Math.round(
-    Math.min(255, Math.max(0, c[k])),
-  ).toString(16).padStart(2, '0')).join('');
-  // 最不利那档面板：浅色皮肤怕「更暗」（暗字没地方落）取更暗的，深色取更亮的
-  const worstSurf = (tokens) => {
-    const p1 = T.hexToRgb(tokens.panel);
-    const p2 = T.hexToRgb(tokens.panel2);
-    const lt = T.isLightSkin(tokens);
-    return lt
-      ? (T.luminance(p1) <= T.luminance(p2) ? p1 : p2)
-      : (T.luminance(p1) >= T.luminance(p2) ? p1 : p2);
+  // 判据直接走实现导出的那一份（glassContract / glassComposite），测试不重抄公式 ——
+  // 两处口径一旦漂移，重抄的那份会假装通过（这条纪律从第二代沿用下来，它是对的）。
+  const meetsAt = (tokens, t) => {
+    const { bodyLc, midMax, midMin } = T.glassContract(tokens);
+    const hex = T.glassComposite(tokens, t);
+    const L = T.luminance(T.hexToRgb(hex));
+    if (midMax != null && L > midMax + 1e-9) return false;
+    if (midMin != null && L < midMin - 1e-9) return false;
+    return Math.abs(T.apcaLc(tokens.text, hex)) >= bodyLc - 0.5;
   };
-  // 带上的灰 × 最不利面板，按设计不透明度调和 → 各档字阶的 Lc
-  const lcsAt = (tokens, t) => {
-    const p = worstSurf(tokens);
-    const op = T.LENS_DESIGN_OP;
-    const g = t * 255;
-    const comp = { r: g + (p.r - g) * op, g: g + (p.g - g) * op, b: g + (p.b - g) * op };
-    const hex = hexOf(comp);
-    const tiers = T.isLightSkin(tokens) ? T.GLASS_TIERS.light : T.GLASS_TIERS.dark;
-    return tiers.map(([k, min]) => [k, Math.abs(T.apcaLc(tokens[k], hex)), min]);
-  };
-  // 自校准后的**实际**目标 = min(声明档位, 该档在「最有利端」实测对比 × GLASS_TIER_REL)。
-  // 判定必须用它，不能直接用声明档位 —— 深色那枚中灰的物理上限低于声明档位，拿声明
-  // 档位判会永远判不过，这正是旧实现的死结：带退化成一个点。
-  // 实际目标直接取实现导出的那一份（glassTierTargets），测试不重抄一遍公式 ——
-  // 两处口径一旦漂移，重抄的那份会假装通过。
-  const effTiers = (tokens) => T.glassTierTargets(tokens);
-  const tiersOkAt = (tokens, t) => {
-    const eff = new Map(effTiers(tokens));
-    return lcsAt(tokens, t).every(([k, v]) => v >= (eff.get(k) ?? 0) - 0.5);
-  };
-  const brief = (rows) => JSON.stringify(rows.map(([, v]) => Math.round(v)));
+  const bodyAt = (tokens, t) => Math.abs(T.apcaLc(tokens.text, T.glassComposite(tokens, t)));
+  const midAt = (tokens, t) => T.luminance(T.hexToRgb(T.glassComposite(tokens, t)));
 
   eq(T.LENS_DESIGN_OP, T.MIN_PANEL_OP, '带端按滑杆下限反解（契约在整个滑杆行程上成立）');
+  eq(T.GLASS_TIER_REL, undefined, '自校准折扣已删除（它把契约变成了永不失败的判据）');
+  eq(T.glassTierTargets, undefined, '折扣后的「实际目标」表随之下线');
 
   const [l0, l1] = T.lensBand(light);
   eq(l1, 0.99, '浅色带顶留一点白（不烧成纯色）');
-  ok(tiersOkAt(light, l0), `浅色带底上各字阶达标（Lc ${brief(lcsAt(light, l0))}）`);
-  ok(!tiersOkAt(light, l0 - 0.02), '浅色带底不是白送的：再往下 0.02 就有档位不达标');
+  ok(meetsAt(light, l0), `浅色带底满足两条判据（正文 Lc ${bodyAt(light, l0).toFixed(0)}、合成面 L ${midAt(light, l0).toFixed(3)}）`);
+  ok(!meetsAt(light, l0 - 0.02), '浅色带底不是白送的：再往下 0.02 就有判据不成立');
   ok(l1 - l0 >= 0.30,
     `浅色带够宽（${(l1 - l0).toFixed(3)} ≥ 0.30）—— 这是「底图的形」能用的空间`);
+  // 第三代的带宽必须**明显高于**第二代（这套 token 上第二代实测 0.182）——
+  // 换判据不是拿带宽换可读性，两个轴要同时变好，否则这次重构不值得做。
+  // 门槛 0.33 对着本节这套派生浅皮肤的实测 0.341 留一点余量（≈1.9 倍于第二代）。
+  // 注意别拿别的皮肤的实测值来定这里的门槛：内置 light 是 0.367、这套粉白派生皮肤
+  // 是 0.341，带宽本来就随 panel/panel-2 与正文色一起变。
+  ok(l1 - l0 >= 0.33, `浅色带宽远超第二代（${(l1 - l0).toFixed(3)} ≥ 0.33，同套 token 第二代实测 0.182）`);
 
   const [d0, d1] = T.lensBand(dark);
   eq(d0, 0.05, '深色带底留一点黑（暗部不压死、形还在）');
-  ok(tiersOkAt(dark, d1), `深色带顶上各字阶达标（实测 Lc ${brief(lcsAt(dark, d1))}）`);
-  ok(!tiersOkAt(dark, d1 + 0.02), '深色带顶不是白送的：再往上 0.02 就有档位不达标');
-  ok(d1 - d0 >= 0.20, `深色带够宽（${(d1 - d0).toFixed(3)} ≥ 0.20）`);
+  ok(meetsAt(dark, d1), `深色带顶满足两条判据（正文 Lc ${bodyAt(dark, d1).toFixed(0)}、合成面 L ${midAt(dark, d1).toFixed(3)}）`);
+  ok(!meetsAt(dark, d1 + 0.02), '深色带顶不是白送的：再往上 0.02 就有判据不成立');
+  ok(d1 - d0 >= 0.30, `深色带够宽（${(d1 - d0).toFixed(3)} ≥ 0.30，旧实测 0.305）`);
+
+  // 护栏是深色侧真正卡住带的那条判据（正文在这一带上余量很大）：合成面必须仍读作
+  // 一块深色表面。护栏一旦形同虚设，带会一路推到中调灰 —— 实测那会让加固的位移
+  // 从 ≤50 涨到 75–124/255，字阶被压平成 90/75/55（层级信息全没）。
+  ok(midAt(dark, d1) <= T.GLASS_MID_MAX_DARK + 1e-9,
+    `深色带顶由中调护栏定住（合成面 L ${midAt(dark, d1).toFixed(3)} ≤ ${T.GLASS_MID_MAX_DARK}）`);
+  ok(bodyAt(dark, d1) > T.LENS_BODY_LC,
+    `深色侧正文在带顶上仍有余量（Lc ${bodyAt(dark, d1).toFixed(0)} > ${T.LENS_BODY_LC}）—— 所以卡住带的是护栏`);
+  ok(midAt(light, l0) >= T.GLASS_MID_MIN_LIGHT - 1e-9,
+    `浅色带底仍读作浅色表面（合成面 L ${midAt(light, l0).toFixed(3)} ≥ ${T.GLASS_MID_MIN_LIGHT}）`);
 
   // bandOf 与 lensBand 同源（前者的通道端就是后者的亮度版），审计口径才不会漂
   ok(Math.abs(T.bandOf(light)[0] - T.luminance({ r: l0 * 255, g: l0 * 255, b: l0 * 255 })) < 1e-9,
@@ -188,18 +206,18 @@ section('glass lens：带端由可读性契约反解，带宽就是底图的形'
     eq(gl.autoDim, 0, `浅色派生 + 底图亮度 ${L}：不铺自动纱`);
     const gd = T.backdropGuard(dark, L, 0.30, T.MIN_PANEL_OP);
     eq(gd.floor, T.MIN_PANEL_OP, `深色派生 + 底图亮度 ${L}：地板退回滑杆下限`);
-    eq(gd.autoDim, 0, `深色派生 + 底图亮度 ${L}：不铺自动压暗（带顶已经压在契约线上）`);
+    eq(gd.autoDim, 0, `深色派生 + 底图亮度 ${L}：不铺自动压暗（带顶已经压在护栏上）`);
   }
 
-  // —— 用户第二次报缺陷的回归锁（深色那一半） ——
-  // 实测来源：2026-09-15 用户壁纸（橙红火焰）派生出的深色皮肤，token 实测为
+  // —— 2026-09-15 20:00 那个缺陷的回归锁（深色变全不透明） ——
+  // 实测来源：用户壁纸（橙红火焰）派生出的深色皮肤，token 实测为
   //   panel #1e130f / panel2 #0e0604 / text #f0e5e2 / text2 #9b8f8b
-  // 这枚中灰次要字压在近黑底上，|Lc| 的物理上限只有 ≈43（连纯黑也只给 43.3），
-  // 而 GLASS_TIERS.dark 当时声明 45 —— 契约无解。旧实现无解时返回退化的
-  // [0.05,0.05]，lensParams 因斜率 0 返回 null，lensOf 变 null，backdropGuard
-  // 退回「无透镜」分支把面板地板顶到 1：深色面板全不透明，底图彻底消失
-  // （像素量尺实测 p2p 0/255 —— 就是用户那句「现在深色也一样了」）。
-  // 自校准之后下面每一条都必须同时成立，缺一条就是缺陷复发。
+  // 第一代实现里 text2 进了带的反解，而这枚中灰压在近黑底上 |Lc| 物理上限只有 ≈43、
+  // 声明档位却是 45 —— 契约无解 → 带退化成 [0.05,0.05] → lensParams 斜率 0 返回 null
+  // → lensOf 变 null → backdropGuard 走「无透镜」分支把地板顶到 1：面板全不透明，
+  // 底图彻底消失（像素量尺实测 p2p 0/255，就是用户那句「现在深色也一样了」）。
+  // 第三代从**结构上**免疫：text2 根本不在带的判据里（它归加固），而带的两条判据
+  // 只涉及 text 与 panel/panel-2。下面每一条都必须成立。
   const userDark = {
     ...dark,
     bg: '#140906', panel: '#1e130f', panel2: '#0e0604',
@@ -207,24 +225,176 @@ section('glass lens：带端由可读性契约反解，带宽就是底图的形'
   };
   eq(T.isLightSkin(userDark), false, '实测深色皮肤：方向判为深色（亮字压暗底）');
   const [u0, u1] = T.lensBand(userDark);
-  ok(u1 - u0 >= 0.20,
+  ok(u1 - u0 >= 0.30,
     `实测深色皮肤：带不退化成点（${u0.toFixed(3)} → ${u1.toFixed(3)}，宽 ${(u1 - u0).toFixed(3)}）`);
   const uLens = T.lensOf(userDark);
   ok(uLens !== null, '实测深色皮肤：透镜非空（否则守卫退回「无透镜」把面板顶成全不透明）');
   ok(uLens.contrast > 0 && uLens.brightness > 0, '实测深色皮肤：透镜参数有效');
-  const uEff = new Map(effTiers(userDark));
-  ok(uEff.get('text2') < 45 && uEff.get('text2') > 0,
-    `实测深色皮肤：次要字档被自校准松到 ${uEff.get('text2').toFixed(1)}（物理上限 ≈43，声明 45 无解）`);
-  eq(uEff.get('text'), 60, '实测深色皮肤：正文档位余量充足，自校准不动它');
   const ug = T.backdropGuard(userDark, 0.06, 0.2, T.MIN_PANEL_OP);
   eq(ug.floor, T.MIN_PANEL_OP, '实测深色皮肤：地板仍是滑杆下限（面板不会变成全不透明）');
-  eq(ug.autoDim, 0, '实测深色皮肤：不铺自动补偿（滑杆不被拿走）');
-  // 兜底本身也不能再退化成「没有透镜」：契约自校准后走不到，但形状必须是有效透镜
-  const wide = { ...userDark, text2: '#1e130f' };   // 次要字与面板同色 → 物理对比为 0
-  const wLens = T.lensOf(wide);
-  ok(wLens !== null && wLens.contrast > 0,
-    '病态 token（次要字与面板同色）：兜底仍是有效透镜，绝不返回 null');
-  ok(T.lensBand(wide)[1] - T.lensBand(wide)[0] > 0, '病态 token：带仍有正宽度');
+  eq(ug.autoDim, 0, '实测深池皮肤：不铺自动补偿（滑杆不被拿走）');
+  // 那枚中灰现在由加固接手：它在合成面上必须真的达标（第二代是「自校准松到 32」，
+  // 也就是承认它不达标然后把标准降下来 —— 这次是把颜色推上去）。
+  const uh = T.glassHardenTokens(userDark).tokens;
+  const uBg = T.glassWorstComposite(userDark);
+  ok(Math.abs(T.apcaLc(uh.text2, uBg)) >= T.GLASS_HARDEN_LC - 0.5,
+    `实测深色皮肤：那枚中灰次要字被加固到 Lc ${Math.abs(T.apcaLc(uh.text2, uBg)).toFixed(1)} ≥ ${T.GLASS_HARDEN_LC}（旧实现是把档位降到 32）`);
+
+  // —— 病态 token 的两条兜底 ——
+  // ① 次要字与面板同色（物理对比 0）：它现在不参与带的反解，所以带完全不受影响，
+  //    而加固仍要把它推到达标。
+  const same = { ...userDark, text2: '#1e130f' };
+  const sLens = T.lensOf(same);
+  ok(sLens !== null && sLens.contrast > 0,
+    '病态 token（次要字与面板同色）：仍是有效透镜，绝不返回 null');
+  ok(Math.abs(T.lensBand(same)[1] - u1) < 1e-9,
+    '病态 token：带与正常皮肤逐位相同（字色不再影响带 —— 这是第三代的结构性收益）');
+  const sh = T.glassHardenTokens(same).tokens;
+  ok(Math.abs(T.apcaLc(sh.text2, T.glassWorstComposite(same))) >= T.GLASS_HARDEN_LC - 0.5,
+    '病态 token：同色次要字被加固层救回达标');
+  // ② 正文本身病态（与面板同色 → 正文契约在任何 t 上都不可能满足）：必须退化成
+  //    恒等透镜（整条带），而不是 null。「宁可不归一化，也不能没有透镜」。
+  const badBody = { ...userDark, text: '#1e130f' };
+  const bLens = T.lensOf(badBody);
+  ok(bLens !== null && bLens.contrast > 0,
+    '正文病态：兜底仍是有效透镜（退化成恒等透镜，不返回 null）');
+  ok(T.lensBand(badBody)[1] - T.lensBand(badBody)[0] > 0, '正文病态：带仍有正宽度');
+}
+
+section('玻璃加固：合成面上的字色被推到达标，且不动带、不动层级');
+{
+  // 这一节是第三代方案的主体验收。加固解决的是一个实测缺陷：默认 plain 皮肤 + 任意
+  // 底图，除 text 之外**所有**字色在合成面上都不达标（text3 Lc 13.1、error 32.6、
+  // up 39.7），而单测过去发现不了 —— 因为契约里根本没有它们。
+  const CASES = [
+    ['plain（默认皮肤，深）', T.SKINS.plain.tokens],
+    ['amber（深）', T.SKINS.amber.tokens],
+    ['light（浅）', T.SKINS.light.tokens],
+    ['派生暗红（深）', T.expandTokens({
+      bg: '#140906', panel: '#1e130f', text: '#f0e5e2', accent: '#f0e5e2',
+      down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+    }, { tightRamp: true })],
+    ['派生亮（浅）', T.expandTokens({
+      bg: '#f6f7f8', panel: '#fbfbfc', text: '#1b2027', accent: '#1b2027',
+      down: '#b45a10', up: '#2d6ea8', ok: '#1f7a4d', warn: '#8a6410', error: '#a8352b',
+    }, { tightRamp: true })],
+  ];
+
+  for (const [name, tokens] of CASES) {
+    const bg = T.glassWorstComposite(tokens);
+    const { tokens: hard } = T.glassHardenTokens(tokens);
+    for (const k of T.GLASS_HARDEN_KEYS) {
+      const min = k === 'text3' ? T.GLASS_HARDEN_WEAK_LC : T.GLASS_HARDEN_LC;
+      const lc = Math.abs(T.apcaLc(hard[k], bg));
+      ok(lc >= min - 0.5, `${name} · ${k}：合成面上 Lc ${lc.toFixed(1)} ≥ ${min}`);
+    }
+    // 正文由带的契约保证，加固不该动它（动了就是重复劳动 + 位移白付）
+    eq(hard.text, tokens.text, `${name}：正文不被加固（它归带的正文契约）`);
+    // 强调色只作背景（按钮底 / 开关 / 选区），不是压在玻璃上的文字 —— 加固它的后果
+    // 实测是 amber 的品牌琥珀 #d98a3d 被洗成 #efc8a6，给一个不存在的场景做补偿。
+    eq(hard.accent, tokens.accent, `${name}：强调色不被加固（它只作背景）`);
+    // 字阶层级必须保住：加固是「把不可读的推到可读」，不是「把三档压成一档」
+    const lc2 = Math.abs(T.apcaLc(hard.text2, bg));
+    const lc3 = Math.abs(T.apcaLc(hard.text3, bg));
+    ok(Math.abs(T.apcaLc(hard.text, bg)) > lc2 && lc2 > lc3,
+      `${name}：字阶顺序仍是 text > text2 > text3（${Math.abs(T.apcaLc(hard.text, bg)).toFixed(0)}/${lc2.toFixed(0)}/${lc3.toFixed(0)}）`);
+    // 位移上限：加固走 OKLab（保色相、主要动明度），语义色推完还得认得出是橙是蓝。
+    // 实测最大位移 55/255（派生亮皮肤的 down）；门槛留到 70 给派生皮肤余量。
+    let maxShift = 0;
+    for (const k of T.GLASS_HARDEN_KEYS) {
+      const a = T.hexToRgb(tokens[k]);
+      const b = T.hexToRgb(hard[k]);
+      maxShift = Math.max(maxShift, Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+    }
+    ok(maxShift <= 70, `${name}：最大通道位移 ${maxShift}/255 ≤ 70（保住色相与可辨识度）`);
+    // 幂等：加固后的表再加固一遍不该再动。这条同时证明「加固不移动带」——
+    // 带只看 text + panel/panel-2，而加固只动 text2/text3/语义色，两边输入不相交。
+    eq(T.glassHardenTokens(hard).adjusted.length, 0, `${name}：加固是幂等的（不存在迭代收敛问题）`);
+    ok(Math.abs(T.lensBand(hard)[0] - T.lensBand(tokens)[0]) < 1e-9
+      && Math.abs(T.lensBand(hard)[1] - T.lensBand(tokens)[1]) < 1e-9,
+      `${name}：加固前后带逐位相同（加固不反过来移动带）`);
+  }
+
+  // 弱字阶的档位是**刻意**比其他键低的：它的设计意图就是「弱」（三套出厂皮肤在纯
+  // 面板上只有 Lc 23–25）。把它一起推到 45 等于取消这个层级 —— 实测字阶会从
+  // 88/48/23 压成 90/75/55。所以这里锁住「两档不同」这个设计决策本身。
+  ok(T.GLASS_HARDEN_WEAK_LC < T.GLASS_HARDEN_LC,
+    `弱字阶单独一档（${T.GLASS_HARDEN_WEAK_LC} < ${T.GLASS_HARDEN_LC}）：保住「弱」这个层级`);
+  // 下限锚在 30，而 30 不是随手取的：它是 APCA 对「装饰性部件」的硬地板，也正是
+  // preview-v2 像素审计那条 `below30 === 0` 用的同一个数。两处若不同源，模型层会
+  // 判过、像素层会判不过（或反过来），而那种矛盾最难查 —— 两边都「有断言」。
+  ok(T.GLASS_HARDEN_WEAK_LC >= 30,
+    `弱字阶不低于 APCA 装饰线（${T.GLASS_HARDEN_WEAK_LC} ≥ 30，与像素审计的 below30 同源；旧实测 7.6–13.9）`);
+
+  // 加固前的实测缺陷留档：这几个数就是这一节存在的理由，被修好之后也要能被读到。
+  {
+    const p = T.SKINS.plain.tokens;
+    const bg = T.glassWorstComposite(p);
+    ok(Math.abs(T.apcaLc(p.text3, bg)) < 25,
+      `（缺陷留档）plain 未加固的 text3 在合成面上只有 Lc ${Math.abs(T.apcaLc(p.text3, bg)).toFixed(1)}`);
+    ok(Math.abs(T.apcaLc(p.error, bg)) < 45,
+      `（缺陷留档）plain 未加固的 error 只有 Lc ${Math.abs(T.apcaLc(p.error, bg)).toFixed(1)}`);
+  }
+
+  // ensureApca 的两条性质（加固的引擎）：
+  // ① 已达标的不动 —— 位移一格都是白付的；
+  // ② |Lc| 对混比**不单调**（前景起步在底色另一侧时会先降到 0 再升），所以实现走
+  //    逐步扫描而不是二分。这条用「深底上比底还暗的弱字」验证：二分会收敛到错的一侧。
+  const bg2 = '#58595b';
+  eq(T.ensureApca('#ffffff', bg2, 45), '#ffffff', '已达标的前景色不动');
+  const pushed = T.ensureApca('#4a4b4d', bg2, 45); // 比底色更暗一点 → 跨零点
+  ok(Math.abs(T.apcaLc(pushed, bg2)) >= 44.5, `跨零点的前景也能推到达标（Lc ${Math.abs(T.apcaLc(pushed, bg2)).toFixed(1)}）`);
+  eq(T.ensureApca('bad', bg2, 45), 'bad', '非法输入原样返回，不抛');
+}
+
+section('贴膜模式复用加固：贴膜地板面上的字色也达标（渲染路径覆盖）');
+{
+  // 加固的接线（theme-ui 的 glassHardenActive）曾经是「只在置底 + 有底图」，贴膜
+  // 模式被整段跳过 —— 而贴膜的浓度地板（wrapFloor）只守 text/text2，弱字阶与语义色
+  // 不在判据里，实测贴膜地板面上 text3 只有 Lc 20–23、error 40–42。
+  // 这一节把「渲染路径」列清楚（置底 / 贴膜 / 无图 / 小窗各走哪份表），再逐面扫描
+  // 贴膜地板，断言加固后的字色在其上全部达标 —— 它同时是覆盖性检查里「每个令牌都
+  // 有负责人」那节的补位：那节只数令牌、不数路径，贴膜这个洞就是靠这条补出来的。
+  // 贴膜 + 底图是唯一需要加固的贴膜路径：膜把面板稀释、text2 靠浓度地板兜住而
+  // text3/语义色没有兜底（实测 text3 20–23、error 40–42）。无图贴膜（膜退场、表面
+  // = 纯 panel 实底）与无图置底、小窗同属「实底」路径 —— 出厂皮肤手写的字阶就是
+  // 设计意图，加固不该生效（theme-ui 的 glassHardenActive 收底图地址、无图为假）。
+  // 无图这条**接线**锁不在模型层：它是 theme-ui 里一行 `!!bg`，这里只锁得住「扫描
+  // 覆盖面比实底更狠」—— 实底不在扫描点集里，硬比会得到「面板更可读/更不可读」
+  // 都有的矛盾结论（实测 lum=0.02 的地板面反而比 panel 好读 0.2）。若哪天有人把
+  // 加固的开关按模式重新关回贴膜，这条扫描的贴膜面会当场全红 —— 那才是接线回归
+  // 能被模型层抓住的形态。
+  const CASES = [
+    ['plain（默认皮肤，深）', T.SKINS.plain.tokens],
+    ['amber（深）', T.SKINS.amber.tokens],
+    ['light（浅）', T.SKINS.light.tokens],
+    ['派生暗红（深）', T.expandTokens({
+      bg: '#140906', panel: '#1e130f', text: '#f0e5e2', accent: '#f0e5e2',
+      down: '#f0963f', up: '#62a9e8', ok: '#4cc38a', warn: '#e5b567', error: '#e57373',
+    }, { tightRamp: true })],
+    ['派生亮（浅）', T.expandTokens({
+      bg: '#f6f7f8', panel: '#fbfbfc', text: '#1b2027', accent: '#1b2027',
+      down: '#b45a10', up: '#2d6ea8', ok: '#1f7a4d', warn: '#8a6410', error: '#a8352b',
+    }, { tightRamp: true })],
+  ];
+
+  for (const [name, tokens] of CASES) {
+    const hard = T.glassHardenTokens(tokens).tokens;
+    // 逐面扫描：膜亮度整段 [0,1]（步长 0.02），每档先取该图下的浓度地板，再在地板
+    // 面上量字色。贴膜的地板判据只守 text2（深）或 text/text2（浅），硬化推亮后的
+    // text2 只会更达标 —— 地板面是「浓度已按原表抬到 text2 达标」的面，正是字色
+    // 实际落地的面。
+    for (let i = 0; i <= 50; i++) {
+      const lum = i / 50;
+      const op = T.wrapFloor(tokens, lum, 0.4);
+      const heff = T.effectivePanel(hard, lum, 0, op, undefined, null);
+      for (const k of T.GLASS_HARDEN_KEYS) {
+        const min = k === 'text3' ? T.GLASS_HARDEN_WEAK_LC : T.GLASS_HARDEN_LC;
+        const lc = Math.abs(T.apcaLc(hard[k], heff));
+        ok(lc >= min - 0.5, `${name} · lum=${lum.toFixed(2)} floor=${op.toFixed(2)}：加固后 ${k} 在地板面上 Lc ${lc.toFixed(1)} ≥ ${min}`);
+      }
+    }
+  }
 }
 
 section('自适应透镜（auto-levels）：把底图自己的灰范围铺满明度带');
@@ -402,24 +572,39 @@ section('薄面板原地达标：滑杆拉到底仍达标');
     `薄面板合成面落在玻璃带内（L ${l.toFixed(3)} ∈ [${bLo.toFixed(3)}, ${bHi.toFixed(3)}]）`);
 
   // —— 深色那一半（用户第二次报缺陷的另一半） ——
-  // 用实测的深色 token。透镜自校准把**次要字**档松到 ≈32（那枚中灰的物理上限只有
-  // ≈43，声明 45 无解），但**正文**（近白 #f0e5e2）档必须仍 ≥60 —— 这是「放宽次要字
-  // 换底图的形」这笔交易的下限，也是深色玻璃上用户真能感觉到的可读性。同时地板必须
-  // 仍是滑杆下限：地板一介入，面板就全不透明，底图又没了。
+  // 用实测的深色 token。这一段的判据在第三代换了「由谁负责」：
+  //   正文（近白 #f0e5e2）仍由**带的契约**保证 ≥60 —— 这是深色玻璃上用户真能感觉到
+  //     的可读性，也是带宽这笔交易的下限；
+  //   次要字（那枚中灰 #9b8f8b）不再由带负责。第二代是「承认它不达标、把档位松到
+  //     32」，实测这仍然不够：底图亮度 1 时它在实际合成面上只有 Lc 30.0，连松过的
+  //     32 都跌破 —— 也就是说自校准那条路连自己降低后的标准都守不住。第三代改成把
+  //     颜色**推上去**（glassHardenTokens），推完实测 50.4–63.4，全程高于 45。
+  // 所以下面量的是**加固后**的那张表：它才是真正上屏的令牌（theme-ui.applyCurrent
+  // 在置底 + 有底图时写的就是它）。拿原始 token 量等于量了一张不会上屏的表。
   const duser = {
     ...light,
     bg: '#140906', panel: '#1e130f', panel2: '#0e0604',
     text: '#f0e5e2', text2: '#9b8f8b', text3: '#6a5e5a',
   };
+  const dhard = T.glassHardenTokens(duser).tokens;
+  eq(dhard.text, duser.text, '深色实测皮肤：正文不被加固（它归带的正文契约）');
   for (const L of [0, 0.0014, 0.06, 0.6, 1.0]) {
     const g = T.backdropGuard(duser, L, 0.2, T.MIN_PANEL_OP);
     eq(g.floor, T.MIN_PANEL_OP, `深色实测皮肤 + 底图亮度 ${L}：地板不介入（底图不会被面板吃掉）`);
     const eff = T.effectivePanel(duser, L, 0.2, T.MIN_PANEL_OP);
     const body = Math.abs(T.apcaLc(duser.text, eff));
-    const sec = Math.abs(T.apcaLc(duser.text2, eff));
+    const secRaw = Math.abs(T.apcaLc(duser.text2, eff));
+    const sec = Math.abs(T.apcaLc(dhard.text2, eff));
     ok(body >= 60, `深色实测皮肤 + 底图亮度 ${L} + 0.30 漆层：正文 Lc ${body.toFixed(0)} ≥ 60`);
-    ok(sec >= 32, `深色实测皮肤 + 底图亮度 ${L}：次要字 Lc ${sec.toFixed(0)} ≥ 32（自校准档）`);
+    ok(sec >= T.GLASS_HARDEN_LC,
+      `深色实测皮肤 + 底图亮度 ${L}：加固后的次要字 Lc ${sec.toFixed(0)} ≥ ${T.GLASS_HARDEN_LC}（原色只有 ${secRaw.toFixed(0)}）`);
   }
+  // 加固确实是**必要**的，不是给已经达标的色做无用功：原色在最亮底图下跌破第二代
+  // 那个已经放宽过的 32。这条断言钉住「这一层解决的是一个真实存在的缺陷」——
+  // 哪天有人把加固摘掉，失败的会是它而不是某个含糊的整体指标。
+  const effBright = T.effectivePanel(duser, 1.0, 0.2, T.MIN_PANEL_OP);
+  ok(Math.abs(T.apcaLc(duser.text2, effBright)) < 32,
+    `原色次要字在最亮底图上确实不达标（Lc ${Math.abs(T.apcaLc(duser.text2, effBright)).toFixed(1)} < 32，第二代放宽后的档位）`);
 }
 
 section('backdropGuard：透镜在，守卫退休；只有没有透镜才兜底');
@@ -584,6 +769,187 @@ section('全局界面不透明度：迁移钳制');
   eq(T.migrateState({ uiOpacity: 3 }).uiOpacity, 1, '超过 1 拉回不透明');
   eq(T.migrateState({}).uiOpacity, 1, '缺省不透明');
   eq(T.migrateState({ uiOpacity: 'abc' }).uiOpacity, 1, '非法输入回落不透明');
+  // 下限这个数在四个地方出现（index.html 的 range min、applyUiOpacity 的钳制、
+  // migrateState 的钳制、uiPaintFloor 的层模型）。前三处是「用户能拖到哪」，
+  // 第四处是「地板按多少漏光算」—— 第四处比前三处松就等于地板算少了。
+  eq(T.UI_OPACITY_MIN, 0.5, 'UI_OPACITY_MIN 就是迁移钳制的那个下限');
+}
+
+section('漆层地板（uiPaintFloor）：透明窗上「面板 vs 桌面」的唯一守卫');
+{
+  // 这一节锁的是 2026-09-15 用户截图暴露的那条**完全没有守卫的旁路**：
+  // 窗口 transparent:true，没设应用内底图时 --paint-op 直接等于 --ui-opacity，
+  // 而透镜 / 明度带 / 加固 / backdropGuard 四层全都只在「有底图」的分支里工作。
+  // 于是全局不透明度滑杆一拉低，桌面壁纸和别的窗口的正文就直接顶在面板文字后面。
+  //
+  // 桌面亮度在 webview 里采不到（这也是 preview-v2 / _probe-glass 结构上看不见这条
+  // 路的原因：Playwright 无头页面背后是浏览器的合成底，不存在「桌面」这个图层），
+  // 所以判据取「对本皮肤方向最不利」的那一端桌面。
+  const ADV = {
+    // 对抗性皮肤：低对比（字阶本来就窄，地板最容易被顶到 1）与高亮浅色
+    lowcontrast: T.expandTokens({
+      bg: '#2a2d33', panel: '#303338', text: '#b9bec6', accent: '#b9bec6',
+      down: '#c98a4f', up: '#6f95bb', ok: '#6aa588', warn: '#b9a06a', error: '#bb7a7a',
+    }),
+    brightlight: T.expandTokens({
+      bg: '#fdfdfe', panel: '#ffffff', text: '#2a2d33', accent: '#2a2d33',
+      down: '#b5651d', up: '#1f6fb8', ok: '#1c7a52', warn: '#8a6a12', error: '#a83232',
+    }),
+  };
+  const ALL = { ...Object.fromEntries(Object.entries(T.SKINS).map(([k, v]) => [k, v.tokens])), ...ADV };
+
+  for (const [id, toks] of Object.entries(ALL)) {
+    for (const solo of [false, true]) {
+      const f = T.uiPaintFloor(toks, solo);
+      const tag = `${id}${solo ? '（单层漆）' : '（两层漆）'}`;
+      // 不退化到 1 是本节最重要的一条：判据无解 → 地板顶到 1 → 滑杆被系统拿走，
+      // 那正是 b0c3db2 修掉的缺陷形状，也是用户连着两次报上来的同一件事。
+      // 绝对档位（APCA 30/45）在深色皮肤上连 f=1 都解不出来（text3 本来就只有
+      // Lc 23–25，那是字阶层级的设计意图），所以判据用的是**相对保留**。
+      ok(f < 1, `${tag}：地板 ${f} < 1，滑杆还有行程（判据不退化）`);
+      ok(f >= T.UI_OPACITY_MIN, `${tag}：地板 ${f} 不低于滑杆下限（低于就等于没垫）`);
+      eq(f, Math.round(f * 100) / 100, `${tag}：地板落在 0.01 格上（与滑杆步长同格）`);
+
+      // 保留判据在地板处真的成立 —— 只断言「地板存在」是没有内容的。
+      const surfaces = [toks.panel, toks.panel2].filter((s) => /^#[0-9a-f]{6}$/i.test(s || ''));
+      let worst = Infinity;
+      let worstAt = '';
+      for (const surf of surfaces) {
+        for (const k of T.UI_PAINT_KEYS) {
+          const base = Math.abs(T.apcaLc(toks[k], surf));
+          if (base <= 0) continue;
+          const eff = T.rgbToHex(T.uiComposite(toks, surf, f, solo));
+          const got = Math.abs(T.apcaLc(toks[k], eff));
+          if (got / base < worst) { worst = got / base; worstAt = `${k}@${surf}`; }
+        }
+      }
+      ok(worst >= T.UI_PAINT_RETAIN - 1e-6,
+        `${tag}：最差字色仍保住不透明基线的 ${(worst * 100).toFixed(1)}%（≥ ${T.UI_PAINT_RETAIN * 100}%，${worstAt}）`);
+
+      // 再低一格就该失守 —— 否则地板是虚的（比需要的高，白拿走滑杆行程）。
+      if (f > T.UI_OPACITY_MIN) {
+        let held = true;
+        for (const surf of surfaces) {
+          for (const k of T.UI_PAINT_KEYS) {
+            const base = Math.abs(T.apcaLc(toks[k], surf));
+            if (base <= 0) continue;
+            const eff = T.rgbToHex(T.uiComposite(toks, surf, f - 0.01, solo));
+            if (Math.abs(T.apcaLc(toks[k], eff)) / base < T.UI_PAINT_RETAIN - 1e-9) held = false;
+          }
+        }
+        ok(!held, `${tag}：再低一格（${(f - 0.01).toFixed(2)}）就失守，地板不比需要的高`);
+      }
+    }
+    // 单层漆漏进来的桌面是两层的两倍（两层里 .frame 先用 --bg 挡掉 u=0.5 那一半），
+    // 所以小窗 / 能量球的地板必须更高。拿主窗那份铺到小窗就是超支一倍。
+    ok(T.uiPaintFloor(toks, true) > T.uiPaintFloor(toks, false),
+      `${id}：单层漆的地板高于两层漆（小窗不能吃主窗那份预算）`);
+  }
+
+  // 最坏桌面按皮肤方向镜像：深色皮肤怕纯白桌面（亮字没地方落），浅色怕纯黑。
+  eq(T.worstDesktop(T.SKINS.plain.tokens).r, 255, '深色皮肤按纯白桌面兜底');
+  eq(T.worstDesktop(T.SKINS.light.tokens).r, 0, '浅色皮肤按纯黑桌面兜底');
+
+  // 地板是**平的**：只依赖令牌，不随滑杆走。曾经试过让它跟着当前 u 走（把漏光
+  // 预算算准），实测**非单调** —— plain 的地板在 u=0.68 触底 0.676、再回升到
+  // u=0.50 处的 0.790，也就是「越往透明拖，面板越不透明」。那与「滑杆被系统拿走」
+  // 是同一类缺陷，所以定义里把 u 钉死在下限。这条断言锁的是那个签名。
+  eq(T.uiPaintFloor.length, 1, 'uiPaintFloor 只收 tokens（+ solo 默认参数），不收 uiOpacity');
+
+  // 判据集合不许悄悄缩小：少一个键就是少守一档字色，而那正是三代玻璃契约每次
+  // 返工的同一个根因。--accent 不在内是有据的（全仓库只作按钮底 / accent-color）。
+  ok(T.UI_PAINT_KEYS.includes('text') && T.UI_PAINT_KEYS.includes('text3'),
+    'UI_PAINT_KEYS 覆盖正文与弱字阶（弱字阶是最先糊的那一档）');
+  ok(!T.UI_PAINT_KEYS.includes('accent'), 'accent 不进判据（它不作压在漆上的文字色）');
+}
+
+section('漆层地板的接线：只钳漆，不钳窗口底色 / 底图 / 滑杆');
+{
+  const UI = path.resolve(HERE, '../../src/NetPeek.App/ui');
+  const tokensCss = fs.readFileSync(path.join(UI, 'tokens.css'), 'utf8');
+  const stylesCss = fs.readFileSync(path.join(UI, 'styles.css'), 'utf8');
+  const miniCss = fs.readFileSync(path.join(UI, 'mini.css'), 'utf8');
+  const indexHtml = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
+
+  // 无底图那条路上 --paint-op 必须过 max(滑杆, 地板)。这一行就是修复本体：
+  // 原来它是裸的 var(--ui-opacity)，那条路上没有任何下界。
+  ok(/--paint-op:\s*calc\(max\(var\(--ui-opacity\),\s*var\(--ui-paint-floor\)\)\)/.test(tokensCss),
+    'tokens.css：--paint-op = max(--ui-opacity, --ui-paint-floor)');
+  ok(/--ui-paint-floor:\s*0\b/.test(tokensCss),
+    'tokens.css：--ui-paint-floor 缺省 0（令牌落地前不干预首帧）');
+
+  // 「只钳漆」的另一半：窗口底色与底图仍按裸 --ui-opacity 一路淡到下限 ——
+  // 桌面从缝隙、圆角外、底图后面透上来，那才是滑杆的主要观感。这两条一旦也吃了
+  // 地板，滑杆就又被系统拿走了（用户连着两次报的就是这个）。
+  ok(/\.frame\s*\{[^}]*background:\s*color-mix\(in srgb,\s*var\(--bg\)\s*calc\(var\(--ui-opacity\)\s*\*\s*100%\)/.test(stylesCss),
+    'styles.css：.frame 的窗口底色仍按裸 --ui-opacity 淡出（不吃地板）');
+  ok(/\.backdrop\s*\{[^}]*opacity:\s*var\(--ui-opacity\)/.test(stylesCss),
+    'styles.css：.backdrop 底图仍按裸 --ui-opacity 淡出（不吃地板）');
+
+  // has-bg 那条路的语义不许被这次改动带偏：它有自己的地板（--panel-op-floor），
+  // 且全局不透明度在那条路上仍然作用于整体、不被地板钳住。
+  ok(/body\.has-bg\s*\{\s*--paint-op:\s*calc\(max\(var\(--panel-op\),\s*var\(--panel-op-floor\)\)\s*\*\s*var\(--ui-opacity\)\)/.test(stylesCss),
+    'styles.css：body.has-bg 的 --paint-op 语义不变（那条路有自己的地板）');
+
+  // 滑杆本身不许被钳：min 必须还是 UI_OPACITY_MIN，不能被抬到地板上。
+  const m = indexHtml.match(/id="uiOpacity"[^>]*\bmin="([\d.]+)"/);
+  ok(m !== null, 'index.html 里能找到 uiOpacity 滑杆（改名了就同步这条断言）');
+  if (m) {
+    eq(Number(m[1]), T.UI_OPACITY_MIN,
+      `滑杆 min ${m[1]} == UI_OPACITY_MIN（地板只垫漆层，不动滑杆行程）`);
+  }
+
+  // 小窗是单层漆，球漆 / 面板漆 / 球面光照都必须走 --paint-op（含地板），
+  // 而投影这类「投在桌面上的影子」仍按裸 --ui-opacity —— 影子不是压在字后面的漆。
+  ok(/--o:\s*calc\(var\(--paint-op\)\s*\*\s*100%\)/.test(miniCss),
+    'mini.css：能量球的 --o 走 --paint-op（含单层漆地板）');
+  ok(/\.panel\s*\{[^}]*background:\s*color-mix\(in srgb,\s*var\(--panel\)\s*calc\(var\(--paint-op\)\s*\*\s*100%\)/.test(miniCss),
+    'mini.css：迷你窗面板漆走 --paint-op');
+  ok(/box-shadow:\s*0 2px 5px rgb\(0 0 0 \/ calc\(0\.35 \* var\(--ui-opacity\)\)\)/.test(miniCss),
+    'mini.css：球的落影仍按裸 --ui-opacity（投在桌面上的影子不是漆）');
+}
+
+section('漆层地板随令牌上屏：applyTokens 写 --ui-paint-floor');
+{
+  // 地板只依赖令牌，所以它的写入点就该是令牌上屏那一处 —— 换肤必须重算，
+  // 拖滑杆不必（CSS 的 max() 自己会挑）。分两个上下文测，因为 solo 是每个 webview
+  // 固定的一档：主窗两层漆、小窗单层漆。
+  const mkCtx = () => {
+    const props = {};
+    const ctx = loadScripts(['vendor/chroma.min.js', 'vendor/color-thief.min.js', 'theme.js'], {
+      document: {
+        documentElement: {
+          style: { setProperty(k, v) { props[k] = v; } },
+          classList: { add() {}, remove() {} },
+        },
+      },
+      matchMedia: () => ({ matches: false }),
+    });
+    return { props, T: ctx.NetPeekTheme };
+  };
+
+  const main = mkCtx();
+  main.T.applyTokens(main.T.SKINS.plain.tokens, { silent: true });
+  eq(main.props['--ui-paint-floor'], String(T.uiPaintFloor(T.SKINS.plain.tokens, false)),
+    '主窗上屏写入两层漆的地板');
+
+  const mini = mkCtx();
+  mini.T.applyTokens(mini.T.SKINS.plain.tokens, { silent: true, solo: true });
+  eq(mini.props['--ui-paint-floor'], String(T.uiPaintFloor(T.SKINS.plain.tokens, true)),
+    '小窗（solo）上屏写入单层漆的地板');
+  ok(Number(mini.props['--ui-paint-floor']) > Number(main.props['--ui-paint-floor']),
+    '同一套皮肤下小窗的地板更高（单层漆漏进来的桌面是两倍）');
+
+  // 换肤要跟着变：地板是令牌的函数，不是一次性常量。
+  main.T.applyTokens(main.T.SKINS.light.tokens, { silent: true });
+  eq(main.props['--ui-paint-floor'], String(T.uiPaintFloor(T.SKINS.light.tokens, false)),
+    '换肤后地板重算');
+
+  // mini.js 必须真的传 solo —— 漏了这个参数是个哑失败：小窗照样有地板，
+  // 只是那份地板按两层漆算，超支一倍，而单测和预览都看不出来。
+  const miniJs = fs.readFileSync(path.resolve(HERE, '../../src/NetPeek.App/ui/mini.js'), 'utf8');
+  ok(/applyTokens\(payload\.tokens,\s*\{[^}]*solo:\s*true/.test(miniJs),
+    'mini.js 上屏时带 solo: true（漏了就按两层漆算，小窗超支一倍）');
 }
 
 section('对比度守卫补 panel-2（输入框 / 顶栏底色）');
@@ -838,6 +1204,130 @@ section('有效深浅上报给后端（§37 托盘原生菜单跟随主题）');
   let threw2 = '';
   try { failCtx.NetPeekTheme.applyTokens(failCtx.NetPeekTheme.SKINS.plain.tokens, { silent: true }); } catch (e) { threw2 = String(e); }
   eq(threw2, '', 'invoke 同步抛错时吞掉，不影响上屏');
+}
+
+section('像素审计的门槛与加固档位同源（跨文件不许各写一份）');
+{
+  // preview-v2.mjs 的像素审计是本仓库唯一的**地面真值**（直接量截图像素，不信模型）。
+  // 它的门槛必须等于加固的弱字阶档位，否则两种失效方式各一个方向：
+  //   门槛 > 档位 —— 加固刚好推到达标的 text3 会被自己的门禁判成失败（这次实际发生：
+  //                  门槛写着 32，而弱档是 30，差 2 分就能让全链回归常态红）；
+  //   门槛 < 档位 —— 门禁比实现松，加固退化了它也看不见。
+  // 两个文件各写一份字面量是这类漂移的根源，所以这条断言直接读那份源码来比。
+  // 读源码而不是 import：preview-v2.mjs 顶层就起 http 服务、连 playwright，import
+  // 它等于在单测里跑一遍完整预览链。
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.resolve(HERE, '../preview-v2.mjs'), 'utf8');
+  const m = src.match(/const\s+AUDIT_MIN_LC\s*=\s*(\d+(?:\.\d+)?)/);
+  ok(m !== null, 'preview-v2.mjs 里能找到 AUDIT_MIN_LC（改名了就同步这条断言）');
+  if (m) {
+    eq(Number(m[1]), T.GLASS_HARDEN_WEAK_LC,
+      `像素审计门槛 ${m[1]} == 加固弱字阶档位 ${T.GLASS_HARDEN_WEAK_LC}`);
+  }
+  // 门槛同时是 APCA 对「装饰性部件」的下限 30：低于它就不是「弱」而是看不见。
+  eq(T.GLASS_HARDEN_WEAK_LC, 30, '弱字阶档位就是 APCA 装饰线 30（这个值有外部依据，不是手调的）');
+}
+
+section('覆盖性检查：每个作前景用的令牌都必须有一层可读性负责人');
+{
+  // 这一节是本轮全部返工的**根因锁**，不是又一条数值断言。
+  //
+  // 三代玻璃契约每次都栽在同一件事上：某个令牌**在 CSS 里当文字色用**，却不在任何
+  // 一层可读性判据的覆盖范围内。于是它渲染得出来、单测全绿、只有人眼看得出问题：
+  //   第一代 —— text3 与全部语义色不在契约里（plain 实测 text3 Lc 13.1、error 32.6）；
+  //   第二代 —— 同上，外加自校准把 text2 的目标偷偷打到 37.7；
+  //   §45.5 —— up/down 掉到 Lc 32.5/34.6 时，当时的判据一条都没响。
+  // 每次都是「加一条断言修这一个键」，下一个漏网的键照旧要等人眼发现。所以这里换成
+  // **反向**的检查：不问「这几个键达标吗」，而是从 CSS 实际用法出发，问
+  // 「有没有哪个前景令牌没人负责」。新增一个 color: var(--x) 的用法就会让它失败。
+  //
+  // 负责人只有三种，允许的口径写死在下面这张表里 —— 想加第四种，就得先在这里说清楚。
+  const UI_DIR = path.resolve(HERE, '../../src/NetPeek.App/ui');
+  const cssText = ['styles.css', 'mini.css']
+    .map((f) => fs.readFileSync(path.join(UI_DIR, f), 'utf8')).join('\n');
+
+  // CSS 变量名 → token 键名（applyTokens 那张映射的反向）
+  const VAR_TO_KEY = {
+    '--text': 'text', '--text-2': 'text2', '--text-3': 'text3',
+    '--down': 'down', '--up': 'up', '--ok': 'ok', '--warn': 'warn', '--error': 'error',
+    '--accent': 'accent', '--accent-ink': 'accentInk', '--sel-bar': 'selBar',
+    '--panel': 'panel', '--panel-hi': 'panelHi', '--panel-2': 'panel2',
+    '--bg': 'bg', '--line': 'line', '--line-soft': 'lineSoft',
+  };
+
+  // 扫「作为前景色」的用法：color: 声明里出现的 var(--x)。
+  // 只认 color（不认 background/border/box-shadow/outline）—— 前景是「压在合成面上被
+  // 读」的那一类，也正是 APCA 判据成立的前提。
+  const fgKeys = new Set();
+  for (const m of cssText.matchAll(/(^|[;{}])\s*color\s*:\s*([^;}]+)/g)) {
+    for (const v of m[2].matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) {
+      const k = VAR_TO_KEY[v[1]];
+      if (k) fgKeys.add(k);
+    }
+  }
+  // 前提自检：扫不到东西的正则会让整节静默通过 —— 那是最坏的绿。
+  ok(fgKeys.size >= 8, `扫到 ${fgKeys.size} 个作前景用的令牌（正则失效时这条先失败）`);
+  ok(fgKeys.has('text') && fgKeys.has('error'), '扫描结果包含已知的前景键（口径自检）');
+
+  // 三层负责人：
+  //   band     —— 带的正文契约（|Lc| ≥ LENS_BODY_LC），只覆盖 text；
+  //   harden   —— 加固层，覆盖 GLASS_HARDEN_KEYS；
+  //   exempt   —— 结构性豁免。每一条都必须给出「为什么这个键不需要对合成面达标」的
+  //               可验证理由，而不是「暂时没想好」。
+  const EXEMPT = {
+    // accentInk 是「强调底上的字」：它永远压在 --accent 实心背景上（styles.css:733-735
+    // 是唯一用法，同一条规则里 background: var(--accent)），从不压在半透面板上。
+    // 它的可读性由 deriveTokens 对着 accent 校（theme.js:427 选黑白墨 + guardTokens
+    // 的 ensureContrast），下面用断言证明这条保证真的存在。
+    accentInk: 'accent 实心底上的墨，由 deriveTokens/guardTokens 对着 accent 保证',
+    // selBar 唯一的 color: 用法是 .sel-opt .ic（自绘下拉的勾标），而那个勾标
+    // visibility: hidden，只在 .is-on 时可见；.is-on 的那一行同时把文字换成 --text，
+    // 且勾标是形状不是文字（丢了不丢信息 —— 选中态另有背景色表达）。
+    selBar: '仅用于自绘下拉的勾标图形（默认 hidden），不承载文字信息',
+  };
+
+  for (const k of [...fgKeys].sort()) {
+    const owner = k === 'text' ? 'band'
+      : T.GLASS_HARDEN_KEYS.includes(k) ? 'harden'
+        : EXEMPT[k] ? 'exempt' : null;
+    ok(owner !== null,
+      `前景令牌 ${k} 有负责人（${owner === 'exempt' ? `豁免：${EXEMPT[k]}` : owner}）`);
+  }
+
+  // 反向也要成立：加固清单里不许有「其实没当前景用」的键 —— 那种键推了也是白推，
+  // 而 accent 就是这么被推坏过的（品牌琥珀 #d98a3d 洗成 #efc8a6）。
+  for (const k of T.GLASS_HARDEN_KEYS) {
+    ok(fgKeys.has(k), `加固清单里的 ${k} 确实在 CSS 里作前景用（不给不存在的场景做补偿）`);
+  }
+
+  // 同一张「谁作前景用」的清单还要覆盖**另一条路**：桌面。上面三层负责人管的都是
+  // 「面板 vs 应用内底图」，而窗口是 transparent:true —— 没设底图时顶在文字后面的
+  // 是桌面，那条路的唯一守卫是 uiPaintFloor（判据集合 UI_PAINT_KEYS）。
+  // 2026-09-15 用户截图就漏在这里：壁纸与另一个终端窗口的正文透在顶栏元信息后面，
+  // 而当时三层负责人全都「有负责人」、全绿。所以这条断言问的是：
+  // 每个作前景用的非豁免键，在桌面这条路上也有人管吗。
+  for (const k of [...fgKeys].sort()) {
+    if (EXEMPT[k]) continue;
+    ok(T.UI_PAINT_KEYS.includes(k),
+      `前景令牌 ${k} 在「面板 vs 桌面」这条路上也有负责人（UI_PAINT_KEYS）`);
+  }
+  for (const k of T.UI_PAINT_KEYS) {
+    ok(fgKeys.has(k), `UI_PAINT_KEYS 里的 ${k} 确实在 CSS 里作前景用`);
+  }
+  // accent 的反例留档：它必须**不**在前景集合里。哪天有人写了 color: var(--accent)，
+  // 这条会失败并提醒他：要么改用 --text 系，要么把 accent 纳入加固（并接受洗色代价）。
+  ok(!fgKeys.has('accent'),
+    'accent 不作前景用（全仓库只作背景：按钮底 / 开关 / 选区 / accent-color）');
+
+  // 两条豁免理由的可验证部分 —— 豁免不能只是一句话。
+  for (const [id, skin] of Object.entries(T.SKINS)) {
+    ok(T.contrast(T.hexToRgb(skin.tokens.accentInk), T.hexToRgb(skin.tokens.accent)) >= 4.5,
+      `${id}：accentInk 对 accent 达标（豁免理由成立，它不需要对合成面达标）`);
+  }
+  ok(/\.sel-opt\s+\.ic\s*\{[^}]*visibility:\s*hidden/.test(cssText),
+    'selBar 的勾标默认 hidden（豁免理由成立）');
+  ok(/\.sel-opt\.is-on\s*\{[^}]*color:\s*var\(--text\)/.test(cssText),
+    'selBar 勾标可见时同行文字用 --text（信息不依赖 selBar 的对比度）');
 }
 
 process.exit(report('theme.test'));

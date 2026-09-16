@@ -46,8 +46,13 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   position: absolute;
   /* 全局界面不透明度（与主窗 .frame 共用 --ui-opacity，theme-changed 广播）：
      只淡「漆」不淡字 —— 球体底色 / 边线 / 光照层按 --o 淡出，速率数字与环形规
-     是数据、保持不透明。原来整层 opacity 淡出，50% 档连球上唯一的读数也只剩一半。 */
-  --o: calc(var(--ui-opacity) * 100%);
+     是数据、保持不透明。原来整层 opacity 淡出，50% 档连球上唯一的读数也只剩一半。
+     取 --paint-op（= max(--ui-opacity, --ui-paint-floor)，tokens.css）而不是裸的
+     --ui-opacity：小窗是**单层漆**（面板直接压在桌面上，body 透明），同一个不透明度
+     漏进来的桌面是主窗两层结构的两倍，所以 mini.js 用 solo 口径算地板（theme.js 的
+     uiPaintFloor(tokens, true)，实测比主窗高约 0.12）。桌面亮度采不到，地板按最坏
+     桌面推 —— 球上那两行速率数字是它唯一承载的信息，透底之后就没有别处可读。 */
+  --o: calc(var(--paint-op) * 100%);
   /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口 108×108 由 mini.rs 的 ORB_W/H
      写定，改球径要连那两个常量一起改，否则球不再居中。 */
   width: 92px;
@@ -95,22 +100,23 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   background:
     /* 底部内遮蔽（AO）：球底往里收的那一圈暗，是把「球」从「圆片」区分开的
        关键一层 —— 没有它，再亮的高光也只是纸上的渐变。
-       整层乘 --o：光照随球漆一起淡出，不然球底透明了高光还悬在半空 */
+       整层跟着球漆的口径（--paint-op，含地板）：光照与球漆同步淡出，
+       不然球底透明了高光还悬在半空 */
     radial-gradient(circle at 50% 118%,
-      color-mix(in srgb, black calc(46% * var(--ui-opacity)), transparent) 0%,
-      color-mix(in srgb, black calc(20% * var(--ui-opacity)), transparent) 28%,
+      color-mix(in srgb, black calc(46% * var(--paint-op)), transparent) 0%,
+      color-mix(in srgb, black calc(20% * var(--paint-op)), transparent) 28%,
       transparent 50%),
     /* 底部环境反弹：桌面把光打回球底，很淡 */
     radial-gradient(circle at 50% 98%,
-      color-mix(in srgb, var(--down) calc(16% * var(--ui-opacity)), transparent) 0%,
+      color-mix(in srgb, var(--down) calc(16% * var(--paint-op)), transparent) 0%,
       transparent 44%),
     /* 球面明暗：高光在 34%/28%，右下压到 30% 黑 —— 球体的体积感 */
     radial-gradient(circle at 34% 28%,
-      color-mix(in srgb, white calc(14% * var(--ui-opacity)), transparent) 0%,
-      color-mix(in srgb, white calc(6% * var(--ui-opacity)), transparent) 20%,
+      color-mix(in srgb, white calc(14% * var(--paint-op)), transparent) 0%,
+      color-mix(in srgb, white calc(6% * var(--paint-op)), transparent) 20%,
       transparent 46%,
-      color-mix(in srgb, black calc(11% * var(--ui-opacity)), transparent) 76%,
-      color-mix(in srgb, black calc(30% * var(--ui-opacity)), transparent) 100%);
+      color-mix(in srgb, black calc(11% * var(--paint-op)), transparent) 76%,
+      color-mix(in srgb, black calc(30% * var(--paint-op)), transparent) 100%);
 }
 
 /* 原来这里有一整套「能量光效」：绕球外扩的 halo 光晕、球心随负载点亮的 core
@@ -141,9 +147,12 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   z-index: 2;
   border-radius: 50%;
   pointer-events: none;
+  /* 与 ::before 的球面明暗同一口径（--paint-op，含地板）：高光是长在球漆上的
+     材质，球漆被地板托住时高光不能自己继续淡下去 —— 那会让球在低档位显得
+     「漆还在、光没了」。投影不在此列：它打在桌面上，本来就该随滑杆一起消。 */
   background: radial-gradient(closest-side,
-    rgb(255 255 255 / calc(0.5 * var(--ui-opacity))) 0%,
-    rgb(255 255 255 / calc(0.14 * var(--ui-opacity))) 55%,
+    rgb(255 255 255 / calc(0.5 * var(--paint-op))) 0%,
+    rgb(255 255 255 / calc(0.14 * var(--paint-op))) 55%,
     transparent 100%);
   transform: rotate(-28deg);
 }
@@ -205,8 +214,10 @@ html:not(.theme-ready) .panel { visibility: hidden; }
 .panel {
   position: absolute;
   /* 全局界面不透明度：面板只淡「漆」不淡字（与主窗 .frame 同一原则，共用
-     --ui-opacity）——列表里的应用名、速率在 50% 档仍然清晰，桌面从面板底下透上来。 */
-  background: color-mix(in srgb, var(--panel) calc(var(--ui-opacity) * 100%), transparent);
+     --ui-opacity）——列表里的应用名、速率在 50% 档仍然清晰，桌面从面板底下透上来。
+     与球同一个口径 --paint-op（含单层漆的地板）：这块面板身后没有任何东西，
+     漏进来的就是桌面本身，比主窗那两层漏得多一倍。 */
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
   /* 四周退 12px 给投影让位（窗口 344×324 = 面板 320×300 + 12×2）。
      原来 inset:0，box-shadow 整个落在窗口外一点都看不见，圆角外的四个角
      反而被自己的投影填上了色 —— 面板既没有浮起的层次，又像被一层方框框住。 */
@@ -332,9 +343,13 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   border-radius: var(--r-s);
   /* 占比条：和主界面进程表 / 历史排行同一条（§2.5），渐变写在这里，
      只有百分比由 mini.js 按数据写进 --share。原来整条渐变在 JS 里拼字符串，
-     琥珀是写死的字面量，换主题后这条一直是旧的橙色。 */
+     琥珀是写死的字面量，换主题后这条一直是旧的橙色。
+     9% 与主窗进程表（styles.css 的 .proc-table tbody tr）同一个字面量。
+     --share-tint 全仓库无人定义过，缺省值不写就是整条 background-image 失效
+     （color-mix 拿到空记号 → 整个函数无效 → 声明被丢弃），表现是小窗的占比条
+     从来没出现过 —— 一个不报错、只是「某个东西一直没显示」的哑失败。 */
   background-image: linear-gradient(90deg,
-    color-mix(in srgb, var(--down) var(--share-tint), transparent),
+    color-mix(in srgb, var(--down) var(--share-tint, 9%), transparent),
     transparent var(--share, 0%));
   background-repeat: no-repeat;
 }

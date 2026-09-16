@@ -96,6 +96,21 @@ function mergeIcons(snap) {
   if (updates) for (const k of Object.keys(updates)) iconCache.set(k, updates[k]);
 }
 
+// 名称 -> 图标，本次会话只增不减。历史屏要给「昨天跑过、现在已经退出」的应用配
+// 图标，而 iconCache 是按路径存的、只有当前帧的进程才知道自己的路径，所以这里
+// 按进程名再记一份。同名不同路径（多版本、多安装位置）保留先到的那个：历史是
+// 按名字聚合的，本来就分不开这两者。
+const iconByName = new Map();
+
+function rememberIcons(snap) {
+  for (const p of snap.Processes || []) {
+    const name = (p.Name || '').toLowerCase();
+    if (!name || iconByName.has(name)) continue;
+    const icon = iconOf(p);
+    if (icon) iconByName.set(name, icon);
+  }
+}
+
 // 进程行图标解析：兼容旧协议（IconBase64 内联），新协议按 Path 查缓存。
 function iconOf(p) {
   if (p.IconBase64) return p.IconBase64;
@@ -1037,6 +1052,7 @@ function syncTableScrollEdges() {
 function onSnapshot(snap) {
   lastSnapshot = snap;
   mergeIcons(snap);
+  rememberIcons(snap);
   pushSamples(snap);
   accumulateToday(snap);
   // 暂停是从当前这一帧起虚线；恢复后回到全实线
@@ -1270,6 +1286,7 @@ window.NetPeekLive = {
   fmtRate,
   initialOf,
   iconOf,
+  iconForName: (name) => iconByName.get(String(name || '').toLowerCase()) || '',
   UNATTR,
 };
 

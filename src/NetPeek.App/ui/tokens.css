@@ -38,8 +38,14 @@
 
   /* ---- 全局界面不透明度（外观屏滑杆 → theme.applyUiOpacity） ---- */
   --ui-opacity: 1;        /* 0.5–1：底色/底图/各表面漆层变透，文字不淡 */
-  --paint-op: var(--ui-opacity);
-                          /* 漆层有效不透明度：无背景图时 = --ui-opacity；
+  --ui-paint-floor: 0;    /* 漆层对**桌面**的可读下限（theme.applyTokens 按令牌写入，
+                             推导见 theme.js 的 uiPaintFloor）。窗口是 transparent:true，
+                             无底图时桌面直接顶在面板文字后面 —— 这一项是那条路上唯一的
+                             守卫。缺省 0 = 令牌落地前不干预（首帧 --ui-opacity 本来是 1）。
+                             与 --panel-op-floor 是两件事：那个管「面板 vs 应用内底图」，
+                             这个管「面板 vs 桌面」 */
+  --paint-op: calc(max(var(--ui-opacity), var(--ui-paint-floor)));
+                          /* 漆层有效不透明度：无背景图时 = max(--ui-opacity, 漆层地板)；
                              body.has-bg 时由 styles.css 覆写为
                              max(--panel-op, --panel-op-floor) × --ui-opacity */
 

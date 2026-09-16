@@ -118,15 +118,27 @@ body:not(.has-bg) .backdrop::after { content: none; }
 .backdrop.is-fade-in.is-visible { opacity: var(--ui-opacity); }
 
 /* 各表面漆层（顶栏 / rail / 卡片 / 设置列等）统一按 --paint-op 淡出：
-   无背景图时 --paint-op = --ui-opacity（tokens.css 缺省），全局滑杆直接生效——
-   原来淡出只挂在 .frame 底色上，而这些不透明表面把它整个盖住，非背景图皮肤下
-   滑杆等于空调；有背景图时这里把 --paint-op 覆写为
+   无背景图时 --paint-op = max(--ui-opacity, --ui-paint-floor)（tokens.css 缺省），
+   全局滑杆直接生效——原来淡出只挂在 .frame 底色上，而这些不透明表面把它整个盖住，
+   非背景图皮肤下滑杆等于空调。那条路上的 floor 是 --ui-paint-floor（theme.js
+   的 uiPaintFloor 按令牌算，管「面板 vs 桌面」）：窗口 transparent:true，没有底图时
+   滑杆一拉低桌面就直接顶在文字后面，而下面 has-bg 的那条 floor 完全不参与这条路
+   （2026-09-15 用户截图：壁纸与另一个终端窗口的正文透在顶栏元信息与图表轴标签后面）。
+   floor 只钳「漆」这一项：窗口底色 .frame 与底图 .backdrop 仍按 --ui-opacity 一路淡到
+   0.5，桌面从缝隙、圆角外、底图后面透上来 —— 那才是滑杆的主要观感，也是「滑杆不能
+   被系统拿走」这条教训的落点。
+   有背景图时这里把 --paint-op 覆写为
    max(面板滑杆, 可读下限) × 界面不透明度：floor（--panel-op-floor，由
    theme-ui.syncOpacityFloor 按底图亮度算出）只钳面板滑杆与底图的关系；
    全局界面不透明度作用于整体、不被 floor 钳住——否则亮图皮肤下全局滑杆
    会被顶回近不透明，等于失效。 */
+/* calc() 不能省：自定义属性的值是「未解析的记号流」，裸写 A * B 存下来的就是
+   三个记号本身，而不是一个数 —— 它只在消费端把整体再包进 calc() 时才凑巧算得出
+   （目前 14 处消费全是 calc(var(--paint-op) * 100%)，所以一直没露馅）。
+   下一处按 opacity: var(--paint-op) 直接用的地方就会拿到非法值、整条声明被丢弃。
+   在定义处算完，消费端怎么写都成立。 */
 body.has-bg {
-  --paint-op: max(var(--panel-op), var(--panel-op-floor)) * var(--ui-opacity);
+  --paint-op: calc(max(var(--panel-op), var(--panel-op-floor)) * var(--ui-opacity));
 }
 
 /* 玻璃的边缘语义：有背景图时给主要浮岛一条 1px 顶部内高光——半透面板的上缘
@@ -822,6 +834,19 @@ select, input[type="text"], input[type="password"], input[type="number"], input[
   font-size: 12.5px;
   outline: none;
 }
+/* 日期框右侧的日历图标。弹出的日历面板、图标本身、框内 yyyy/mm/dd 的分段文字
+   都由 Chromium 自己画，选择器碰不到 —— 唯一的开关是 color-scheme，
+   而它已由 theme.js 的 applyTokens 按皮肤方向写在 documentElement 上
+   （深色皮肤 dark、浅色 light），继承到这里，换肤时一起翻。
+   缺了那一步的表现是：深色皮肤下点开日期框，弹出来一块浅底日历贴在深色界面上，
+   且图标是深灰画在深底上几乎看不见。
+   这里只补一点不透明度层级，让图标读起来像图标而不是与文字等重的字符。 */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity var(--t-fast) var(--ease);
+}
+input[type="date"]:hover::-webkit-calendar-picker-indicator { opacity: 0.9; }
 select:focus, input[type="text"]:focus, input[type="password"]:focus,
 input[type="number"]:focus, input[type="date"]:focus {
   border-color: color-mix(in srgb, var(--sel-bar) 60%, var(--line));
@@ -1067,6 +1092,11 @@ span.app-badge {
 .hist-custom-actions { display: flex; gap: 8px; }
 .hist-range-error { width: 100%; font-size: 12px; color: var(--error); }
 
+/* 导出按钮推到工具栏右端。原来靠一个 <span class="sp">，但 .sp 只在
+   .card-head / .rc-head 下才有 flex:1 —— 工具栏里那个是死元素，按钮其实一直
+   紧跟在合计后面。工具栏 flex-wrap:wrap，auto 边距在换行后仍然只作用于当前行。 */
+.hist-export { margin-left: auto; }
+
 .hist-chart-card { flex: 1 1 0; }
 
 /* 排行列表（右栏） */
@@ -1121,15 +1151,37 @@ span.rank-icon {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 下载与上传两列定宽：排行现在按「上传 + 下载」排序，只显示下载的话，
+   一个上传 8 GB、下载 20 MB 的应用在榜上显示「20 MB」，看不出它凭什么排在前面。
+   定宽 + tabular-nums 让两列各自右对齐成数字柱，扫一列就能比大小；
+   不给 flex 弹性 —— 弹性会让每行的小数点位置随名字长度浮动。
+   11px 是全应用单位字号下限，这里数值降到 12px 是为了在 252px 的窄档（1060 媒体档）
+   仍能放下「图标 + 名字 + 两个读数」，再窄就该让名字截断而不是让数字换行。 */
 .rank-value {
   font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
-  color: var(--down);
+  width: 68px;
+  flex: none;
+  text-align: right;
+  white-space: nowrap;
 }
+.rank-value.is-down { color: var(--down); }
+.rank-value.is-up { color: var(--up); }
 .rank-value .u { font-size: 11px; font-weight: 400; color: var(--text-3); }
 .hint-row { padding: 10px 2px; font-size: 12px; color: var(--text-3); }
+/* 「其余 N 个应用」那一行：它是把账对上的关键（顶部合计是按整个区间所有应用算的），
+   但不是一条排行数据 —— 用一条上边线与真实行分开，字号降一档。 */
+.hint-row.is-rest {
+  padding: 8px 2px 2px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  flex: none;
+}
+/* 应用总数：截断必须说出来，否则 8 行加起来凑不出顶部合计时，最自然的解读是
+   「数据错了」。放在卡头右侧，与「按合计」那条说明并列。 */
+.rank-count { font-size: 11px; color: var(--text-3); white-space: nowrap; flex: none; }
 
 /* ---------- 设置屏 ---------- */
 
@@ -1165,9 +1217,12 @@ span.rank-icon {
   /* 默认等价于透出 .frame 的 --bg；漆层化是为了让全局不透明度在设置屏同样生效 */
   background: color-mix(in srgb, var(--bg) calc(var(--paint-op) * 100%), transparent);
 }
-/* 内容列水平居中：设置屏每屏只有 2–4 行，680 列靠左顶格会把右侧留给一片
-   「没人设计过」的死空。居中之后留白对称，读作留白而不是没做完。 */
-.sgroup { max-width: 680px; margin: 0 auto 28px; }
+/* 内容列水平居中：设置屏每屏只有 2–4 行，列靠左顶格会把右侧留给一片
+   「没人设计过」的死空。居中之后留白对称，读作留白而不是没做完。
+   上限 780 而不是 680：680 是一个尺寸在做两件事 —— 940（窗口下限）时它撑满可用宽、
+   1280 时两侧各留 178px 的空槽。780 之后宽窗的留白收到 128px，读作页边距而不是
+   「右边还没做」；窄档仍然由可用宽自己封顶，列是流式的。 */
+.sgroup { max-width: 780px; margin: 0 auto 28px; }
 .sgroup h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 
 /* 深浅偏好三段开关（image 皮肤专属区） */
@@ -1226,20 +1281,68 @@ span.rank-icon {
 .about-id b { font-size: 13.5px; }
 .about-id .note { margin: 0; }
 
+/* 设置行 = 说明列 + 控件列的两列栅格，不是 flex。
+   flex 版的问题是控件列没有宽度契约：`.t { flex:1 }` 吃掉所有剩余空间，控件被推到
+   右端后，说明与控件之间的空隙就是「这一行剩下多少」——同一屏里实测过 39px 到
+   607px 十几种不同的间距，一条共享的右边界都没有。最糟的一档是「换用自定义库」：
+   说明长到折两行，它的两枚按钮几乎贴上文字。
+   定宽控件列（--sctl）把这件事反过来：列宽由控件自己决定（下拉 170 + 滑杆 220 是
+   已有的最宽两个），说明列吃剩下的，于是一屏之内所有控件天然共享一条右边线，
+   说明也永远有一条稳定的折行宽度。 */
 .srow {
-  display: flex;
+  --sctl: 236px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sctl);
   align-items: center;
-  gap: 12px;
+  gap: 12px 16px;
   padding: 11px 0;
   border-top: 1px solid var(--line-soft);
 }
-.srow .t { flex: 1; min-width: 0; }
+.srow .t { min-width: 0; }
 .srow .t b { display: block; font-size: 13px; font-weight: 500; }
 .srow .t small { display: block; color: var(--text-3); font-size: 11.5px; line-height: 1.55; margin-top: 2px; }
-.srow-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+/* 控件列内一律靠右收尾：栅格里的项默认拉伸填满列，开关、缩略图这类定宽小件
+   会停在列的左端，一列里几个控件又各自对不齐。flex-end 让它们共用右边线。 */
+.srow > :not(.t) { justify-self: end; }
+.srow-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 只有说明、没有控件的行（如「强调色」的标题行）让说明列跨满，
+   否则右边会空出一整条控件列的宽度。 */
+.srow.is-full { grid-template-columns: minmax(0, 1fr); }
+
+/* 只读的值（服务状态、数据目录、国家库署名）。它们坐在控件列的位置上，但不是控件 ——
+   行内字色、字号都比控件弱一档，读作「这一项的值是」，而不是「这里有个东西可以按」。
+   容器本身仍然靠右收尾（与同屏的按钮 / 开关 / 下拉共用右边线），文字在容器内
+   左对齐、允许折行：右对齐的是值格，不是整段文本。 */
+.srow > .sval {
+  justify-self: end;
+  text-align: left;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.srow > .sval.note { margin: 0; }
+
+/* 「背景」分区在皮肤不是「跟随背景图」时的空态说明：#imageSkinBlock 一 hidden
+   就露出来。选择器挂在兄弟关系上，所以显隐跟着 theme-ui 已有的 hidden 走，
+   不需要第二处 JS 去同步（两处状态源必然会漂）。 */
+.bg-needs-skin { display: none; }
+#imageSkinBlock[hidden] ~ .bg-needs-skin { display: block; }
 
 .field-inline { flex: none; }
 .field-inline select { min-width: 170px; }
+/* 下拉与滑杆撑满控件列：这两个是列宽的定义者，让它们左右都贴住列边，
+   一列里的下拉/滑杆才既右端齐、左端也齐（自绘下拉 .sel 是 select-menu.js
+   包在 .field-inline 里的呈现层，宽度要一路传下去）。 */
+.srow .field-inline,
+.srow .field-inline .sel,
+.srow .field-inline .sel-btn,
+.srow .field-inline select,
+.srow .slider { width: 100%; }
 /* 数字输入右对齐：阈值这类「量」视觉上贴着单位一侧收尾，比左对齐的空位数
    更像仪表读数。悬停描边与下拉/按钮同一档，键盘焦点环走 sel-bar。 */
 .num-input { width: 110px; font-family: var(--font-num); text-align: right; }

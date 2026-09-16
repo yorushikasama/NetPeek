@@ -134,13 +134,33 @@
     }
   }
 
+  // 玻璃加固是否生效：**有底图就生效，置底 / 贴膜通吃**。
+  // 没有底图时面板是实底（置底是 --bg、贴膜是纯 panel），出厂皮肤手写的字阶
+  // （88/48/23）就是设计意图本身，把它推到合成面档位等于凭空改掉三套出厂皮肤；
+  // 小窗是透明窗 + 实底面板，同理拿原始表。
+  // 贴膜 + 底图：膜的等效合成走 wrapFloor 那条独立判据（浓度地板保证 text2 达标），
+  // 但弱字阶与语义色不在那条判据里 —— 2026-09-15 实测贴膜地板面上 text3 只有
+  // Lc 20–23、error 40–42。加固层对着「置底最不利面」校出来的字色在贴膜地板面上
+  // 同样达标（贴膜地板面永远比置底最不利面更接近面板色，见回归里那条逐面扫描），
+  // 所以贴膜直接复用同一份加固，不用为它另开一档目标。
+  function glassHardenActive(bg) {
+    return !!bg;
+  }
+
   async function applyCurrent() {
     const skin = T.resolveSkin(state);
     const bg = await resolveBgUrl(skin.background || '');
     bgDataUrl = bg;
     const lightSkin = T.isLightSkin(skin.tokens);
     syncDirectionLabels(lightSkin);
-    T.applyTokens(skin.tokens);
+    // 上屏用加固后的表，其余一切（透镜反解、守卫、色板、广播）仍用原始表。
+    // 这样安排的依据：加固只动 text2/text3/语义色，而带的反解只看 text + panel/
+    // panel-2 —— 两边的输入不相交，所以「加固不会反过来移动带」，也就不存在
+    // 迭代收敛问题（回归里有一条幂等断言钉住这个性质）。
+    const harden = glassHardenActive(bg)
+      ? T.glassHardenTokens(skin.tokens)
+      : { tokens: skin.tokens, adjusted: [] };
+    T.applyTokens(harden.tokens);
     T.applyBackdrop({
       background: bg,
       panelOpacity: skin.panelOpacity,
@@ -155,6 +175,8 @@
       lens: refreshLens(),
       tokens: skin.tokens,
     });
+    // 小窗拿**原始**表：它是透明窗 + 实底面板（mini.css 明确不做 backdrop-filter），
+    // 没有合成面可言 —— 把为玻璃推亮过的字色送过去，小窗上就是一套被洗淡的颜色。
     broadcastTokens(skin.tokens);
     if (state.skin === 'image') {
       els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
@@ -172,7 +194,14 @@
 
   // 仅背景滑块变化：颜色没变，不用广播令牌，重铺 backdrop 就够。
   // autoDim / 贴膜地板都是可读性守卫的输出，跟着滑杆一起重铺。
+  //
+  // 加固后的字色也要跟着重写一次：它的目标底色是**带的最不利端上的合成面**，
+  // 而带只由皮肤（text + panel/panel-2）决定 —— 三根滑杆都不动它。所以这里
+  // 严格来说是幂等的重写（glassHardenTokens 内部有缓存，命中即返回）。
+  // 留着它是为了「切换置底/贴膜」这条路径：模式一变，加固该不该生效就变了。
   function applyBackdropOnly() {
+    const t = T.resolveSkin(state).tokens;
+    T.applyTokens(glassHardenActive(bgDataUrl) ? T.glassHardenTokens(t).tokens : t, { silent: true });
     T.applyBackdrop({
       background: bgDataUrl,
       panelOpacity: state.panelOpacity,

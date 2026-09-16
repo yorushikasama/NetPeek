@@ -36,6 +36,26 @@ pub fn rate_alert_thresholds(state: &SettingsState) -> (f64, f64) {
     (num("downAlertMb"), num("upAlertMb"))
 }
 
+/// 读取历史保留期（天，0 = 永久保留）。
+///
+/// history 侧的 retention_days 是 prune 的唯一依据，而它此前只有一个硬编码的
+/// 30 天初值 —— 只在用户当场改动那一刻才被 set_retention 推过去。于是选了
+/// 「永久保留」的用户每次重启都会被按 30 天清一次，超期数据真的被删且不可恢复。
+/// setup 阶段用这个函数把落盘的意图灌进去，见 lib.rs。
+///
+/// 取值已由 sanitize 夹在 [0, RETENTION_MAX_DAYS]；这里再兜一层，
+/// 保证即便调用方绕过合并管线也不会把负数交给 prune（那会算出未来的 cutoff）。
+pub fn retention_days(state: &SettingsState) -> i64 {
+    state
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("retentionDays")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(30)
+        .clamp(0, RETENTION_MAX_DAYS)
+}
+
 fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()

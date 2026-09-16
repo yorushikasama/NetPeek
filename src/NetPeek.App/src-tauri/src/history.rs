@@ -6,14 +6,20 @@
 // - 表结构：minute_stats(ts, pid, start_ts, name, down, up)，主键 (ts, pid, start_ts)。
 //   start_ts 是进程启动时间（unix 秒），与 pid 组成进程身份键，区分同分钟内的 PID 复用；
 //   同一 (pid, start_ts) 再出现时 UPSERT 累加字节、更新名称。旧库由 migrate_schema 迁移。
-// - 保留策略：retention_days 默认 30 天，启动时与每次整分钟翻转后清理过期行；
-//   set_retention 可实时调整并立即清理。
+// - 保留策略：retention_days 由启动时的 settings.retentionDays 灌入（见 lib.rs setup），
+//   启动时与每次整分钟翻转后清理过期行；set_retention 可实时调整并立即清理。
+//   注意这里**不能**用硬编码默认值顶着跑：用户选了「永久保留」而内存里还是 30 天，
+//   prune 会在下次启动时真的把超过 30 天的历史删掉，且不可恢复。
 // - 帧里 DownloadBytes/UploadBytes 是「本秒增量」，聚合即按分钟累加。
-// - 并发：record 由管道线程调用，spawn 的清理线程每秒检查一次分钟翻转，
+// - 并发：record 由管道线程调用，spawn 的落库线程每秒把「已经过去的分钟」写出去，
 //   两者通过 HistoryState 内的 Mutex 共享聚合桶；连接锁只用于写。
+//   聚合桶按分钟分层（minute -> 进程桶），帧归哪一分钟只由帧自己的时间戳决定 ——
+//   早先的实现只维护「当前分钟」这一个标量，落库线程每秒才发现翻转，
+//   于是新一分钟的头几帧会被写进上一分钟的 ts；跨零点那一帧因此被记到前一天，
+//   历史屏所有按天分桶的查询都会跟着错一格。
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +30,12 @@ use tauri::{AppHandle, Manager};
 const DB_FILE: &str = "history.db";
 const LOG_FILE: &str = "netpeek.log";
 const DEFAULT_RETENTION_DAYS: i64 = 30;
+
+/// 库未就绪时最多攒多少分钟的数据。正常情况下 init 在几十毫秒内完成，
+/// 这里攒的是那一小段时间的帧；但 init 也可能真的失败（磁盘满、目录不可写），
+/// 那时候不能无限攒下去把内存吃光 —— 超出就丢最老的分钟并留一条日志。
+/// 120 分钟足够覆盖任何正常的启动延迟，又不会让常驻进程的内存无界增长。
+const MAX_PENDING_MINUTES: usize = 120;
 const HOUR: i64 = 3600;
 const WEEK: i64 = 7 * 86400;
 
@@ -45,12 +57,21 @@ const SCHEMA_SQL: &str = "PRAGMA journal_mode=WAL;
 /// 用 pid+start_ts 作身份键，区分同一分钟内被复用的 PID。
 type Bucket = HashMap<(i64, i64), (String, i64, i64)>;
 
+/// 未落库的分钟集合：分钟起点（unix 秒）-> 该分钟的进程桶。
+/// 用 BTreeMap 而不是 HashMap：落库要按时间顺序取「已经过去的分钟」，
+/// 有序容器让 take_due 只看前缀、不必每秒遍历全部键。
+/// 正常情况下里面只有 1～2 个分钟（当前分钟 + 刚翻过去还没写出的那个）。
+type Pending = BTreeMap<i64, Bucket>;
+
 pub struct HistoryState {
     conn: Mutex<Connection>,
-    bucket: Mutex<Bucket>,
-    /// 当前聚合桶对应的分钟起点（unix 秒）；0 = 尚无数据。
-    bucket_minute: AtomicI64,
+    /// 按分钟分层的待落库数据。帧归哪一分钟由帧的时间戳决定，不受落库线程的轮询节奏影响。
+    pending: Mutex<Pending>,
     retention_days: Arc<AtomicI64>,
+    /// 真实文件库是否已就绪。init() 成功后置 true；仍为 false 时落库线程不写 ——
+    /// 占位内存库没有建表，写进去只会每分钟产生一条 "no such table" 日志、数据全丢，
+    /// 而前端把查不到数据渲染成「这个区间还没有落库的流量」，与真的没上网无法区分。
+    db_ready: AtomicBool,
     /// 错误日志文件路径（app_data_dir/netpeek.log），init() 时设置。
     log_path: Mutex<std::path::PathBuf>,
 }
@@ -60,9 +81,9 @@ impl HistoryState {
         Arc::new(Self {
             // 占位内存库，init() 打开真实文件库后替换。
             conn: Mutex::new(Connection::open_in_memory().expect("创建占位内存库失败")),
-            bucket: Mutex::new(HashMap::new()),
-            bucket_minute: AtomicI64::new(0),
+            pending: Mutex::new(BTreeMap::new()),
             retention_days: Arc::new(AtomicI64::new(DEFAULT_RETENTION_DAYS)),
+            db_ready: AtomicBool::new(false),
             log_path: Mutex::new(std::path::PathBuf::new()),
         })
     }
@@ -117,6 +138,8 @@ pub fn init(app: &AppHandle, state: &Arc<HistoryState>) -> Result<(), String> {
     migrate_schema(&conn).map_err(|e| format!("迁移历史库失败: {e}"))?;
 
     *state.conn.lock().unwrap() = conn;
+    // 真实库就绪必须在 prune 之前置位：prune 读 conn，而落库线程只看这个标志。
+    state.db_ready.store(true, Ordering::SeqCst);
     prune(state).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -160,33 +183,82 @@ fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// 启动后台线程：每秒检查分钟翻转，整分钟批量落库 + 清理过期。
+/// 取出所有「已经结束」的分钟（< 截止分钟）。当前分钟留在桶里继续累加。
+/// 传 i64::MAX 表示连当前分钟一起取走（退出前的收尾落库）。
+fn take_due(state: &HistoryState, before_minute: i64) -> Vec<(i64, Bucket)> {
+    let mut pending = state.pending.lock().unwrap();
+    // BTreeMap 有序，due 的分钟一定是前缀，split_off 一刀切开即可。
+    let mut due = std::mem::take(&mut *pending);
+    let keep = due.split_off(&before_minute);
+    *pending = keep;
+    due.into_iter().collect()
+}
+
+/// 把若干个整分钟写进库并清理过期行。落库线程与退出收尾共用。
+fn flush_due(state: &Arc<HistoryState>, due: Vec<(i64, Bucket)>) {
+    if due.is_empty() {
+        return;
+    }
+    // 库还没就绪就把数据放回去等下一轮：占位内存库没有建表，写进去等于丢。
+    // init 是在后台线程里开库的，正常只需等几十毫秒；但它也可能彻底失败
+    //（磁盘满、目录不可写），那时候不能无限攒 —— 只保留最近 MAX_PENDING_MINUTES 分钟，
+    // 更早的丢掉并记一条日志，宁可丢一段历史也不能把内存吃穿。
+    if !state.db_ready.load(Ordering::SeqCst) {
+        let mut pending = state.pending.lock().unwrap();
+        for (minute, bucket) in due {
+            let slot = pending.entry(minute).or_default();
+            for (key, (name, down, up)) in bucket {
+                let e = slot.entry(key).or_insert_with(|| (String::new(), 0, 0));
+                e.0 = name;
+                e.1 += down;
+                e.2 += up;
+            }
+        }
+        // log_error 锁的是 log_path，与 pending 是两把不相干的锁，这里不会自锁。
+        while pending.len() > MAX_PENDING_MINUTES {
+            let oldest = *pending.keys().next().expect("len > 0 时必有首键");
+            pending.remove(&oldest);
+            log_error(
+                state,
+                &format!(
+                    "历史库未就绪，丢弃积压分钟 {oldest}（超出 {MAX_PENDING_MINUTES} 分钟上限）"
+                ),
+            );
+        }
+        return;
+    }
+    let mut conn = state.conn.lock().unwrap();
+    for (minute, bucket) in &due {
+        if bucket.is_empty() {
+            continue;
+        }
+        if let Err(e) = flush_minute(&mut conn, bucket, *minute) {
+            log_error(state, &format!("历史落库失败（分钟 {minute}）：{e}"));
+        }
+    }
+    drop(conn);
+    if let Err(e) = prune(state) {
+        log_error(state, &format!("历史清理失败：{e}"));
+    }
+}
+
+/// 启动后台线程：每秒把已经过去的分钟批量落库 + 清理过期。
 pub fn spawn(state: Arc<HistoryState>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
-        let now_minute = minute_of(now_secs());
-        let bm = state.bucket_minute.load(Ordering::Relaxed);
-        if bm == 0 || bm == now_minute {
-            continue;
-        }
-        // 取出桶内容，避免写库期间阻塞管道线程的 record。
-        let bucket = {
-            let mut b = state.bucket.lock().unwrap();
-            let out = std::mem::take(&mut *b);
-            state.bucket_minute.store(now_minute, Ordering::Relaxed);
-            out
-        };
-        if !bucket.is_empty() {
-            let mut conn = state.conn.lock().unwrap();
-            if let Err(e) = flush_minute(&mut conn, &bucket, bm) {
-                log_error(&state, &format!("历史落库失败（分钟 {bm}）：{e}"));
-            }
-            drop(conn);
-            if let Err(e) = prune(&state) {
-                log_error(&state, &format!("历史清理失败：{e}"));
-            }
-        }
+        let due = take_due(&state, minute_of(now_secs()));
+        flush_due(&state, due);
     });
+}
+
+/// 退出前的收尾落库：把**所有**待落库分钟（含当前这个不完整的分钟）写出去。
+///
+/// 没有这一步的话，每次退出都稳定丢 0～59 秒的全量流量 —— 落库只在分钟翻转时发生，
+/// 而托盘退出走 app.exit(0)，当前分钟的桶直接随进程消失。单次不多，
+/// 但它每次退出都发生，日累计量会长期偏低。
+pub fn flush_on_exit(state: &Arc<HistoryState>) {
+    let due = take_due(state, i64::MAX);
+    flush_due(state, due);
 }
 
 /// 把一帧快照的「本秒增量」累加进当前分钟桶；pipe.rs 每帧调用。
@@ -194,41 +266,65 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
     if snap.get("Status").and_then(Value::as_str) != Some("ok") {
         return; // 暂停 / 异常期间速率为 0，无增量可记
     }
+    let now = now_secs();
     let ts = snap
         .get("TimestampUnixMs")
         .and_then(Value::as_i64)
         .map(|ms| ms / 1000)
-        .unwrap_or_else(now_secs);
+        .unwrap_or(now);
+    // 帧时间戳现在决定落库的 ts，所以它必须先过一道合理性检查。采集服务与 UI 是
+    // 两个进程，服务端时钟异常（或帧在管道里积压很久）会带来一个离谱的时间戳，
+    // 而它会原样变成库里的 ts —— 未来的 ts 永远不会被 prune 清掉，历史屏也画不到它。
+    // 偏离当前时间超过一小时就按「现在」记账：宁可把这一帧的分钟归错，
+    // 也不要在库里留一行永久的脏数据。
+    let ts = if (ts - now).abs() > HOUR { now } else { ts };
     let minute = minute_of(ts);
-    let mut bucket = state.bucket.lock().unwrap();
-    if bucket.is_empty() {
-        state.bucket_minute.store(minute, Ordering::Relaxed);
-    }
     let Some(procs) = snap.get("Processes").and_then(Value::as_array) else {
         return;
     };
+    // 先把这一帧解析成「有流量的进程」列表，再上锁合并。两个好处：
+    // 一是 JSON 解析不占着锁（record 由管道线程每秒调一次，锁的另一头是落库线程）；
+    // 二是整帧没有流量时压根不碰 pending —— 绝大多数分钟里整台机器一个字节都没走
+    //（空闲、锁屏），进循环前先 entry(minute) 会给每一分钟留一个空 HashMap。
+    // 空桶落库时被 flush_due 跳过，看似无害，但它占着 MAX_PENDING_MINUTES 的名额：
+    // init 真的失败时，一串空分钟会把**真正有流量**的那几分钟挤出积压上限。
+    let mut frame: Vec<((i64, i64), (String, i64, i64))> = Vec::new();
     for p in procs {
         let Some(pid) = p.get("Pid").and_then(Value::as_i64) else {
             continue;
         };
+        let down = p.get("DownloadBytes").and_then(Value::as_i64).unwrap_or(0);
+        let up = p.get("UploadBytes").and_then(Value::as_i64).unwrap_or(0);
+        if down <= 0 && up <= 0 {
+            // 无流量进程不占行，控制历史库体积。这一条同时挡掉了重连后的基线帧：
+            // 采集端在 UI 断开重连后会先发一帧「只把基线拉到当前值、速率报 0」的快照
+            //（见 EtwSnapshotSource.GetSnapshot 的 baseline 分支），它的 Status 是 ok，
+            // 靠上面那个 Status 检查拦不住 —— 但它的每个增量都是 0，到这里被跳过。
+            continue;
+        }
         // 启动时间（unix 毫秒）转秒，与 pid 组成身份键，区分同一分钟内被复用的 PID。
         let start_ts = p
             .get("StartTimeUnixMs")
             .and_then(Value::as_i64)
             .map(|ms| ms / 1000)
             .unwrap_or(0);
-        let down = p.get("DownloadBytes").and_then(Value::as_i64).unwrap_or(0);
-        let up = p.get("UploadBytes").and_then(Value::as_i64).unwrap_or(0);
-        if down <= 0 && up <= 0 {
-            continue; // 无流量进程不占行，控制历史库体积
-        }
         let name = p
             .get("Name")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        frame.push(((pid, start_ts), (name, down, up)));
+    }
+    if frame.is_empty() {
+        return;
+    }
+    // 按帧自己的分钟取桶：归属只由帧的时间戳决定，与落库线程的轮询节奏无关。
+    // 落库线程只取走「已经结束」的分钟，所以这里即使写进一个刚翻过去的分钟也不会丢。
+    let mut pending = state.pending.lock().unwrap();
+    let bucket = pending.entry(minute).or_default();
+    for (key, (name, down, up)) in frame {
         bucket
-            .entry((pid, start_ts))
+            .entry(key)
             .and_modify(|(n, d, u)| {
                 *d += down;
                 *u += up;
@@ -537,6 +633,15 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("清空历史失败: {e}"))
 }
 
+/// 启动时把 settings.json 里的保留期灌进内存态。
+///
+/// 必须在 init()（它结尾会 prune 一次）之前调用，否则那次清理按硬编码的 30 天跑：
+/// 用户选了「永久保留」也会被删掉超过 30 天的历史，而且不可恢复。
+/// 语义与 set_retention 一致：负数按 0（永久保留）处理。
+pub fn apply_retention(state: &Arc<HistoryState>, days: i64) {
+    state.retention_days.store(days.max(0), Ordering::SeqCst);
+}
+
 /// 调整保留天数（0 = 永久保留），并立即清理一次。
 #[tauri::command]
 pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
@@ -562,12 +667,31 @@ mod tests {
         assert_eq!(minute_of(120), 120);
     }
 
+    /// 帧时间戳现在要过一道「偏离现在不超过一小时」的合理性检查（见 record），
+    /// 所以测试数据必须贴着当前时间构造，不能再写死 2023 年的常量。
+    /// 返回当前分钟的起点。
+    fn this_minute() -> i64 {
+        minute_of(now_secs())
+    }
+
+    /// 取出 state 里某一分钟的桶副本，断言用。
+    fn bucket_at(state: &Arc<HistoryState>, minute: i64) -> Bucket {
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .get(&minute)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     #[test]
     fn record_accumulates_within_minute() {
         let state = HistoryState::new();
+        let minute = this_minute();
         let snap = json!({
             "Status": "ok",
-            "TimestampUnixMs": 1_700_000_050_000i64,
+            "TimestampUnixMs": (minute + 10) * 1000,
             "Processes": [
                 {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 100, "UploadBytes": 10},
                 {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 50, "UploadBytes": 0},
@@ -575,7 +699,7 @@ mod tests {
         });
         record(&state, &snap);
 
-        let bucket = state.bucket.lock().unwrap();
+        let bucket = bucket_at(&state, minute);
         assert_eq!(bucket.len(), 1, "同 (pid, start_ts) 应合并为一行");
         let (name, down, up) = bucket.get(&(1, 1)).expect("应有该进程条目");
         assert_eq!((name.as_str(), *down, *up), ("a.exe", 150, 10));
@@ -591,8 +715,44 @@ mod tests {
                 {"Pid": 1, "DownloadBytes": 0, "UploadBytes": 0},
             ]}),
         );
-        let bucket = state.bucket.lock().unwrap();
-        assert!(bucket.is_empty(), "暂停帧与零流量进程不应占行");
+        let pending = state.pending.lock().unwrap();
+        assert!(
+            pending.values().all(HashMap::is_empty),
+            "暂停帧与零流量进程不应占行"
+        );
+    }
+
+    /// 整帧没有流量时不能留下一个空分钟桶。空桶落库时会被 flush_due 跳过，
+    /// 所以它不会写脏数据 —— 但它占着 MAX_PENDING_MINUTES 的名额：机器空闲一小时
+    /// 就攒下 60 个空分钟，init 真的失败时这些空分钟会把真正有流量的分钟挤出上限。
+    #[test]
+    fn record_leaves_no_empty_minute_when_frame_has_no_traffic() {
+        let state = HistoryState::new();
+        // 全零增量（空闲，或重连后的基线帧：Status 是 ok 但每个增量都是 0）
+        record(
+            &state,
+            &json!({"Status": "ok", "Processes": [
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 0, "UploadBytes": 0},
+                {"Pid": 2, "StartTimeUnixMs": 2000, "Name": "b.exe", "DownloadBytes": 0, "UploadBytes": 0},
+            ]}),
+        );
+        assert!(
+            state.pending.lock().unwrap().is_empty(),
+            "零流量帧不应建出空分钟桶"
+        );
+
+        // 有一个字节就要建桶，别把上面那条优化做成「丢数据」。
+        record(
+            &state,
+            &json!({"Status": "ok", "Processes": [
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 0, "UploadBytes": 1},
+            ]}),
+        );
+        assert_eq!(
+            bucket_at(&state, this_minute()).get(&(1, 1)).map(|v| v.2),
+            Some(1),
+            "只有上传的进程也要落进桶"
+        );
     }
 
     #[test]
@@ -603,10 +763,202 @@ mod tests {
             {"Pid": 7, "StartTimeUnixMs": 2000, "Name": "new.exe", "DownloadBytes": 2, "UploadBytes": 0},
         ]});
         record(&state, &snap);
-        let bucket = state.bucket.lock().unwrap();
+        let bucket = bucket_at(&state, this_minute());
         assert_eq!(bucket.len(), 2, "PID 复用按启动时间拆分为两个身份");
         assert!(bucket.contains_key(&(7, 1)));
         assert!(bucket.contains_key(&(7, 2)));
+    }
+
+    /// 这条钉住的是用户会直接看到的那个 bug：跨分钟（尤其跨零点）的帧必须按
+    /// **自己的时间戳**归账。老实现只维护「当前分钟」一个标量，落库线程每秒才发现
+    /// 翻转，于是新一分钟的头几帧被写进上一分钟的 ts —— 跨零点那一帧因此记到前一天，
+    /// 历史屏所有按天分桶的查询都跟着错一格。
+    #[test]
+    fn record_attributes_each_frame_to_its_own_minute() {
+        let state = HistoryState::new();
+        let prev = this_minute() - 60;
+        let cur = this_minute();
+        let frame = |ts: i64, down: i64| {
+            json!({
+                "Status": "ok",
+                "TimestampUnixMs": ts * 1000,
+                "Processes": [
+                    {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": down, "UploadBytes": 0},
+                ],
+            })
+        };
+        // 先记新分钟，再记上一分钟的一帧（管道里积压晚到的那种）：顺序不影响归属。
+        record(&state, &frame(cur + 5, 30));
+        record(&state, &frame(prev + 30, 70));
+
+        assert_eq!(bucket_at(&state, cur).get(&(1, 1)).unwrap().1, 30);
+        assert_eq!(bucket_at(&state, prev).get(&(1, 1)).unwrap().1, 70);
+    }
+
+    /// 离谱的时间戳（采集服务时钟异常）不能原样变成库里的 ts：未来的 ts 永远
+    /// 不会被 prune 清掉，历史屏也画不到它，等于一行永久脏数据。
+    #[test]
+    fn record_clamps_absurd_timestamp_to_now() {
+        let state = HistoryState::new();
+        let snap = json!({
+            "Status": "ok",
+            "TimestampUnixMs": (now_secs() + 400 * 86_400) * 1000i64,
+            "Processes": [
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "a.exe", "DownloadBytes": 5, "UploadBytes": 0},
+            ],
+        });
+        record(&state, &snap);
+        let pending = state.pending.lock().unwrap();
+        let minutes: Vec<i64> = pending.keys().copied().collect();
+        assert_eq!(minutes.len(), 1);
+        assert!(
+            (minutes[0] - this_minute()).abs() <= 60,
+            "越界时间戳应按「现在」记账，实际分钟：{}",
+            minutes[0]
+        );
+    }
+
+    /// 落库线程只带走「已经结束」的分钟，当前分钟留在桶里继续累加 ——
+    /// 否则每秒轮询都会把正在累加的这一分钟切一刀写出去（虽然 UPSERT 会累加，
+    /// 但那让「一分钟一行」退化成「一秒一次写」）。
+    #[test]
+    fn take_due_keeps_current_minute() {
+        let state = HistoryState::new();
+        {
+            let mut pending = state.pending.lock().unwrap();
+            pending
+                .entry(600)
+                .or_default()
+                .insert((1, 0), ("a".into(), 1, 0));
+            pending
+                .entry(660)
+                .or_default()
+                .insert((1, 0), ("a".into(), 2, 0));
+            pending
+                .entry(720)
+                .or_default()
+                .insert((1, 0), ("a".into(), 3, 0));
+        }
+        let due = take_due(&state, 720);
+        assert_eq!(due.len(), 2, "只取走 720 之前的分钟");
+        assert_eq!(due[0].0, 600, "按时间顺序取出");
+        assert_eq!(due[1].0, 660);
+        let pending = state.pending.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key(&720), "当前分钟留在桶里");
+    }
+
+    /// 退出收尾要把当前这个不完整的分钟也带走，否则每次退出稳定丢 0～59 秒。
+    #[test]
+    fn take_due_max_takes_current_minute_too() {
+        let state = HistoryState::new();
+        {
+            let mut pending = state.pending.lock().unwrap();
+            pending
+                .entry(720)
+                .or_default()
+                .insert((1, 0), ("a".into(), 3, 0));
+        }
+        let due = take_due(&state, i64::MAX);
+        assert_eq!(due.len(), 1, "收尾落库连当前分钟一起取");
+        assert!(state.pending.lock().unwrap().is_empty());
+    }
+
+    /// 库没就绪时数据必须留在桶里等，不能写进没有建表的占位内存库。
+    /// 老实现在 init 失败后照旧起落库线程，结果每分钟一条 "no such table"、
+    /// 数据全丢，而前端把查不到渲染成「这个区间还没有落库的流量」。
+    #[test]
+    fn flush_due_retains_data_until_db_ready() {
+        let state = HistoryState::new();
+        // 用「当前分钟」而不是一个 1970 的小数字：flush_due 落库后会 prune，
+        // 保留期默认 30 天，远古的 ts 会被立刻删掉，断言就查不到行了。
+        let minute = minute_of(now_secs());
+        let mut bucket: Bucket = HashMap::new();
+        bucket.insert((1, 100), ("a.exe".into(), 10, 1));
+        flush_due(&state, vec![(minute, bucket)]);
+
+        assert!(!state.db_ready.load(Ordering::SeqCst));
+        let kept = bucket_at(&state, minute);
+        assert_eq!(
+            kept.get(&(1, 100)).map(|v| (v.1, v.2)),
+            Some((10, 1)),
+            "库未就绪时数据应留在桶里等，而不是被写丢"
+        );
+
+        // 库就绪后同一批数据要能真的落进去。
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+        }
+        state.db_ready.store(true, Ordering::SeqCst);
+        let due = take_due(&state, i64::MAX);
+        flush_due(&state, due);
+        let conn = state.conn.lock().unwrap();
+        let (down, up): (i64, i64) = conn
+            .query_row(
+                "SELECT down, up FROM minute_stats WHERE ts = ?1",
+                params![minute],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((down, up), (10, 1));
+    }
+
+    /// 库一直不就绪（磁盘满、目录不可写）时不能无限攒，否则内存会被吃穿。
+    #[test]
+    fn flush_due_caps_backlog_when_db_never_ready() {
+        let state = HistoryState::new();
+        for i in 0..(MAX_PENDING_MINUTES as i64 + 50) {
+            let mut bucket: Bucket = HashMap::new();
+            bucket.insert((1, 0), ("a.exe".into(), 1, 0));
+            flush_due(&state, vec![(i * 60, bucket)]);
+        }
+        let pending = state.pending.lock().unwrap();
+        assert_eq!(pending.len(), MAX_PENDING_MINUTES, "积压分钟数封顶");
+        // 丢的是最早的那些，留下的是最近的 —— 近期数据比远期更有价值。
+        assert!(pending.contains_key(&((MAX_PENDING_MINUTES as i64 + 49) * 60)));
+    }
+
+    /// 保留期必须能从设置灌进来。老实现里 settings.retentionDays 只在用户改动
+    /// 那一刻推给后端，重启后内存态永远从硬编码的 30 天起步：选了「永久保留」的
+    /// 用户会在下次启动时被真删掉 30 天前的历史，且不可恢复。
+    #[test]
+    fn apply_retention_accepts_forever_and_clamps_negative() {
+        let state = HistoryState::new();
+        assert_eq!(
+            state.retention_days.load(Ordering::SeqCst),
+            DEFAULT_RETENTION_DAYS
+        );
+
+        apply_retention(&state, 0); // 0 = 永久保留，不能被当成 falsy 修掉
+        assert_eq!(state.retention_days.load(Ordering::SeqCst), 0);
+
+        apply_retention(&state, 7);
+        assert_eq!(state.retention_days.load(Ordering::SeqCst), 7);
+
+        apply_retention(&state, -5); // 负数会让 prune 算出未来的 cutoff
+        assert_eq!(state.retention_days.load(Ordering::SeqCst), 0);
+    }
+
+    /// 永久保留（0）时 prune 一行都不能删。
+    #[test]
+    fn prune_keeps_everything_when_retention_is_forever() {
+        let state = HistoryState::new();
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up)
+                 VALUES (?1, 1, 0, 'a.exe', 1, 0)",
+                params![now_secs() - 400 * 86_400],
+            )
+            .unwrap();
+        }
+        apply_retention(&state, 0);
+        assert_eq!(prune(&state).unwrap(), 0, "永久保留时不应删任何行");
+
+        apply_retention(&state, 30);
+        assert_eq!(prune(&state).unwrap(), 1, "30 天保留期应删掉 400 天前的行");
     }
 
     #[test]

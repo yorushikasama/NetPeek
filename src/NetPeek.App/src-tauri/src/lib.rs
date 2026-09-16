@@ -11,7 +11,7 @@ mod theme;
 mod tray_theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -280,16 +280,34 @@ pub fn run() {
         .setup(|app| {
             let setup_start = std::time::Instant::now();
 
+            // 设置加载失败回退默认值，不让启动崩溃。
+            // **必须排在历史库之前**：保留期是用户设置，而历史库一就绪就会按它
+            // 清理过期行。反过来的话（设置还没读到就先 prune）用的是硬编码的 30 天，
+            // 选了「永久保留」的用户会在每次启动时被真删掉 30 天前的历史。
+            let settings_state = settings::init(app.handle()).unwrap_or_else(|e| {
+                eprintln!("初始化设置失败，使用默认设置：{e}");
+                settings::SettingsState::default()
+            });
+            let retention_days = settings::retention_days(&settings_state);
+            app.manage(settings_state);
+
             // 历史库初始化挪出关键路径：setup 阻塞着窗口与 WebView 的创建，
             // 开库 + 过期清理不该让用户等。占位内存库先顶住，真实库就绪后热替换。
             let history_state = history::HistoryState::new();
+            history::apply_retention(&history_state, retention_days);
             app.manage(history_state.clone());
             {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let t = std::time::Instant::now();
+                    // init 失败时**不能**照旧起落库线程：那时 conn 还是没有建表的
+                    // 占位内存库，写进去只会每分钟一条 "no such table"、数据全丢，
+                    // 而前端把查不到渲染成「这个区间还没有落库的流量」，
+                    // 与真的没上网无法区分。db_ready 由 init 成功时置位，
+                    // 落库线程见 false 就把数据留在桶里等库就绪（见 flush_due）。
                     if let Err(e) = history::init(&app_handle, &history_state) {
                         history::log_error(&history_state, &format!("初始化历史数据库失败：{e}"));
+                        eprintln!("[netpeek] history init 失败，历史将不落库：{e}");
                     }
                     eprintln!("[netpeek] history init {}ms", t.elapsed().as_millis());
                     history::spawn(history_state);
@@ -309,13 +327,6 @@ pub fn run() {
                     }
                 });
             }
-
-            // 设置加载失败回退默认值，不让启动崩溃。
-            let settings_state = settings::init(app.handle()).unwrap_or_else(|e| {
-                eprintln!("初始化设置失败，使用默认设置：{e}");
-                settings::SettingsState::default()
-            });
-            app.manage(settings_state);
 
             // 托盘状态镜像先于 pipe 线程注册：pipe.rs 每帧快照都会来写暂停状态。
             app.manage(TrayState {
@@ -437,8 +448,20 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running NetPeek UI");
+        // 用 build + run 而不是直接 run(context)：退出前要做一次历史收尾落库，
+        // 而那个时机只有 RunEvent::Exit 给得到。
+        .build(tauri::generate_context!())
+        .expect("error while building NetPeek UI")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                // 收尾落库：历史只在分钟翻转时写库，当前这个不完整的分钟还在内存里。
+                // 少了这一步，每次退出都稳定丢 0～59 秒的全量流量 —— 单次不多，
+                // 但它每次退出都发生，日累计量会长期偏低。
+                if let Some(state) = app_handle.try_state::<Arc<history::HistoryState>>() {
+                    history::flush_on_exit(&state);
+                }
+            }
+        });
 }
 
 fn show_main(app: &tauri::AppHandle) {

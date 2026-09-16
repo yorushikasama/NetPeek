@@ -21,20 +21,99 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 读取主题配置；不存在时返回空字符串，前端用默认值。
+///
+/// 编码容错与 settings.rs 同源：Windows 上手工编辑 JSON 自带 BOM / UTF-16 坑
+/// （记事本默认 UTF-8 带 BOM、PowerShell 5.1 的 -Encoding utf8 也加 BOM、另存为
+/// Unicode 是 UTF-16），而 serde_json 不认 BOM。这里先按字节解码再交还前端解析。
+///
+/// 文件存在但**解码不出合法文本**（截断 / 二进制损坏）：备份到
+/// `theme-config.json.corrupt-<时间戳>` 再返回空串，不抛错 —— 抛错会沿
+/// configStorage.load → initTheme 一路 reject，主窗主题整块起不来（比静默回退
+/// 更糟）。回退后用户自改的皮肤会丢在旧配置里，但文件本体保留可找回，且下一次
+/// 保存写的是全新有效配置。
 #[tauri::command]
 pub fn load_theme_config(app: AppHandle) -> Result<String, String> {
     let path = data_dir(&app)?.join(CONFIG_FILE);
     if !path.exists() {
         return Ok(String::new());
     }
-    fs::read_to_string(&path).map_err(|e| format!("读取主题配置失败: {e}"))
+    let bytes = fs::read(&path).map_err(|e| format!("读取主题配置失败: {e}"))?;
+    match decode_config_bytes(&bytes) {
+        Some(text) => Ok(text),
+        None => {
+            backup_corrupt_config(&path);
+            Ok(String::new())
+        }
+    }
 }
 
 /// 覆盖写入主题配置（整体保存，避免并发写局部字段）。
+///
+/// 落盘前先验证 JSON 可解析：前端把整份配置序列化后整体写回，写坏即丢全部皮肤
+/// （读侧解析失败 → null → 全新默认配置，用户自改的全没了）。save_theme_config
+/// 是公开命令，绕过界面直接 invoke 传垃圾的路径也在这里被拦下。
 #[tauri::command]
 pub fn save_theme_config(app: AppHandle, json: String) -> Result<(), String> {
     let path = data_dir(&app)?.join(CONFIG_FILE);
-    fs::write(&path, json).map_err(|e| format!("保存主题配置失败: {e}"))
+    write_config_file(&path, &json)
+}
+
+/// 校验并落盘（路径可注入，测试不走 AppHandle）。根必须是对象 —— 配置的合法
+/// 形状是「皮肤对象的映射」；解析出数组 / 标量说明调用方传错了结构，同样不落盘。
+fn write_config_file(path: &std::path::Path, json: &str) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("主题配置 JSON 解析失败: {e}"))?;
+    if !value.is_object() {
+        return Err("主题配置根节点必须是对象".into());
+    }
+    fs::write(path, json).map_err(|e| format!("保存主题配置失败: {e}"))
+}
+
+/// 配置字节解码：UTF-8（可选 BOM）/ UTF-16LE / UTF-16BE。
+/// 解码不出合法文本返回 None，交给调用方决定怎么兜（主题配置是备份 + 回退）。
+fn decode_config_bytes(bytes: &[u8]) -> Option<String> {
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
+        [0xFF, 0xFE, rest @ ..] => utf16_to_string(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16_to_string(rest, false),
+        _ => String::from_utf8(bytes.to_vec()).ok(),
+    }
+}
+
+/// UTF-16 字节转字符串；奇数字节判失败（截断的文件不该当成「几乎正确」）。
+fn utf16_to_string(bytes: &[u8], little_endian: bool) -> Option<String> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|p| {
+            if little_endian {
+                u16::from_le_bytes([p[0], p[1]])
+            } else {
+                u16::from_be_bytes([p[0], p[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// 把损坏的配置挪走，保留现场供人工找回。时间戳用进程启动时间，
+/// 避免与历史备份撞名。
+fn backup_corrupt_config(path: &std::path::Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!("{CONFIG_FILE}.corrupt-{stamp}"));
+    if let Err(e) = fs::rename(path, &backup) {
+        eprintln!("[NetPeek] 主题配置损坏，备份失败（保留原文件）: {e}");
+    } else {
+        eprintln!(
+            "[NetPeek] 主题配置无法解码，已备份到 {}，回退默认值",
+            backup.display()
+        );
+    }
 }
 
 /// 把用户选择的背景图（base64 data URL）落盘，返回保存后的绝对路径。
@@ -107,4 +186,119 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_plain_utf8() {
+        let text = decode_config_bytes(br#"{"themes":{}}"#).unwrap();
+        assert_eq!(text, r#"{"themes":{}}"#);
+    }
+
+    #[test]
+    fn decode_utf8_with_bom() {
+        // 记事本默认写 UTF-8 带 BOM；serde_json 不认 BOM，解码层必须先剥掉。
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(br#"{"themes":{}}"#);
+        let text = decode_config_bytes(&bytes).unwrap();
+        assert_eq!(text, r#"{"themes":{}}"#);
+    }
+
+    #[test]
+    fn decode_utf16() {
+        let cjk = r#"{"ai":{"provider":{"apiKey":"密钥"}}}"#;
+        let mut le = vec![0xFF, 0xFE];
+        for unit in cjk.encode_utf16() {
+            le.extend_from_slice(&unit.to_le_bytes());
+        }
+        let text = decode_config_bytes(&le).expect("UTF-16LE 应当能解码");
+        assert!(text.contains("密钥"), "UTF-16LE 解码后中文保留：{text}");
+
+        let mut be = vec![0xFE, 0xFF];
+        for unit in cjk.encode_utf16() {
+            be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let text = decode_config_bytes(&be).expect("UTF-16BE 应当能解码");
+        assert!(text.contains("密钥"), "UTF-16BE 解码后中文保留：{text}");
+    }
+
+    #[test]
+    fn decode_rejects_truncated_utf16() {
+        // 奇数字节 = 截断文件，不该被当成「几乎正确」。
+        assert!(decode_config_bytes(&[0xFF, 0xFE, 0x7B, 0x00, 0x41]).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_binary_garbage() {
+        // 非 UTF-8 的二进制内容由 from_utf8 拦下。
+        assert!(decode_config_bytes(&[0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE]).is_none());
+    }
+
+    #[test]
+    fn save_rejects_invalid_json() {
+        let dir = tmp_dir();
+        let path = dir.join(CONFIG_FILE);
+
+        assert!(
+            write_config_file(&path, "{ not json").is_err(),
+            "写坏 JSON 必须拒绝落盘（写坏即丢全部皮肤）"
+        );
+        assert!(
+            write_config_file(&path, "[1,2,3]").is_err(),
+            "根节点不是对象也必须拒绝（合法形状是皮肤映射）"
+        );
+        assert!(!path.exists(), "被拒绝的写入没有留下任何文件");
+    }
+
+    #[test]
+    fn save_accepts_valid_object() {
+        let dir = tmp_dir();
+        let path = dir.join(CONFIG_FILE);
+
+        write_config_file(&path, r#"{"themes":{"plain":{}},"skin":"plain"}"#).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"skin\""), "合法对象原样落盘：{saved}");
+    }
+
+    #[test]
+    fn backup_renames_corrupt_file() {
+        let dir = tmp_dir();
+        let path = dir.join(CONFIG_FILE);
+        std::fs::write(&path, [0x00, 0x01, 0x02, 0x03]).unwrap();
+
+        backup_corrupt_config(&path);
+        assert!(!path.exists(), "损坏的原文件被挪走");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(backups.len(), 1, "恰好一份备份");
+        assert!(
+            backups[0].starts_with("theme-config.json.corrupt-"),
+            "备份文件名带 corrupt 前缀：{}",
+            backups[0]
+        );
+    }
+
+    /// 每个用例独占一个临时目录，互不干扰；用例结束后由系统清理。
+    fn tmp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "netpeek-theme-test-{}-{}",
+            std::process::id(),
+            // 用文件系统的唯一计数代替随机：同进程内多次调用不撞名
+            rand_suffix()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
+    }
 }
