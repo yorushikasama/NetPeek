@@ -53,6 +53,11 @@ window.NetPeekCommon = {
       // 告警：右键菜单的「复制失败」回执用它。界面上原本没有负面状态的图形符号，
       // 缺了它失败回执只能是一行红字（§35）。
       'alert': '<circle cx="12" cy="12" r="9" /><path d="M12 7.5V13" /><path d="M12 16.5v.01" />',
+      // 日历：日期框自绘浮层的入口按钮（date-picker.js）。原生那个指示器是
+      // 浏览器画的、颜色跟着 color-scheme 走，跟我们自己的皮肤对不上，所以藏掉换它。
+      'calendar': '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5" /><path d="M8 3v4M16 3v4M3.5 10h17" />',
+      'chevron-left': '<path d="m15 6-6 6 6 6" />',
+      'chevron-right': '<path d="m9 6 6 6-6 6" />',
     };
     return `<svg class="ic ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor"`
       + ` stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;

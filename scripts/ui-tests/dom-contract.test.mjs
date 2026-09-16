@@ -27,6 +27,11 @@ const PAGES = {
   'mini.html': ['mini.js'],
 };
 
+// date-picker.js / select-menu.js 这类「渐进增强」脚本不查 id（只按选择器包装
+// 已有的控件），所以不参与上面那张表的两个方向检查。它们仍挂在 index.html 上，
+// 这里只作为一张显式的清单列出来，免得下次有人以为漏登记了。
+const ENHANCERS = ['select-menu.js', 'date-picker.js'];
+
 /** 抽出 HTML 里所有 id="..."。 */
 function htmlIds(file) {
   const src = fs.readFileSync(path.join(UI_DIR, file), 'utf8');
@@ -129,6 +134,16 @@ section('白名单本身没有过期项');
   const all = new Set([...htmlIds('index.html'), ...htmlIds('mini.html')]);
   for (const id of Object.keys(UNREFERENCED_OK)) {
     ok(all.has(id), `白名单项 ${id} 仍存在于 HTML（否则该删掉这条豁免）`);
+  }
+}
+
+section('渐进增强脚本都挂在了页面上');
+{
+  // 这一类脚本的失败方式是**完全静默**的：标签漏了，原生控件照常工作，
+  // 页面上看不出任何异常，只是自绘的那一层从来没出现过。
+  const src = fs.readFileSync(path.join(UI_DIR, 'index.html'), 'utf8');
+  for (const js of ENHANCERS) {
+    ok(src.includes(`<script src="${js}"></script>`), `index.html 引入了 ${js}`);
   }
 }
 

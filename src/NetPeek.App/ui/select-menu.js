@@ -126,7 +126,12 @@
         e.preventDefault();
         pick(cur);
       } else if (e.key === 'Escape') {
+        // 只收下拉这一层。不拦的话事件会冒到 document 上 —— history-ui 在那边
+        // 用 Esc 收整个自定义区间浮层，按一下 Esc 会把下拉和它所在的面板一起关掉。
+        // date-picker.js 的日历早就拦住了，这里是漏的那一处（同一场合里的两个
+        // 浮层必须给同一种回执，否则「按 Esc」在同一个表单里有两个含义）。
         e.preventDefault();
+        e.stopPropagation();
         close(true);
       }
     });

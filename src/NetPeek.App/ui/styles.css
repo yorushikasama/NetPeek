@@ -615,10 +615,12 @@ body.has-bg .sidebar {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 占比不占列宽：整行背景一条从左起的极淡下载色渐变，--share 由 JS 按数据喂 */
+/* 占比不占列宽：整行背景一条从左起的极淡色渐变，--share / --share-color 由 JS 喂。
+   长度是这一秒的合计流量占比、颜色是这一行的主方向（下载重是下载色、上传重是上传
+   色）—— 条的长短说「有多少」、条的颜色说「往哪边」，两者说的是同一行同一秒。 */
 .proc-table tbody tr {
   background-image: linear-gradient(90deg,
-    color-mix(in srgb, var(--down) 9%, transparent),
+    color-mix(in srgb, var(--share-color, var(--down)) 9%, transparent),
     transparent var(--share, 0%));
   background-repeat: no-repeat;
   /* 整行可点（选中/取消选中），给手型。此前只有表头是 pointer —— 表头能点、
@@ -1083,14 +1085,154 @@ span.app-badge {
 .hist-custom-range {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 10px 12px;
   padding: 10px 14px;
   border-top: 1px solid var(--line-soft);
   flex-wrap: wrap;
 }
-.hist-date-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
-.hist-custom-actions { display: flex; gap: 8px; }
-.hist-range-error { width: 100%; font-size: 12px; color: var(--error); }
+.hist-range-row { display: flex; align-items: center; gap: 8px; }
+.hist-range-tag { font-size: 12px; color: var(--text-3); flex: none; }
+.hist-range-tilde { color: var(--text-3); font-size: 12px; }
+
+/* 时刻档走的是主题化下拉（select-menu.js 的呈现层），不是 <input type="time">。
+   原生时刻框右边那个钟表按钮弹出的是 Chromium 的 PagePopup（独立文档），
+   页面 CSS 够不着 —— 灰石板底 + 亮蓝选中格，在暖棕皮肤下永远是一块贴错地方的
+   控件。跟日期框同一个根因，修法也一样：换成应用自己画的浮层。
+   取值本来就是 25 个离散值（全天 + 24 个整点，step=3600），下拉在语义上也正着。 */
+.hist-time-wrap { display: inline-flex; }
+/* .sel-btn 的 170px 下限是给设置页那些长文案下拉定的，这里只有「全天 / 09:00」，
+   按这一处收窄（0-2-0 对 0-1-0，压得住文件后面那条基础规则）。 */
+.hist-time-wrap .sel-btn { min-width: 0; width: 100px; }
+/* 25 个选项比设置页那些下拉长一倍，浮层自己限高滚动，否则一展开就顶出卡片 */
+.hist-time-wrap .sel-pop { max-height: 236px; overflow-y: auto; }
+
+/* 回执 + 按钮。flex-basis 100% 稳定占满第二行：不管上面字段多宽，
+   按钮都不会被挤到字段那一行去，位置在两种粒度间不跳。 */
+.hist-range-foot {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.hist-gran-note { font-size: 11.5px; color: var(--text-3); margin-right: auto; }
+.hist-custom-actions { display: flex; gap: 8px; flex: none; }
+.hist-range-error { flex: 1 1 100%; margin: 0; font-size: 12px; color: var(--error); }
+
+/* ---------- 主题化日期选择器（date-picker.js） ---------- */
+/* 原生日期框留在 DOM 里当唯一数据源，但它右边那个浏览器自绘的日历按钮必须藏掉：
+   留着就有两个入口，点原生那个又会弹出改不了色的 PagePopup（灰石板 + 蓝链接）。 */
+.dp { position: relative; display: inline-flex; }
+.dp-native { padding-right: 26px; }
+.dp-native::-webkit-calendar-picker-indicator { display: none; }
+.dp-btn {
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dp-btn:hover { color: var(--text); background: color-mix(in srgb, var(--sel-bar) 14%, transparent); }
+.dp-btn:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
+.dp-btn .ic { width: 14px; height: 14px; }
+.dp-btn[aria-expanded="true"] { color: var(--text); }
+
+/* 浮层。漆层与阴影走统一系统：面板色随 --paint-op 淡出、阴影强度随 --ui-opacity
+   淡出 —— 与 .sel-pop / .ctx-menu 同一约定，不然自定义底图下这块会比周围更「实」。 */
+.dp-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 228px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-l);
+  background: color-mix(in srgb, var(--panel-hi) calc(var(--paint-op) * 100%), transparent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / calc(0.32 * var(--ui-opacity)));
+  animation: sel-pop-in var(--t-fast) var(--ease);
+}
+.dp-head { display: flex; align-items: center; gap: 6px; }
+.dp-title { flex: 1; text-align: center; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.dp-nav, .dp-link {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dp-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--r-s);
+}
+.dp-nav:hover { color: var(--text); background: color-mix(in srgb, var(--sel-bar) 14%, transparent); }
+.dp-nav:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
+.dp-nav .ic { width: 14px; height: 14px; }
+.dp-dow { display: grid; grid-template-columns: repeat(7, 1fr); }
+.dp-dow i {
+  font-style: normal;
+  text-align: center;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+.dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dp-day {
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.dp-day:hover:not(:disabled) { background: color-mix(in srgb, var(--sel-bar) 16%, transparent); }
+.dp-day:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 0; }
+/* 相邻月的补白格：不是「不可用」而是「不在这个月」，所以只降透明度、仍可点选 */
+.dp-day.is-out { color: var(--text-3); }
+.dp-day.is-today { border-color: color-mix(in srgb, var(--sel-bar) 55%, transparent); }
+.dp-day.is-on {
+  background: var(--sel-bar);
+  border-color: var(--sel-bar);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.dp-day.is-off { color: var(--text-3); opacity: 0.4; cursor: default; }
+.dp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-soft);
+}
+.dp-link { padding: 3px 2px; font-size: 12px; }
+.dp-link:hover { color: var(--text); text-decoration: underline; }
+.dp-link:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 1px; }
 
 /* 导出按钮推到工具栏右端。原来靠一个 <span class="sp">，但 .sp 只在
    .card-head / .rc-head 下才有 flex:1 —— 工具栏里那个是死元素，按钮其实一直
@@ -1116,7 +1258,8 @@ span.app-badge {
   flex: none;
 }
 .rank-row + .rank-row { border-top: 1px solid var(--line-soft); }
-/* 占比条压在行底 2px：按下载占比以 --share 喂入（JS） */
+/* 占比条压在行底 2px：长度与颜色都由 JS 喂（--share / --share-color，见 history-ui.js）。
+   颜色跟着主方向走 —— 这张卡按合计排，条也按合计画，方向色才说明得了「它凭什么在这」。 */
 .rank-row::after {
   content: '';
   position: absolute;
@@ -1125,7 +1268,7 @@ span.app-badge {
   bottom: 0;
   height: 2px;
   border-radius: 1px;
-  background: linear-gradient(90deg, var(--down) var(--share, 0%), var(--line-soft) var(--share, 0%));
+  background: linear-gradient(90deg, var(--share-color, var(--down)) var(--share, 0%), var(--line-soft) var(--share, 0%));
 }
 .rank-icon {
   width: 20px;

@@ -129,10 +129,10 @@
                      aria-label="搜索应用、PID、对端 IP 或服务名" />
             </label>
             <!-- 取消排序的表外入口：只在排序生效时露出（renderSortMarks 同步 hidden）。
-                 默认态表格也有顺序（下载从高到低），但那是表格的默认呈现、不是用户选的
+                 默认态表格也有顺序（合计从高到低），但那是表格的默认呈现、不是用户选的
                  排序，所以默认态既不标箭头也不给这个按钮。 -->
             <button type="button" class="icon-btn sort-reset" id="sortReset" hidden
-                    title="恢复默认排序（下载从高到低）" aria-label="恢复默认排序">
+                    title="恢复默认排序（按下载 + 上传从高到低）" aria-label="恢复默认排序">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
             </button>
@@ -275,19 +275,96 @@
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4" /><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>导出 CSV
             </button>
           </div>
-          <!-- 自定义区间收在工具栏卡内：开启时把柱图往下压，不再用绝对定位浮层 -->
+          <!-- 自定义区间收在工具栏卡内：开启时把柱图往下压，不再用绝对定位浮层。
+               两行字段 + 一行脚注：
+                 第 1 行  开始 [日期] [时刻]  ~  结束 [日期] [时刻]
+                 第 2 行  聚合回执（左）                    应用 取消（右）
+               时刻是**可选**字段，「全天」就是它的空值。区间短到能画小时柱时它
+               才出现在版面上；画不下时整个字段收起来（不是涂灰 —— 灰控件读作「坏了」），
+               原因写在第 2 行那行回执里。见 history-ui.js 的 syncGranularity。
+               两个控件都不走原生弹层：日期是 date-picker.js 的自绘日历，时刻是
+               select-menu.js 的主题化下拉。原生的日期/时刻弹层是 Chromium 的
+               PagePopup（独立文档），页面 CSS 够不着 —— 只能是灰石板底 + 亮蓝选中格。
+               时刻用下拉而不是 <input type="time"> 还有一层语义上的正着：step=3600
+               意味着取值本来就是 25 个离散值（全天 + 24 个整点），不是连续量。
+               选项写在这里而不是用脚本生成：它们是数据不是逻辑，而且没人在
+               select-menu.js 之后补选项 —— 那个模块启动时就把 <option> 画成浮层了。
+               这里用 span + aria-label 而不是 label：浮层按钮塞在 label 里时，
+               点按钮会连带激活 label 关联的控件，等于同时开两个东西。 -->
           <form class="hist-custom-range" id="histCustomRange" hidden novalidate>
-            <label class="hist-date-field" for="histStartDate">
-              <span>开始日期</span>
-              <input type="date" id="histStartDate" required />
-            </label>
-            <label class="hist-date-field" for="histEndDate">
-              <span>结束日期</span>
-              <input type="date" id="histEndDate" required />
-            </label>
-            <div class="hist-custom-actions">
-              <button type="submit" class="btn is-primary" id="histCustomApply">应用</button>
-              <button type="button" class="btn" id="histCustomCancel">取消</button>
+            <div class="hist-range-row">
+              <span class="hist-range-tag">开始</span>
+              <input type="date" id="histStartDate" data-picker aria-label="开始日期" required />
+              <span class="hist-time-wrap" id="histStartTimeWrap">
+                <select class="hist-time" id="histStartTime" data-menu aria-label="开始时刻">
+                  <option value="">全天</option>
+                  <option value="00:00">00:00</option>
+                  <option value="01:00">01:00</option>
+                  <option value="02:00">02:00</option>
+                  <option value="03:00">03:00</option>
+                  <option value="04:00">04:00</option>
+                  <option value="05:00">05:00</option>
+                  <option value="06:00">06:00</option>
+                  <option value="07:00">07:00</option>
+                  <option value="08:00">08:00</option>
+                  <option value="09:00">09:00</option>
+                  <option value="10:00">10:00</option>
+                  <option value="11:00">11:00</option>
+                  <option value="12:00">12:00</option>
+                  <option value="13:00">13:00</option>
+                  <option value="14:00">14:00</option>
+                  <option value="15:00">15:00</option>
+                  <option value="16:00">16:00</option>
+                  <option value="17:00">17:00</option>
+                  <option value="18:00">18:00</option>
+                  <option value="19:00">19:00</option>
+                  <option value="20:00">20:00</option>
+                  <option value="21:00">21:00</option>
+                  <option value="22:00">22:00</option>
+                  <option value="23:00">23:00</option>
+                </select>
+              </span>
+            </div>
+            <div class="hist-range-row">
+              <span class="hist-range-tilde" aria-hidden="true">~</span>
+              <span class="hist-range-tag">结束</span>
+              <input type="date" id="histEndDate" data-picker aria-label="结束日期" required />
+              <span class="hist-time-wrap" id="histEndTimeWrap">
+                <select class="hist-time" id="histEndTime" data-menu aria-label="结束时刻">
+                  <option value="">全天</option>
+                  <option value="00:00">00:00</option>
+                  <option value="01:00">01:00</option>
+                  <option value="02:00">02:00</option>
+                  <option value="03:00">03:00</option>
+                  <option value="04:00">04:00</option>
+                  <option value="05:00">05:00</option>
+                  <option value="06:00">06:00</option>
+                  <option value="07:00">07:00</option>
+                  <option value="08:00">08:00</option>
+                  <option value="09:00">09:00</option>
+                  <option value="10:00">10:00</option>
+                  <option value="11:00">11:00</option>
+                  <option value="12:00">12:00</option>
+                  <option value="13:00">13:00</option>
+                  <option value="14:00">14:00</option>
+                  <option value="15:00">15:00</option>
+                  <option value="16:00">16:00</option>
+                  <option value="17:00">17:00</option>
+                  <option value="18:00">18:00</option>
+                  <option value="19:00">19:00</option>
+                  <option value="20:00">20:00</option>
+                  <option value="21:00">21:00</option>
+                  <option value="22:00">22:00</option>
+                  <option value="23:00">23:00</option>
+                </select>
+              </span>
+            </div>
+            <div class="hist-range-foot">
+              <span class="hist-gran-note" id="histGranNote"></span>
+              <div class="hist-custom-actions">
+                <button type="submit" class="btn is-primary" id="histCustomApply">应用</button>
+                <button type="button" class="btn" id="histCustomCancel">取消</button>
+              </div>
             </div>
             <p class="hist-range-error" id="histRangeError" role="alert" hidden></p>
           </form>
@@ -310,11 +387,11 @@
 
       <aside class="sidebar">
         <div class="rc is-fill">
-          <!-- 排序口径从「按下载」改成「按合计」：只按下载排会把上传重、下载轻的
-               应用（网盘同步、直播推流、做种、备份）整个挤出榜，而卡头那三个字
-               推断不出「有应用因此被隐掉了」。条数挂在标题右侧 —— 顶部合计是按
-               整个区间所有应用算的，列表被截断时必须说出来，否则把列出的行加起来
-               永远凑不出那个数，最自然的解读是「数据错了」。 -->
+          <!-- 排序口径从「按下载」改成「按合计」：这张卡有截断（`TOP_N`），只按下载排
+               会把上传重、下载轻的应用（网盘同步、直播推流、做种、备份）真的挤出榜外
+               —— 是少几行，不是排序喜好。卡头那三个字推断不出「有应用因此被隐掉了」。
+               条数挂在标题右侧 —— 顶部合计是按整个区间所有应用算的，列表被截断时必须
+               说出来，否则把列出的行加起来永远凑不出那个数，最自然的解读是「数据错了」。 -->
           <div class="rc-head">
             <h5 id="histRankTitle">应用排行</h5>
             <span class="rank-count" id="histRankCount"></span>
@@ -809,6 +886,7 @@
 <script src="theme.js"></script>
 <script src="theme-ui.js"></script>
 <script src="select-menu.js"></script>
+<script src="date-picker.js"></script>
 <script src="context-menu.js"></script>
 <script src="settings-ui.js"></script>
 <script src="history-ui.js"></script>

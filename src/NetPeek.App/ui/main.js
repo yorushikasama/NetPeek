@@ -437,16 +437,22 @@ const sortAccessors = {
   // 近 24 小时列排的是下载 + 上传：一列只有一个数，拆开排会让「按这列排」
   // 的结果和列里看到的数字对不上。
   day24: (p) => (p.Day24Down || 0) + (p.Day24Up || 0),
+  // 合计 = 这一秒的下载 + 上传。**没有对应的列**，它是默认顺序的取值器（见
+  // DEFAULT_SORT）：一列只有一个数，可「占带宽」是双向的 —— 只按下载排，
+  // 上传重下载轻的应用（网盘同步 / 直播推流 / 做种 / 备份）会整个沉底，
+  // 而它可能正是这一秒把上行塞满的那个。迷你窗 Top5、历史屏应用排行、
+  // 采集端快照顺序三处都已经是合计口径，这一处跟上，四处对齐。
+  total: (p) => (p.DownloadBytes || 0) + (p.UploadBytes || 0),
 };
 
 /**
- * 默认顺序：未排序时表格的呈现顺序 —— 下载从高到低，也就是「谁在占带宽」的答案。
+ * 默认顺序：未排序时表格的呈现顺序 —— **合计从高到低**，也就是「谁在占带宽」的答案。
  * 取消排序（点列头第三次，或点「恢复默认排序」）回到的就是它。
  * 单独拎出来是因为它同时被三处用到：排序取值、状态机落点、取消按钮的文案。
  */
-const DEFAULT_SORT = { key: 'download', dir: -1 };
+const DEFAULT_SORT = { key: 'total', dir: -1 };
 
-const SORT_HINT = '点击列头排序：先按这列的首选方向 → 再点反向 → 第三次取消排序（回到默认的下载从高到低）';
+const SORT_HINT = '点击列头排序：先按这列的首选方向 → 再点反向 → 第三次取消排序（回到默认的合计从高到低）';
 
 /**
  * 表头点击的排序状态机，三态循环：
@@ -456,8 +462,9 @@ const SORT_HINT = '点击列头排序：先按这列的首选方向 → 再点�
  * 为什么第三下是「取消」而不是继续翻方向：两态循环没有出口 —— 用户点完列头就再也回不到
  * 默认呈现，只能自己记住默认是按下载降序。这就是这个函数存在的全部理由。
  *
- * 「下载」列从默认态点第一下行序不动（默认本来就是下载降序），只多出箭头表示
- * 「现在是显式排序」。这不是死点击 —— 箭头亮灭是可见的状态变化。
+ * 默认顺序是「合计降序」（见 DEFAULT_SORT），而合计没有对应的列头 —— 于是点
+ * 任何一列的第一下都会真的重排，包括「下载」列（按下载降序，上传重的应用往下挪）。
+ * 这不是死点击，也不是特例：用户点下载列就是要按下载看。第三下取消回默认态。
  */
 function nextSortState(key, currentKey, currentDir) {
   const pref = key === 'name' ? 1 : -1;
@@ -635,7 +642,29 @@ function updatePeerCell(cell, p) {
   cell.classList.add('has-peer');
 }
 
-function updateRow(tr, p, peakDown) {
+/**
+ * 整行占比条的读数（§49）。
+ *
+ * 口径是这一秒的**合计流量**（下载 + 上传），不是只看下载。只看下载会让上传重的
+ * 应用那一行的条几乎空着 —— 而且用户手动点「上传」列头把它排到第一，条还是空的：
+ * 排序改的是「位置」，条说的是「重量」，后者给了一个错的答案。默认排序键、迷你窗
+ * Top5、历史屏应用排行、采集端快照顺序四处都是合计口径，这条是第五处。
+ *
+ * `dir` 是该行的主方向，条色跟着它走：条的长短说「有多少」，条的颜色说「往哪边」。
+ * 下载重的行戴下载色、上传重的行戴上传色 —— 于是「条满格 + 条是上传色」一眼就是
+ * 「这台机器正在拼命往上发」。
+ *
+ * `peak` 是**当前可见集合**里的合计峰值（最大的一行正好满格）。传 0（整表无流量）
+ * 时返回 0，条看不见 —— 与「有流量但很小」区分不开，但这一秒本来也就没什么可说。
+ */
+function shareOf(p, peak) {
+  const dn = p.DownloadBytes || 0;
+  const up = p.UploadBytes || 0;
+  const pct = peak > 0 ? Math.min(100, Math.round(((dn + up) / peak) * 100)) : 0;
+  return { pct, dir: dn >= up ? 'down' : 'up' };
+}
+
+function updateRow(tr, p, peakTotal) {
   const r = tr.refs;
   const name = p.Name || '(系统/未归因)';
   const icon = iconOf(p);
@@ -671,19 +700,29 @@ function updateRow(tr, p, peakDown) {
   r.day.classList.toggle('is-blank', day.blank);
   if (r.day.title !== day.title) r.day.title = day.title;
 
-  // 占比不占列宽：整行背景一条从左起的极淡下载色渐变（§2.5）。
-  // 渐变本身写在 styles.css 的 .proc-table tbody tr 里，这里只喂百分比 ——
-  // 原来这里拼的是写死的 rgba(240,145,63)，换主题时这条占比条不跟着走。
-  const share = peakDown > 0 ? Math.min(100, Math.round(((p.DownloadBytes || 0) / peakDown) * 100)) : 0;
-  const pct = `${share}%`;
+  // 占比不占列宽：整行背景一条从左起的极淡色渐变（§2.5）。
+  // 渐变本身写在 styles.css 的 .proc-table tbody tr 里，这里只喂两个变量：
+  // 长度（--share）与颜色（--share-color = 该行的主方向）。原来这里拼的是写死的
+  // rgba(240,145,63)，换主题时这条占比条不跟着走；条色也是写死的下载色。
+  const sh = shareOf(p, peakTotal);
+  const pct = `${sh.pct}%`;
   if (tr.style.getPropertyValue('--share') !== pct) tr.style.setProperty('--share', pct);
+  // 颜色只在方向翻了的时候写：1 Hz 刷新下每帧重设一次自定义属性会打断背景的过渡，
+  // 而换向本来是这条渐变唯一值得看的变化。
+  if (tr.dataset.shareDir !== sh.dir) {
+    tr.dataset.shareDir = sh.dir;
+    tr.style.setProperty('--share-color', `var(--${sh.dir})`);
+  }
 
   tr.classList.toggle('is-selected', !!selected && selected.keyStr === tr.dataset.key);
 }
 
 function renderTable(snap) {
   const procs = visibleProcesses(snap);
-  const peakDown = procs.reduce((m, p) => Math.max(m, p.DownloadBytes || 0), 0);
+  // 占比条的分母是**合计**峰值（见 shareOf）—— 与条的分子同源，也与默认排序
+  // 的取值器同源：满格的那一行就是排在第一位的那一行。
+  const peakTotal = procs.reduce(
+    (m, p) => Math.max(m, (p.DownloadBytes || 0) + (p.UploadBytes || 0)), 0);
   const alive = new Set();
 
   procs.forEach((p, i) => {
@@ -692,7 +731,7 @@ function renderTable(snap) {
     let tr = rowNodes.get(key);
     if (!tr) { tr = buildRow(key); rowNodes.set(key, tr); }
     tr.procData = p;
-    updateRow(tr, p, peakDown);
+    updateRow(tr, p, peakTotal);
     // 排序变化时顺序会整体重排；只在位置不对时才动 DOM
     if (els.rows.children[i] !== tr) els.rows.insertBefore(tr, els.rows.children[i] || null);
   });
@@ -1081,8 +1120,10 @@ function onDisconnected() {
 // 主区三屏互斥显示；rail 的选中态跟过去。视图切换和搜索在表格卡头里，
 // 随 live 屏整体显隐，不需要单独处理。
 
-function setScreen(next) {
-  if (next === screen) return;
+function setScreen(next, opts) {
+  // opts 是给目标屏的「进去之后做什么」，比如从今日卡跳过去要落到今天。
+  // 已经在这一屏、又没带这种要求时直接返回：切屏会让历史屏重拉一次库。
+  if (next === screen && !opts) return;
   screen = next;
   for (const pane of document.querySelectorAll('.screen[data-screen]')) {
     pane.hidden = pane.dataset.screen !== next;
@@ -1094,7 +1135,7 @@ function setScreen(next) {
   }
 
   if (next === 'live' && lastSnapshot) renderAll(lastSnapshot);
-  if (next === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.onEnter();
+  if (next === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.onEnter(opts);
   if (next === 'settings' && window.NetPeekSettingsUI) window.NetPeekSettingsUI.onEnter();
 }
 
@@ -1228,8 +1269,10 @@ function bindControls() {
   });
 
   // 今日合计 → 历史屏：实时屏里唯一指向「更早的数据」的数字，
-  // 点它就该去历史屏，而不是让用户自己去导航岛找图标（button 原生响应 Enter/Space）
-  $('todayBtn').addEventListener('click', () => setScreen('history'));
+  // 点它就该去历史屏，而不是让用户自己去导航岛找图标（button 原生响应 Enter/Space）。
+  // 并且要落到**今天那一格**：这个入口的全部语义就是「看今天的账」，
+  // 只切屏的话人还得在 30 根柱子里自己找哪根是今天。
+  $('todayBtn').addEventListener('click', () => setScreen('history', { focusToday: true }));
 
   // 归因说明挂在归因覆盖率上：点开点收，不另设入口（§2.4）
   const toggleNote = () => {

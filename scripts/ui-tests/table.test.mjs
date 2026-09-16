@@ -20,6 +20,7 @@ const sortAccessors = {
   download: (p) => p.DownloadBytes || 0,
   upload: (p) => p.UploadBytes || 0,
   day24: (p) => (p.Day24Down || 0) + (p.Day24Up || 0),
+  total: (p) => (p.DownloadBytes || 0) + (p.UploadBytes || 0),
 };
 
 // 近 24 小时的两张表：默认空。测试要验「附加与排序」时用 day24Table() 造一份真的，
@@ -27,8 +28,10 @@ const sortAccessors = {
 const emptyDay24 = () => ({ byKey: new Map(), byName: new Map(), ready: false });
 const UNATTR = '(系统/未归因)';
 
-// 默认顺序也是 const 对象，同样按原样注入（sortKey 为空时的落点）
-const DEFAULT_SORT = { key: 'download', dir: -1 };
+// 默认顺序也是 const 对象，同样按原样注入（sortKey 为空时的落点）。
+// 键是 total（下载 + 上传）而不是 download —— 于是一个「上传 8 MB/s、下载 20 KB/s」
+// 的做种应用会排在「下载 4 MB/s」的浏览器前面。
+const DEFAULT_SORT = { key: 'total', dir: -1 };
 
 /** 按给定的界面状态取一份 visibleProcesses / rowKey。 */
 function withState(state) {
@@ -101,22 +104,30 @@ section('visibleProcesses 排序');
 
 section('未排序（sortKey 为空）：走默认顺序，不是采集顺序');
 {
-  // 默认顺序是「下载从高到低」，和 sortKey='download'/dir=-1 同序 —— 但这两者不是
-  // 一回事：空 sortKey 不标箭头、露出「恢复默认排序」的反面（按钮收起来）。
+  // 默认顺序是「合计从高到低」（下载 + 上传），和 sortKey='total'/dir=-1 同序 ——
+  // 但这两者不是一回事：空 sortKey 不标箭头、露出「恢复默认排序」的反面（按钮收起来）。
   // 单独测一遍是因为 sortKey='' 会走 sortAccessors[effKey] 这条解析路径，
   // 漏了它就会拿 undefined 当取值器，每秒抛一次异常而页面看着只是「没排序」。
+  //
+  // 样本刻意让「按下载」与「按合计」给出**不同**的顺序：Pid 1 是上传重的做种型
+  //（下载 100 / 上传 300，合计 400），Pid 2 是纯下载型（300 / 0，合计 300）。
+  // 这是 §49 的回归锁 —— 默认键若被改回 download，第一条断言立刻炸。
   const snap = {
     Processes: [
-      proc({ Pid: 1, Name: 'b.exe', DownloadBytes: 100 }),
-      proc({ Pid: 2, Name: 'a.exe', DownloadBytes: 300 }),
-      proc({ Pid: 3, Name: 'c.exe', DownloadBytes: 200 }),
+      proc({ Pid: 2, Name: 'a.exe', DownloadBytes: 300, UploadBytes: 0 }),
+      proc({ Pid: 1, Name: 'b.exe', DownloadBytes: 100, UploadBytes: 300 }),
+      proc({ Pid: 3, Name: 'c.exe', DownloadBytes: 200, UploadBytes: 10 }),
     ],
   };
   const off = withState({ sortKey: '' }).visibleProcesses(snap);
-  eq(off.map((p) => p.Pid).join(','), '2,3,1', '空 sortKey 按默认（下载降序）排');
-  // 采集端给的顺序是 1,2,3，若哪天「未排序」被理解成「原样端上」，这条会先炸
-  eq(off.map((p) => p.Pid).join(','), withState({ sortKey: 'download', sortDir: -1 })
-    .visibleProcesses(snap).map((p) => p.Pid).join(','), '与显式「按下载降序」同序');
+  eq(off.map((p) => p.Pid).join(','), '1,2,3', '空 sortKey 按默认（合计降序）排');
+  // 采集端给的顺序是 2,1,3，若哪天「未排序」被理解成「原样端上」，这条会先炸
+  eq(off.map((p) => p.Pid).join(','), withState({ sortKey: 'total', sortDir: -1 })
+    .visibleProcesses(snap).map((p) => p.Pid).join(','), '与显式「按合计降序」同序');
+  // 把「默认只看下载」的后果钉死：上传重的那行会沉到最末
+  eq(withState({ sortKey: 'download', sortDir: -1 }).visibleProcesses(snap)
+    .map((p) => p.Pid).join(','), '2,3,1', '对照：按下载降序把它排到最后');
+  eq(off[0].Pid, 1, '默认第一位是上传重的那个 —— 上行塞满的机器不该看不见它');
 }
 
 section('排序状态机：三态循环，第三次点回默认（§36 修的是没有出口）');
@@ -144,12 +155,42 @@ section('排序状态机：三态循环，第三次点回默认（§36 修的是
   eq(`${sm.nextSortState('name', 'pid', -1).key}/${sm.nextSortState('name', 'pid', -1).dir}`,
     'name/1', '从 PID 切到应用 → 应用升序');
 
-  // 下载列特例：默认顺序本来就是下载降序，从默认态点它第一下行序不动，
-  // 但状态变成「显式排序」（箭头亮起）。这一下不是死点击，也不是漏洞。
+  // 默认顺序是「合计降序」，而合计**没有列头** —— 于是点任何一列的第一下都会真的
+  // 重排，包括「下载」列（按下载降序，上传重的应用往下挪）。这不是特例、不是死点击。
   const d1 = sm.nextSortState('download', '', -1);
-  eq(`${d1.key}/${d1.dir}`, 'download/-1', '未排序点下载 → 下载降序（与默认同序，只多出箭头）');
+  eq(`${d1.key}/${d1.dir}`, 'download/-1', '未排序点下载 → 下载降序（此时会真的重排）');
   eq(sm.nextSortState('download', 'download', -1).dir, 1, '再点下载 → 升序');
   eq(sm.nextSortState('download', 'download', 1).key, '', '第三次点下载 → 取消排序');
+}
+
+// ---------- 整行占比条（§49） ----------
+
+section('shareOf：占比条的分子是合计，颜色是主方向');
+{
+  const t = makeWith('main.js', ['shareOf'], {});
+
+  // 分子 = 下载 + 上传。做种 / 推流 / 网盘同步这类上传重的应用，条不该是空的 ——
+  // 只看下载会把它们画成 0%，而用户点「上传」列头把它们排到第一后，条还是空的。
+  eq(t.shareOf({ DownloadBytes: 0, UploadBytes: 500 }, 500).pct, 100,
+    '纯上传满格（只看下载会画出 0%）');
+  eq(t.shareOf({ DownloadBytes: 500, UploadBytes: 0 }, 500).pct, 100, '纯下载满格');
+  eq(t.shareOf({ DownloadBytes: 250, UploadBytes: 250 }, 500).pct, 100, '对半分也是满格');
+  eq(t.shareOf({ DownloadBytes: 100, UploadBytes: 100 }, 400).pct, 50, '按合计峰值归一');
+
+  // 方向：条色跟着主方向走（条的长短说有多少，条的颜色说往哪边）
+  eq(t.shareOf({ DownloadBytes: 300, UploadBytes: 100 }, 400).dir, 'down', '下载重 → 下载色');
+  eq(t.shareOf({ DownloadBytes: 100, UploadBytes: 300 }, 400).dir, 'up', '上传重 → 上传色');
+  eq(t.shareOf({ DownloadBytes: 200, UploadBytes: 200 }, 400).dir, 'down',
+    '五五开只能给一个答案 —— 取下载侧（等号归 down，规则要稳定）');
+  const seed = t.shareOf({ DownloadBytes: 20 * 1024, UploadBytes: 8 * 1024 * 1024 },
+    8 * 1024 * 1024 + 20 * 1024);
+  eq(`${seed.pct}/${seed.dir}`, '100/up', '做种型应用：条满格且是上传色（本轮要修的那个具体缺陷）');
+
+  // 边界：缺字段 / 全零 / 峰值为 0（分母为 0 时会写出 NaN，把 --share 弄坏）
+  eq(t.shareOf({}, 0).pct, 0, '字段缺失 + 峰值为 0 → 0%');
+  eq(t.shareOf({ DownloadBytes: 0, UploadBytes: 0 }, 100).pct, 0, '这一秒没流量 → 0%');
+  ok(Number.isFinite(t.shareOf({}, 0).pct), '峰值为 0 时返回有限数（NaN 会写坏 --share）');
+  eq(t.shareOf({ DownloadBytes: 999, UploadBytes: 999 }, 100).pct, 100, '超过峰值也封顶 100');
 }
 
 section('visibleProcesses 空与异常输入');
@@ -308,6 +349,7 @@ section('rowKey 随视图切换');
 function makeRenderTable(state) {
   const built = [];
   const updated = [];
+  const peaks = [];
   const rowNodes = new Map();
   const rows = {
     children: [],
@@ -330,6 +372,9 @@ function makeRenderTable(state) {
     {
       window: ctx,
       sortAccessors,
+      // sortKey 为空时会落到 DEFAULT_SORT.key，必须一起注入 —— 漏了就是
+      // ReferenceError，而它只在「默认态」那几条用例里炸。
+      DEFAULT_SORT,
       iconOf: () => '',
       query: '',
       viewMode: 'process',
@@ -348,11 +393,12 @@ function makeRenderTable(state) {
           remove() { const i = rows.children.indexOf(this); if (i >= 0) rows.children.splice(i, 1); },
         };
       },
-      updateRow: (tr, p) => { updated.push(tr.dataset.key); },
+      // 第三参是占比条的分母（合计峰值）—— 捕获它才验得了 renderTable 喂的是合计
+      updateRow: (tr, p, peak) => { updated.push(tr.dataset.key); peaks.push(peak); },
       ...state,
     },
   );
-  return { ...api, built, updated, rowNodes, rows, pidLabel };
+  return { ...api, built, updated, peaks, rowNodes, rows, pidLabel };
 }
 
 section('renderTable 首帧建行');
@@ -389,6 +435,24 @@ section('renderTable 第二帧复用同一批节点');
   eq(t.rows.children[0] === first[0], true, '第一行是同一个节点');
   eq(t.rows.children[1] === first[1], true, '第二行是同一个节点');
   eq(t.updated.length, 4, '两帧共四次 updateRow —— 数据靠就地改，不靠重建');
+}
+
+section('renderTable 喂给占比条的分母是合计峰值（与默认排序同源）');
+{
+  // 分母错了不会报错，只是每一行的条都画成错的长度 —— 属于「数字悄悄变得不对」那类。
+  const t = makeRenderTable({ sortKey: '', sortDir: -1 });
+  t.renderTable({
+    Processes: [
+      proc({ Pid: 1, Name: 'seed', DownloadBytes: 100, UploadBytes: 500 }),   // 合计 600
+      proc({ Pid: 2, Name: 'browser', DownloadBytes: 400, UploadBytes: 0 }),  // 合计 400
+    ],
+  });
+  eq(t.peaks.join(','), '600,600', '两行拿到的分母都是合计峰值 600');
+  // 下载峰值是 400。分母若还按下载取，做种那行得到 100/400 = 25% —— 而它才是这一秒
+  // 的带宽主力（合计 600），本该满格。
+  ok(t.peaks[0] !== 400, '分母不是下载峰值');
+  eq(t.rows.children.map((n) => n.dataset.key.split(':')[1]).join(','), '1,2',
+    '默认态（合计降序）下合计最大的排第一 —— 满格的那一行就是第一行');
 }
 
 section('renderTable 进程退出后删行');

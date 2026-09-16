@@ -492,8 +492,9 @@ pub fn history_stats(app: AppHandle) -> Result<String, String> {
 }
 
 /// 任意时间区间的聚合查询：按桶（秒）分组。bucket 取值：
-/// 3600 = 小时（整小时偏移的时区下与本地小时对齐）、604800 = 7 天、
-/// 0 = 本地日（按本地零点分组，跨夏令时也对）。
+/// 3600 = 本地整点（同下一条的理由：`(ts/3600)*3600` 是 UTC 整点，
+/// 只在整小时偏移的时区里碰巧等于本地整点，半小时偏移的时区会整体偏半小时）、
+/// 604800 = 7 天、0 = 本地日（按本地零点分组，跨夏令时也对）。
 /// anchor 只对周桶有意义：UTC 周（(ts/604800)*604800，1970 周四对齐）在
 /// 非 UTC 时区下会从周四 08:00 这种边界开始，标签对不上用户预期的周一；
 /// 前端把区间起点的「本地周一零点」算好传进来，SQL 以它为锚做整周对齐。
@@ -506,7 +507,12 @@ fn query_range_buckets(
     anchor: i64,
 ) -> rusqlite::Result<Vec<RangeRow>> {
     let sql = if bucket == HOUR {
-        "SELECT (ts/3600)*3600 AS bts, name, SUM(down) AS down, SUM(up) AS up
+        // 本地整点桶：先取「当天已走过的本地秒数」（见下面日桶那条注释的推导），
+        // 再对 3600 取模得到「本小时已走过的秒数」，减掉就是本地整点。
+        // 不能用 (ts/3600)*3600：那是 UTC 整点，UTC+8 下碰巧相等，
+        // 但 UTC+5:30 这类时区会整体偏半小时，前端按本地小时排的骨架就一格都填不上。
+        "SELECT ts - (CAST(strftime('%s', ts, 'unixepoch', 'localtime') AS INTEGER) % 3600) AS bts,
+                name, SUM(down) AS down, SUM(up) AS up
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     } else if bucket == WEEK {
@@ -553,8 +559,10 @@ pub struct RangeRow {
     up: i64,
 }
 
-/// 任意时间区间的聚合查询：统计屏「自定义时间」的数据源。
-/// 与 history_daily（按天、给检查栏 30 天小图复用）不同，这里支持小时粒度。
+/// 任意时间区间的聚合查询：历史屏「自定义区间 ≤ 3 天」那一档的数据源
+/// （前端 planQuery 判粒度，bucket 传 3600）。
+/// 与 history_daily / history_range_days（按本地日聚合、给日柱图用）不同，
+/// 这条支持小时粒度 —— 所以它返回的是 `ts` 数值键，由前端换算成本地小时串。
 /// anchor = 周桶锚点（区间起点所在周的本地周一零点），非周桶传 0 即可。
 #[tauri::command]
 pub fn history_range(
@@ -998,7 +1006,9 @@ mod range_tests {
         let conn = state.conn.lock().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
 
-        // 小时桶与时区无关，可精确断言。三行分钟数据落在两个相邻小时。
+        // 桶键是**本地**整点，不是 UTC 整点。(ts/3600)*3600 在 UTC+8 下碰巧相等，
+        // 拿它当期望值会把「本地对齐」这件事测成「UTC 对齐」—— 而半小时偏移的
+        // 时区里，前端按本地小时排的骨架会一格都填不上。所以按行为断言。
         let base = 1_700_000_040; // 分钟对齐
         for (ts, down, up) in [
             (base, 10i64, 1i64),
@@ -1012,13 +1022,38 @@ mod range_tests {
             .unwrap();
         }
 
-        let b0 = (base / HOUR) * HOUR;
-        let b1 = ((base + 3660) / HOUR) * HOUR;
         let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR, 0).unwrap();
-        assert_eq!(rows.len(), 2, "两个小时的桶");
-        assert_eq!((rows[0].ts, rows[0].down, rows[0].up), (b0, 30, 3));
-        assert_eq!((rows[1].ts, rows[1].down, rows[1].up), (b1, 40, 4));
-        assert!(rows[1].ts % HOUR == 0, "桶起点对齐到整小时");
+        assert!(!rows.is_empty());
+        assert_eq!(rows.iter().map(|r| r.down).sum::<i64>(), 70, "分桶后总量守恒");
+        for r in &rows {
+            let hms: String = conn
+                .query_row(
+                    "SELECT strftime('%M:%S', ?1, 'unixepoch', 'localtime')",
+                    params![r.ts],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hms, "00:00", "小时桶键必须落在本地整点");
+        }
+
+        // 前两行同一小时、第三行在下一小时（是否跨越由本地时区决定，所以按
+        // 本地小时名自己判一次，而不是写死 2）。
+        let hour_of = |ts: i64| -> String {
+            conn.query_row(
+                "SELECT strftime('%Y-%m-%d %H', ?1, 'unixepoch', 'localtime')",
+                params![ts],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        if hour_of(base) == hour_of(base + 3660) {
+            assert_eq!(rows.len(), 1, "三行同属一个本地小时就只有一个桶");
+            assert_eq!(rows[0].down, 70);
+        } else {
+            assert_eq!(rows.len(), 2, "跨本地小时分成两个桶");
+            assert_eq!(rows[0].down, 30, "同一小时内的两行合并");
+            assert_eq!((rows[1].down, rows[1].up), (40, 4));
+        }
     }
 
     #[test]
@@ -1037,7 +1072,15 @@ mod range_tests {
         // 左闭右开：只包含 [base, base+3600)
         let rows = query_range_buckets(&conn, base, base + 3600, HOUR, 0).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].ts, (base / HOUR) * HOUR);
+        let hms: String = conn
+            .query_row(
+                "SELECT strftime('%M:%S', ?1, 'unixepoch', 'localtime')",
+                params![rows[0].ts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hms, "00:00", "桶键落在本地整点");
+        assert!(rows[0].ts <= base && base - rows[0].ts < HOUR, "base 落在它的桶内");
     }
 
     #[test]

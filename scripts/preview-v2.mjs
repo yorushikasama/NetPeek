@@ -54,6 +54,22 @@ function histRows(n) {
   return rows;
 }
 
+// 小时桶（history_range，bucket=3600）的假数据。ts 必须是**桶起点**且与本地整点
+// 对齐 —— 真后端就是这么给的（history.rs 的 query_range_buckets），前端拿 ts
+// 转本地时刻串去对骨架。这里少对齐一格，柱图上就是整片错位而不是少一根。
+function hourRows(startSec, endSec) {
+  const rows = [];
+  const first = Math.floor(startSec / 3600) * 3600;
+  for (let t = first; t < endSec; t += 3600) {
+    const hour = new Date(t * 1000).getHours();
+    HIST_NAMES.slice(0, 4).forEach((name, i) => {
+      const wave = 1 + Math.abs(Math.sin(hour / 3 + i));
+      rows.push({ ts: t, name, down: Math.round((6 - i) * 3.6e7 * wave), up: Math.round((6 - i) * 4.2e6 * wave) });
+    });
+  }
+  return rows;
+}
+
 window.__TAURI__ = {
   core: {
     invoke: async (cmd, args) => {
@@ -61,6 +77,7 @@ window.__TAURI__ = {
         case 'history_daily': return JSON.stringify(histRows(Math.min(Number(args && args.days) || 30, 400)));
         case 'history_process_totals': return JSON.stringify(day24Rows());
         case 'history_range_days': return JSON.stringify(histRows(30));
+        case 'history_range': return JSON.stringify(hourRows(Number(args && args.start) || 0, Number(args && args.end) || 0));
         case 'history_stats': return JSON.stringify({
           rows: 41870,
           bytes: 6.4 * 1024 * 1024,
@@ -139,7 +156,13 @@ window.__setStatus = (s) => { frameStatus = s; };
 function frame() {
   tick++;
   const procs = PROCS.map(([name, pid, down, up, ip, port, cc], i) => {
-    const jitter = 1 + Math.sin(tick / 4 + i) * 0.35;
+    // 抖动是**同相**的（不带行号 i）：所有行同乘一个系数。带相位差时「哪一行更大」
+    // 会随 tick 漂移，行序在几百毫秒内自己换位 —— 排序类断言（「取消排序后行序回到
+    // 基准」）就成了掷骰子，而它要判定的是状态机回没回默认，不是数据抖没抖。
+    // §49 把默认排序换成合计后，相邻行的合计比出现了四处 ≤1.5（下载口径只有一处），
+    // 这个副作用立刻把 sort-cycle / sort-reset 打红。代价是行与行之间的相对大小恒定
+    // （少了点真实感），换回来的是断言可判定 —— 预览假桥的职责本来就是给断言当基准。
+    const jitter = 1 + Math.sin(tick / 4) * 0.35;
     return {
       Pid: pid, Name: name, Path: pid ? 'C:\\\\Program Files\\\\' + name + '\\\\' + name + '.exe' : '',
       IconBase64: '', StartTimeUnixMs: BOOT - (3600 + i * 900) * 1000,
@@ -516,10 +539,10 @@ const report = [];
 
 // 导轨按钮点完会留下 hover，data-tip 气泡浮在卡片标题和「导出 CSV」上，
 // 每张截图都糊一块。截图前把指针移到顶栏空白处，气泡自然消失。
-async function shoot(page, file) {
+async function shoot(page, file, opts) {
   await page.mouse.move(640, 6);
   await page.waitForTimeout(180);
-  await page.screenshot({ path: file });
+  await page.screenshot({ path: file, ...(opts || {}) });
 }
 
 for (const vp of VIEWPORTS) {
@@ -694,6 +717,58 @@ for (const vp of VIEWPORTS) {
     active: [nameAsc.col, nameAsc.aria, nameAsc.btn], off: [resetOff.col, resetOff.btn, resetOff.order === baseOrder],
   })} ${resetOk ? 'OK' : 'FAIL'}`);
 
+  // ---- 整行占比条：口径是合计、颜色是主方向（§49）----
+  // 两件事各自有确定性口径，且都不重算实现里的公式：
+  //  ① 口径 —— 预览数据里 OneDrive 是「上传重、下载轻」的那一行（上 4.4e4 / 下 6.2e3）。
+  //     按下载口径它的条是 round(6200/2.4e6) = 0%，按合计口径是 round(5.02e4/2.71e6) = 2%。
+  //     所以「这一行的条 ≥ 1%」就是口径的判据 —— 读的是渲染出来的 --share，不是模型。
+  //  ② 颜色 —— 「变量写了但 CSS 没接线」是最容易发生的静默失败（变量在、颜色不变）。
+  //     用行为探测：把 --share-color 临时改成刺眼的红，background-image 必须跟着变。
+  const shareBar = await page.evaluate(() => {
+    const trs = [...document.querySelectorAll('#rows tr')];
+    const read = (tr) => {
+      const st = tr.getAttribute('style') || '';
+      const pct = /--share:\s*([\d.]+)%/.exec(st);
+      const col = /--share-color:\s*([^;]+)/.exec(st);
+      const nm = tr.querySelector('.row-name');
+      return {
+        name: nm ? nm.textContent : '',
+        share: pct ? Number(pct[1]) : null,
+        color: col ? col[1].trim() : '',
+      };
+    };
+    const rows = trs.map(read);
+    const one = trs.find((tr) => /^OneDrive$/.test(read(tr).name));
+    let reacts = false;
+    if (one) {
+      const before = getComputedStyle(one).backgroundImage;
+      const keep = one.style.getPropertyValue('--share-color');
+      one.style.setProperty('--share-color', '#ff0000');
+      reacts = getComputedStyle(one).backgroundImage !== before;
+      if (keep) one.style.setProperty('--share-color', keep);
+      else one.style.removeProperty('--share-color');
+    }
+    return { n: rows.length, top: rows[0], one: one ? read(one) : null, reacts };
+  });
+  const shareOk = !!shareBar.one && shareBar.one.share >= 1
+    && shareBar.one.color === 'var(--up)' && shareBar.reacts;
+  report.push(`[${vp.tag}] share-bar ${JSON.stringify({ ...shareBar })} ${shareOk ? 'OK' : 'FAIL'}`);
+  // 特写留证：条色差异（下载色 / 上传色）在整屏图里只有几像素高，单独裁表格可视区。
+  // 上传重的那一行（OneDrive）本来就排在滚动区下方 —— 先滚到它可见再裁，截完滚回顶部，
+  // 免得后面那些截图拍到一张滚过半路的表格。
+  const barBox = await page.locator('#tableWrap').boundingBox();
+  if (barBox) {
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#rows tr')]
+        .find((r) => r.querySelector('.row-name') && /^OneDrive$/.test(r.querySelector('.row-name').textContent));
+      if (tr) tr.scrollIntoView({ block: 'center' });
+    });
+    await page.waitForTimeout(220);
+    await shoot(page, path.join(outDir, `${vp.tag}-share-bar.png`), { clip: barBox });
+    await page.evaluate(() => { document.getElementById('tableWrap').scrollTop = 0; });
+    await page.waitForTimeout(150);
+  }
+
   // ---- 右键菜单与可复制的值（§35）----
   // 原生菜单看不见也断言不了，但「有没有被拦」有确定性的观测口径：
   //   el.dispatchEvent(cancelableEvent) 的返回值就是 preventDefault 的回执 —— false 即被拦。
@@ -838,12 +913,142 @@ for (const vp of VIEWPORTS) {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(200);
 
-  // 历史屏：自定义区间展开态
+  // 历史屏：自定义区间展开态。
+  // 这一段量的是「粒度回执」，不是像素：判据读 DOM 上真渲染出来的东西
+  // （hidden / textContent），不读实现里的 unit 变量 —— 同源的是渲染结果。
+  // 两态都要覆盖，因为它们的版面不同：默认落在今天 → 小时档、时刻框在场；
+  // 拉宽到 10 天 → 整日档、时刻框收起、回执改口。
+  const rangeForm = async () => page.evaluate(() => ({
+    startTimeShown: !document.getElementById('histStartTimeWrap').hidden,
+    endTimeShown: !document.getElementById('histEndTimeWrap').hidden,
+    note: document.getElementById('histGranNote').textContent,
+    start: document.getElementById('histStartDate').value,
+    end: document.getElementById('histEndDate').value,
+  }));
+  // 只截工具栏那张卡：整幅截图里这一行只有一条指甲盖高，版面好坏判不出来。
+  // extra 给展开的浮层留高度（下拉/日历是绝对定位的，不在表单的 rect 里）。
+  const rangeClip = async (extra = 0) => {
+    const b = await page.evaluate(() => {
+      const r = document.getElementById('histCustomRange').getBoundingClientRect();
+      return { x: Math.max(0, r.left - 8), y: Math.max(0, r.top - 8), width: r.width + 16, height: r.height + 16 };
+    });
+    return { clip: { ...b, height: b.height + extra } };
+  };
+
   await page.click('.ri[data-screen="history"]');
   await page.waitForTimeout(700);
   await page.click('#histCustomToggle');
   await page.waitForTimeout(500);
-  await shoot(page, path.join(outDir, `${vp.tag}-history-custom.png`));
+  const hourState = await rangeForm();
+  await shoot(page, path.join(outDir, `${vp.tag}-history-custom.png`), await rangeClip());
+  // 判据：默认档必须是小时档，且时刻框真的在版面上。
+  // 这里不写死「今天」—— 跨零点跑的时候默认档会翻页，那不是回归。
+  const hourOK = hourState.start === hourState.end
+    && hourState.startTimeShown && hourState.endTimeShown
+    && /按小时聚合 · 共 \d+ 小时/.test(hourState.note);
+  report.push(`[${vp.tag}] hist-custom 默认档 ${hourState.start} ~ ${hourState.end} `
+    + `时刻框=${hourState.startTimeShown && hourState.endTimeShown ? '在场' : '收起'} `
+    + `回执="${hourState.note}" ${hourOK ? 'OK' : 'FAIL'}`);
+
+  // 时刻档：断言它是**应用画的下拉**而不是原生控件。
+  // 原生 <input type="time"> 右端那个钟表按钮弹出的是 Chromium 的 PagePopup
+  // （独立文档），页面 CSS 够不着 —— 那正是用户报的「灰底蓝格跟主题不适配」。
+  // 两个判据都读渲染结果：① 页面里已经没有原生时刻输入框；② 展开后的浮层
+  // 真的在 document 里（原生弹层根本不在 document 里，querySelector 查不到）。
+  const timeMenu = await page.evaluate(() => {
+    const sel = document.getElementById('histEndTime');
+    const label = sel.parentElement.querySelector('.sel-label');
+    return {
+      enhanced: sel.classList.contains('sel-native'),
+      optionCount: sel.options.length,
+      shown: label ? label.textContent : '(没有 .sel-label)',
+      nativeTimeInputs: document.querySelectorAll('input[type="time"]').length,
+    };
+  });
+  const menuOK = timeMenu.enhanced && timeMenu.optionCount === 25
+    && timeMenu.shown === '全天' && timeMenu.nativeTimeInputs === 0;
+  report.push(`[${vp.tag}] hist-custom 时刻档 增强=${timeMenu.enhanced} `
+    + `选项=${timeMenu.optionCount} 显示="${timeMenu.shown}" `
+    + `原生时刻框=${timeMenu.nativeTimeInputs} ${menuOK ? 'OK' : 'FAIL'}`);
+
+  await page.click('#histEndTimeWrap .sel-btn');
+  await page.waitForTimeout(300);
+  const menuOpen = await page.evaluate(() => {
+    const pop = document.querySelector('#histEndTimeWrap .sel-pop');
+    return { inDom: !!pop, open: !!pop && !pop.hidden, opts: pop ? pop.querySelectorAll('.sel-opt').length : 0 };
+  });
+  await shoot(page, path.join(outDir, `${vp.tag}-history-time-menu.png`), await rangeClip(300));
+  report.push(`[${vp.tag}] hist-custom 时刻浮层 在DOM=${menuOpen.inDom} `
+    + `展开=${menuOpen.open} 选项=${menuOpen.opts} `
+    + `${menuOpen.inDom && menuOpen.open && menuOpen.opts === 25 ? 'OK' : 'FAIL'}`);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
+  // Esc 只收下拉这一层，表单必须还开着。两个浮层的回执不一致时（日历拦了 Esc、
+  // 下拉没拦），按一下 Esc 会把下拉和整张自定义表单一并关掉 —— 本轮真踩到过：
+  // 下一步点时刻框直接超时，报的是「元素不可见」，看得出真相的地方离现场很远。
+  const escState = await page.evaluate(() => ({
+    formOpen: !document.getElementById('histCustomRange').hidden,
+    menuClosed: document.querySelector('#histEndTimeWrap .sel-pop').hidden,
+  }));
+  report.push(`[${vp.tag}] hist-custom Esc 只收一层 表单=${escState.formOpen ? '还开着' : '被关掉'} `
+    + `下拉=${escState.menuClosed ? '已收' : '还开着'} `
+    + `${escState.formOpen && escState.menuClosed ? 'OK' : 'FAIL'}`);
+
+  // 拉宽到 10 天：越过 HOUR_MODE_MAX_HOURS，回执改口 + 时刻框收起。
+  // 时刻框必须是「收起」而不是「置灰」—— 灰控件读作「坏了/没权限」，
+  // 而这里的事实是「这一档用不上时刻」。所以判据看的是 hidden，不是 disabled。
+  await page.evaluate(() => {
+    const d = new Date(Date.now() - 10 * 86400000);
+    const p = (n) => String(n).padStart(2, '0');
+    const el = document.getElementById('histStartDate');
+    el.value = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForTimeout(400);
+  const dayState = await rangeForm();
+  await shoot(page, path.join(outDir, `${vp.tag}-history-custom-wide.png`), await rangeClip());
+  const dayOK = !dayState.startTimeShown && !dayState.endTimeShown
+    && /按天聚合 · 共 \d+ 天/.test(dayState.note);
+  report.push(`[${vp.tag}] hist-custom 超过 3 天 时刻框=${dayState.startTimeShown ? '在场' : '收起'} `
+    + `回执="${dayState.note}" ${dayOK ? 'OK' : 'FAIL'}`);
+
+  // 收回窄区间：时刻字段必须原样回来。
+  // 两端都落在**昨天**而不是今天 —— 今天的话 planQuery 会把上界夹到「现在」，
+  // 于是「共几小时」随跑测试的钟点变，成了一条会自己翻的断言。
+  // 昨天 00:00 ~ 18:00 是死的 18 格。
+  await page.evaluate(() => {
+    const d = new Date(Date.now() - 86400000);
+    const p = (n) => String(n).padStart(2, '0');
+    const v = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    for (const id of ['histStartDate', 'histEndDate']) {
+      const el = document.getElementById(id);
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await page.waitForTimeout(250);
+  // 走真实交互选时刻（点开下拉 → 点选项），顺便再验一遍 select-menu 的回写：
+  // 它写的是 select.value，程序化赋值连 input 都不冒，只发 change。
+  await page.click('#histEndTimeWrap .sel-btn');
+  await page.waitForTimeout(250);
+  await page.click('#histEndTimeWrap .sel-opt[data-value="18:00"]');
+  await page.waitForTimeout(300);
+  const narrowState = await page.evaluate(() => ({
+    startTimeShown: !document.getElementById('histStartTimeWrap').hidden,
+    note: document.getElementById('histGranNote').textContent,
+    endTime: document.getElementById('histEndTime').value,
+    labelShown: (document.querySelector('#histEndTimeWrap .sel-label') || {}).textContent,
+  }));
+  // 回执要跟着时刻变：昨天 00:00 ~ 18:00 是 18 根柱，不是全天档那 24 根。
+  const narrowOK = narrowState.startTimeShown && narrowState.endTime === '18:00'
+    && narrowState.labelShown === '18:00' && /共 18 小时/.test(narrowState.note);
+  await shoot(page, path.join(outDir, `${vp.tag}-history-custom-hour.png`), await rangeClip());
+  report.push(`[${vp.tag}] hist-custom 收回窄区间 时刻档=${narrowState.startTimeShown ? '回来' : '仍在收起'} `
+    + `值=${narrowState.endTime} 标签="${narrowState.labelShown}" 回执="${narrowState.note}" `
+    + `${narrowOK ? 'OK' : 'FAIL'}`);
+
+  await page.click('#histCustomCancel');
+  await page.waitForTimeout(250);
 
   // ---- 图表交互三态（ECharts 引擎验收）----
   // 悬浮读数：注意不能用 shoot()，它会先把指针挪走、气泡就没了，直接截。
@@ -893,14 +1098,19 @@ for (const vp of VIEWPORTS) {
     await page.waitForTimeout(300);
 
     // ---- 自定义下拉展开态（select-menu 验收）----
+    // 必须按设置屏圈定：历史屏的自定义区间里也有两个 .sel（时刻下拉），
+    // 不圈的话 querySelector 先撞上它们 —— 那两张浮层还藏在关着的表单里，
+    // 于是「点得开吗」这条断言会以「元素不可见」超时告终，报的位置离真相很远。
+    const setSel = '.screen[data-screen="settings"] .sel';
     await page.click('.snav button[data-sec="general"]');
     await page.waitForTimeout(400);
-    await page.click('.sel .sel-btn');
+    await page.click(`${setSel} .sel-btn`);
     await page.waitForTimeout(300);
-    const menuState = await page.evaluate(() => {
-      const pop = document.querySelector('.sel-pop');
-      return { open: !pop.hidden, btnExpanded: document.querySelector('.sel-btn').getAttribute('aria-expanded') };
-    });
+    const menuState = await page.evaluate((scope) => {
+      const root = document.querySelector(scope);
+      const pop = root.querySelector('.sel-pop');
+      return { open: !pop.hidden, btnExpanded: root.querySelector('.sel-btn').getAttribute('aria-expanded') };
+    }, setSel);
     report.push(`[${vp.tag}] menu: ${JSON.stringify(menuState)} ${menuState.open && menuState.btnExpanded === 'true' ? 'OK' : 'FAIL'}`);
     await shoot(page, path.join(outDir, `${vp.tag}-menu-open.png`));
     await page.waitForTimeout(200);
