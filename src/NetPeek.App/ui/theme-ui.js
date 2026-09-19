@@ -136,8 +136,7 @@
 
   // 玻璃加固是否生效：**有底图就生效，置底 / 贴膜通吃**。
   // 没有底图时面板是实底（置底是 --bg、贴膜是纯 panel），出厂皮肤手写的字阶
-  // （88/48/23）就是设计意图本身，把它推到合成面档位等于凭空改掉三套出厂皮肤；
-  // 小窗是透明窗 + 实底面板，同理拿原始表。
+  // （88/48/23）就是设计意图本身，把它推到合成面档位等于凭空改掉三套出厂皮肤。
   // 贴膜 + 底图：膜的等效合成走 wrapFloor 那条独立判据（浓度地板保证 text2 达标），
   // 但弱字阶与语义色不在那条判据里 —— 2026-09-15 实测贴膜地板面上 text3 只有
   // Lc 20–23、error 40–42。加固层对着「置底最不利面」校出来的字色在贴膜地板面上
@@ -175,9 +174,11 @@
       lens: refreshLens(),
       tokens: skin.tokens,
     });
-    // 小窗拿**原始**表：它是透明窗 + 实底面板（mini.css 明确不做 backdrop-filter），
-    // 没有合成面可言 —— 把为玻璃推亮过的字色送过去，小窗上就是一套被洗淡的颜色。
-    broadcastTokens(skin.tokens);
+    // 小窗拿**加固后**的表。这条以前是反的（注释写着「小窗是透明窗 + 实底面板，
+    // 没有合成面可言」），在小窗不铺底图的年代成立；现在小窗跟着铺同一张壁纸，
+    // 它的面板同样是「漆 + 图」的合成面，再送原始表过去就是把主窗刚修好的
+    // 弱字阶问题（text3 在合成面上只有 Lc 20–23）原样搬到小窗上。
+    broadcastTokens(harden.tokens);
     if (state.skin === 'image') {
       els.bgStatus.textContent = bg ? '已设置背景图' : '未设置背景（使用面板底色）';
       els.bgStatus.className = 'note truncate';
@@ -192,7 +193,10 @@
     return Math.max(Number(state.wrapOpacity) || 0.62, wrapFloorVal);
   }
 
-  // 仅背景滑块变化：颜色没变，不用广播令牌，重铺 backdrop 就够。
+  // 仅背景滑块变化：颜色没变，但小窗现在跟着铺同一张底图，那几个滑杆
+  // （面板不透明度 / 模糊 / 压暗 / 亮度）全都是它的输入 —— 所以这条路也要广播。
+  // 不广播的后果不是「慢一点」，而是「主窗拖完滑杆、小窗停在上一档参数」，
+  // 两个窗口的同一张壁纸长得不一样。
   // autoDim / 贴膜地板都是可读性守卫的输出，跟着滑杆一起重铺。
   //
   // 加固后的字色也要跟着重写一次：它的目标底色是**带的最不利端上的合成面**，
@@ -201,7 +205,8 @@
   // 留着它是为了「切换置底/贴膜」这条路径：模式一变，加固该不该生效就变了。
   function applyBackdropOnly() {
     const t = T.resolveSkin(state).tokens;
-    T.applyTokens(glassHardenActive(bgDataUrl) ? T.glassHardenTokens(t).tokens : t, { silent: true });
+    const harden = glassHardenActive(bgDataUrl) ? T.glassHardenTokens(t).tokens : t;
+    T.applyTokens(harden, { silent: true });
     T.applyBackdrop({
       background: bgDataUrl,
       panelOpacity: state.panelOpacity,
@@ -216,21 +221,81 @@
       lens: refreshLens(),
       tokens: T.resolveSkin(state).tokens,
     });
+    broadcastTokens(harden);
   }
 
-  // 小窗是另一个 webview，documentElement 上的 CSS 变量不跨窗口继承，得把令牌广播过去
-  // 它才跟着改。背景图剥掉：小窗不做 backdrop，data URL 底图有几 MB，没必要在事件里搬。
+  // 小窗是另一个 webview，documentElement 上的 CSS 变量不跨窗口继承，得把令牌
+  // **和背景图**广播过去它才跟着改。
+  //
+  // 背景图以前在这里被剥成空串，理由是「小窗不做 backdrop，data URL 底图有几 MB，
+  // 没必要在事件里搬」。前半句已经不成立（小窗把图铺在形态元素内部，见 mini.css）；
+  // 后半句的量级也被 normalizeBackground 改小了：落盘前统一压成 ≤2560px 的 JPEG
+  // q0.85，常见壁纸在 300–800 KB 一档，而这条事件只在换肤 / 换图 / 拖滑杆时发，
+  // 节流 120ms —— 代价换来的是「两个窗口看起来是一套主题」。
+  // 路径解析（读盘转 data URL）永远在这一侧做：小窗没有 storage，也不该有。
+  //
   // 节流是因为拖滑块 / 拖取色器每帧都会走一次应用。最后一次广播不能悬在定时器里：
   // 拖到一半隐藏 / 关闭主窗，小窗会永远停在上一帧颜色 —— pagehide 时 flush。
   let broadcastTimer = 0;
   let pendingBroadcast = null;
+  // 小窗要的 backdrop 参数。两种显示方式都发图：
+  //   置底 —— 壁纸铺窗底、表面磨砂，参数就是三滑杆 + 守卫输出；
+  //   贴膜 —— 壁纸按窗口坐标对齐贴在各表面上，小窗是另一个窗口对不齐坐标系，
+  //     复刻不了「拼起来还是原图」，但**不贴图**的后果更糟（2026-09-19 用户报的
+  //     「主窗有壁纸、小窗一块素色」正是这条）：小窗退回置底铺法（图铺在形态元素
+  //     内部），漆浓度取贴膜浓度（effectiveWrapOpacity，含地板），参数对齐贴膜
+  //     口径 —— 无纱（dim 0）、无自动补偿（auto 0）、无透镜（贴膜的膜不带透镜，
+  //     saturate(1) 是 filter 列表里的合法无操作，不能发 'none' —— blur(0px) none
+  //     是非法声明，整条 filter 会被丢弃，图完全不糊、亮度补偿也失效）。
+  //     wrap: true 让小窗把底图模糊跟滑杆走（贴膜的膜是清晰的），
+  //     置底模式则保底 16px（mini.css 的 --mini-blur，与主窗表面磨砂同档）。
+  function backdropPayload() {
+    const skin = T.resolveSkin(state);
+    // 当前皮肤是否真的带图，以 resolveSkin 的出口为准，不看 bgDataUrl ——
+    // 那个变量是「最后一次解析出来的图」，从「跟随背景图」切进自定义编辑器时
+    // （applyDraft 那条路，主窗自己也是按无图铺的）它还留着上一张图的内容，
+    // 照着它发就会出现「主窗已经撤图、小窗还铺着」的分叉。
+    if (!skin.background) return { background: '', backdrop: null };
+    const wrap = state.backdropStyle === 'wrap';
+    const tokens = skin.tokens;
+    const lightSkin = T.isLightSkin(tokens);
+    // 透镜与主窗同一次反解：refreshLens() 的输入是图自己的灰范围 + 方向化纱浓度
+    // + 亮度滑杆，三样都和主窗此刻用的是同一批值。反解不出来（图没解码完 / 图太平）
+    // 时回落 lensOf(tokens)，与主窗 applyBackdrop 里那条回落同源。
+    const lens = refreshLens() || T.lensOf(tokens);
+    return {
+      background: bgDataUrl || '',
+      backdrop: {
+        panelOpacity: wrap ? effectiveWrapOpacity() : state.panelOpacity,
+        bgBlur: state.bgBlur,
+        brightness: state.bgBrightness,
+        dim: wrap ? 0 : T.effectiveScrim(state.scrim ?? 0.3, lightSkin),
+        tint: T.scrimTint(tokens.bg, lightSkin),
+        // 纱的方向色与主窗 --backdrop-veil 同一口径（CSS 里是 rgb(var(--veil) / a)，
+        // 所以发的是 '255 255 255' / '0 0 0' 这种分量串，不是 hex）。
+        veil: lightSkin ? '255 255 255' : '0 0 0',
+        autoDim: wrap ? 0 : autoDim,
+        // 贴膜的浓度地板已经折进 effectiveWrapOpacity()，floor 发 0 免得重复钳；
+        // 置底的 panelOpFloor 与主窗同源。
+        panelOpFloor: wrap ? 0 : panelOpFloor,
+        wrap,
+        // 透镜按 lensFilter 拼成成品 filter 串在发送端做完：小窗只消费，不需要
+        // 也不该重新推导（推导要 tokens + 图直方图，那是主窗才有的输入）。
+        lens: wrap ? 'saturate(1)' : T.lensFilter(lens),
+      },
+    };
+  }
   function flushBroadcast() {
     clearTimeout(broadcastTimer);
     broadcastTimer = 0;
     if (!pendingBroadcast) return;
     const tokens = pendingBroadcast;
     pendingBroadcast = null;
-    window.__TAURI__.event.emit('theme-changed', { tokens, background: '', uiOpacity: state.uiOpacity ?? 1 }).catch(() => {});
+    window.__TAURI__.event.emit('theme-changed', {
+      tokens,
+      uiOpacity: state.uiOpacity ?? 1,
+      ...backdropPayload(),
+    }).catch(() => {});
   }
   function broadcastTokens(tokens) {
     if (!window.__TAURI__) return;
@@ -530,6 +595,11 @@
   // 深度越高越可读，所以守卫只算「浓度地板」（wrapFloorVal），用户浓度低于
   // 地板时实际铺膜取地板（effectiveWrapOpacity）。
   let autoDim = 0; // 守卫算出的补偿值，随 applyBackdrop 铺到 CSS（置底模式）
+  // 硬钳地板（--panel-op-floor）：守卫连自动补偿顶格都读不清时才非零。小窗也要，
+  // 而它算不出来（要图的直方图），所以和 autoDim 一样由这一侧算完往下发。
+  // 小窗以前自己写死 0.90，主窗滑杆拖到 0.45 它照 0.90 铺 —— 壁纸在小窗上几乎
+  // 看不见；后来改成写死 0，又在「守卫真的钳住了」那档反过来比主窗透一截。
+  let panelOpFloor = 0;
 
   function syncBackdropGuard() {
     if (!els.opFloorNote) return;
@@ -566,7 +636,8 @@
     // 确实更暗 —— 那是他要的透明度，不是需要补偿的缺陷。这条分支只剩贴膜 / 无图
     // 两条路径兜底，提示条基本不会再出现。
     const clamped = !wrap && stdImage && guard.floor > panelOp + 1e-9;
-    document.documentElement.style.setProperty('--panel-op-floor', clamped ? String(guard.floor) : '0');
+    panelOpFloor = clamped ? guard.floor : 0;
+    document.documentElement.style.setProperty('--panel-op-floor', String(panelOpFloor));
     applyBackdropOnly();
     if (wrap) {
       // 贴膜不钳滑杆：用户的选择保留在滑杆上，实际铺膜取地板，差值由提示条解释

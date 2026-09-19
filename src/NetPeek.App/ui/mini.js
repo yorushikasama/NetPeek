@@ -1,9 +1,9 @@
 // NetPeek 小窗（屏 2，§2.9）：能量球 ⇄ 迷你窗 双形态交互。
 // - 数据：监听主进程广播的 snapshot 事件（app.emit 会广播到所有窗口）。
-// - 形态：能量球 108×108（球 92，四周 8px 给外发光）→ 点击展开迷你窗 320×300
-//   （set_mini_shape 在 Rust 侧保持中心、夹在屏幕内），再点「—」收起。
+// - 形态：能量球 112×112（球体 92×92 正圆，四周 10px 给投影）→ 点击展开迷你窗
+//   320×300（set_mini_shape 在 Rust 侧按最近边贴靠、夹在屏幕内），再点收起钮回到球。
 // - 主题：小窗是独立 webview，主界面设在 documentElement 上的 CSS 变量不会继承过来。
-//   启动时自己读一遍主题配置，之后跟随主界面广播的 theme-changed 事件。
+//   启动时自己读一遍主题配置（含背景图），之后跟随主界面广播的 theme-changed 事件。
 // - 「退出」不在这里，在托盘右键菜单：它和「主界面」并排等宽时误点一下就把采集停了。
 
 (function () {
@@ -11,8 +11,8 @@
 
   const els = {
     orb: $('orb'),
-    arcDown: $('orbArcDown'),
-    arcUp: $('orbArcUp'),
+    orbDot: $('orbDot'),
+    orbLevel: $('orbLevel'),
     orbDownV: $('orbDownV'),
     orbDownU: $('orbDownU'),
     orbUpV: $('orbUpV'),
@@ -32,8 +32,17 @@
   };
 
   const DRAG_THRESHOLD = 5; // 像素；超过才算拖动，否则视为点击
-  const PEAK_WINDOW = 60; // 帧（快照 1/s）；环形规的分母取近 60 秒峰值
   const TOP_N = 5;
+
+  // 能量填充的分母：固定档位，取第一个「容得下当前速率」的档。
+  //
+  // 原来的分母是「近 60 秒峰值」，那是个浮动值：填充走到 80% 时读不出是 8 MB/s
+  // 还是 80 KB/s，而且下载一停峰值就跟着塌下去，同样的速率过一会儿水位反而更高
+  // —— 一个会自己改刻度的量尺，量出来的数没有意义。
+  // 固定档位的分母是常识里的带宽量级（1 MB/s ≈ 百兆宽带的零头，12.5 MB/s ≈
+  // 百兆满速，125 MB/s ≈ 千兆满速），跨档时填充会跳一下，但任一时刻的填充
+  // 都对应一个说得出口的绝对量。
+  const TIERS = [128e3, 1e6, 12.5e6, 125e6, 1.25e9];
 
   let shape = 'orb'; // 'orb' | 'panel'
   let paused = false;
@@ -58,16 +67,19 @@
     return { v: String(Math.round(bps)), u: 'B/s' };
   }
 
-  /// 球上的数值最多 3 个字身：92 的球扣掉两圈环，最上面那行只有约 66px 可写，
-  /// 20px 等宽一个字身 12px，「数值 3 身 + 10px 单位」正好 62px。10 以下留一位小数。
+  /// 球上的数值最多 4 个字身。预算不是靠拉长形状挣来的，是靠**纵排**：两行读数
+  /// 各自独占一条弦，下载行在球心一带有 84px 可用宽，15px 字号下「12.34 MB/s」
+  /// 约 76px，排得下 4 身 + 单位。所以这里和迷你窗的完整精度口径一致 ——
+  /// 10 以下两位小数、100 以下一位、1000 以上退整数。
+  /// 旧的 3 身预算会把 12.34 MB/s 显示成 12，展开后却是 12.34，同一个值两个读法。
   function fmtOrb(bps) {
     for (const [scale, unit] of UNITS) {
       if (bps >= scale) {
         const n = bps / scale;
-        return { v: n >= 10 ? String(Math.round(n)) : n.toFixed(1), u: unit };
+        return { v: n >= 100 ? String(Math.round(n)) : n.toFixed(n >= 10 ? 1 : 2), u: unit };
       }
     }
-    return { v: String(Math.min(999, Math.round(bps))), u: 'B/s' };
+    return { v: String(Math.min(9999, Math.round(bps))), u: 'B/s' };
   }
 
   function fmtFull(bps) {
@@ -92,37 +104,27 @@
     return p.Path ? (iconCache.get(p.Path) || '') : '';
   }
 
-  // ---------- 环形规 ----------
+  // ---------- 能量填充 ----------
 
-  // 近 60 帧的速率，用来算峰值。当前帧先纳入再取峰值，所以比例恒 ≤ 1。
-  const samples = [];
-
-  function ratioOf(cur, key) {
-    let peak = 0;
-    for (const s of samples) if (s[key] > peak) peak = s[key];
-    return peak > 0 ? cur / peak : 0;
+  /// 当前速率占所在档位的比例（0–1）。档位表 TIERS 是升序的绝对量，
+  /// 取第一个容得下 bps 的档当分母；超过最末档（1.25 GB/s，万兆满速）就满格。
+  /// 分档不带回差：水位在档位边界上下抖动时会来回跳一次，但 TIERS 的相邻档
+  /// 相差 8–10 倍，真正贴在边界上持续抖动的速率极少见，为它加一层滞回反而会让
+  /// 「同一个速率对应同一个水位」这条性质失效（水位取决于之前从哪个方向来）。
+  function levelOf(bps) {
+    if (!(bps > 0)) return 0;
+    const tier = TIERS.find((t) => bps <= t);
+    return tier ? bps / tier : 1;
   }
 
-  const DASH = 4;
-  const GAP = 3;
-
-  // 暂停时把弧线打成虚线。SVG 的 stroke-dasharray 是沿整条路径循环取的，
-  // 只写「实线 空格」两段会绕回来把剩下的圆周也画满，所以要把弧内的实虚交替
-  // 和弧外那一整段空白拼成一个总长恰好等于周长的数组。
-  function dashPattern(len, circ) {
-    if (len < DASH * 2) return `${len} ${circ - len}`;
-    const n = Math.max(1, Math.floor((len + GAP) / (DASH + GAP)));
-    const used = n * DASH + (n - 1) * GAP;
-    const parts = [];
-    for (let i = 0; i < n - 1; i++) parts.push(DASH, GAP);
-    parts.push(DASH, Math.max(0, circ - used));
-    return parts.join(' ');
-  }
-
-  function setArc(el, ratio, dashed) {
-    const circ = 2 * Math.PI * Number(el.getAttribute('r'));
-    const len = Math.max(0, Math.min(1, ratio)) * circ;
-    el.style.strokeDasharray = dashed ? dashPattern(len, circ) : `${len} ${circ - len}`;
+  /// 水位写进 CSS 变量（--level，mini.css 的 .orb-level i 取它当**高度**）。
+  /// 写在液柱本体上而不是整个球上：变量只有一个消费者，挂在它自己身上时
+  /// 「谁写谁读」一眼可见，不用去翻继承链。
+  /// 取整到 1% 是为了少触发重排：速率每秒一帧、球腔净高 90px，
+  /// 1% 已经细于一个像素。
+  function setLevel(ratio) {
+    const pct = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+    els.orbLevel.style.setProperty('--level', `${pct}%`);
   }
 
   // ---------- 形态切换 ----------
@@ -202,8 +204,8 @@
     uEl.textContent = parts.u;
   }
 
-  // 最后一帧的速率与环比例。暂停后不再更新，画面停在这一帧（§2.8）。
-  let last = { down: 0, up: 0, rd: 0, ru: 0 };
+  // 最后一帧的速率与水位。暂停后不再更新，画面停在这一帧（§2.8）。
+  let last = { down: 0, up: 0, level: 0 };
 
   function paintNumbers() {
     setNum(els.orbDownV, els.orbDownU, fmtOrb(last.down));
@@ -267,6 +269,11 @@
     els.dot.className = `panel-dot ${cls}`;
     els.dot.title = text;
     els.dot.setAttribute('aria-label', text);
+    // 球上那颗核心同状态同色（.orb-dot 与 .panel-dot 是同一族）。球内三行已被
+    // 状态核心与两个读数占满、没有文字位，所以文案只落在这颗核心的 aria-label
+    // 与整个球的 title 上。
+    els.orbDot.className = `orb-dot ${cls}`;
+    els.orbDot.setAttribute('aria-label', text);
     els.orb.title = paused
       ? 'NetPeek · 已暂停'
       : `NetPeek · ↓ ${fmtFull(last.down)} · ↑ ${fmtFull(last.up)}`;
@@ -281,7 +288,7 @@
 
   function render(snap) {
     lastSnap = snap;
-    // 隐藏到托盘时跳过重绘（samples 仍照常更新），恢复可见时由 repaintMini 补画。
+    // 隐藏到托盘时跳过重绘，恢复可见时由 repaintMini 拿 lastSnap 补画一帧。
     if (document.hidden || winHidden) return;
     paused = snap.Status === 'paused';
     // 暂停时采集服务停了累计，速率会掉到 0；照着画会让球上瞬间变成 0 ——
@@ -289,35 +296,114 @@
     if (!paused) {
       const down = snap.TotalDownloadBytes || 0;
       const up = snap.TotalUploadBytes || 0;
-      samples.push({ d: down, u: up });
-      if (samples.length > PEAK_WINDOW) samples.shift();
-      last = { down, up, rd: ratioOf(down, 'd'), ru: ratioOf(up, 'u') };
+      last = { down, up, level: levelOf(down) };
       paintNumbers();
       paintList(snap);
     }
     els.orb.classList.toggle('is-paused', paused);
-    setArc(els.arcDown, last.rd, paused);
-    setArc(els.arcUp, last.ru, paused);
+    setLevel(last.level);
     paintStatus(snap);
   }
 
   // ---------- 主题 ----------
 
-  // 小窗只要令牌，不要背景图：透明窗口后面没有网页内容，backdrop-filter 无从取样。
-  // payload 是主界面广播的 { tokens, background }（背景已剥掉），或 initTokens 里
-  // 自己包的同一形状 —— 真正落地的只有 tokens 那 17 键。
+  // 小窗跟着主界面走**颜色和背景图两样**。背景图这条以前是剥掉的（旧注释说
+  // 「透明窗口后面没有网页内容，backdrop-filter 无从取样」）—— 那句话只否掉了
+  // backdrop-filter 这一种实现，不是否掉背景图本身：图铺在形态元素**内部**
+  // （mini.css 的 .panel::before 与球 background 的最后一层）就有真实内容可压，
+  // 根本不需要采样窗口背后的桌面。剥掉的实际后果是「跟随背景图」皮肤下主窗有壁纸、
+  // 小窗是一块平底色，两个窗口不像一套主题。
+  //
+  // payload = { tokens, background, uiOpacity, backdrop }，由主界面 broadcastTokens
+  // 发出，或 initTokens 自己按同一形状包好。background 是已解析的 data URL /
+  // 内置壁纸相对路径 —— 小窗这边不认路径，解析（读盘转 data URL）永远在发送端做。
   function applyTokens(payload) {
     const T = window.NetPeekTheme;
     if (!T || !payload || !payload.tokens) return;
     try {
-      // solo: true —— 小窗只有一层漆（面板直接压在桌面上，body 是透明的），
-      // 主窗是两层（.frame 的 --bg 再垫一次）。同一个漆层不透明度在这里漏进来的
-      // 桌面是主窗的两倍，所以 --ui-paint-floor 必须按单层结构单独算；
-      // 拿主窗那份铺到这里，等于让小窗超支一倍。
+      // solo: true —— 小窗是**单层漆**（形态元素直接压在桌面上，body 透明），
+      // 同一个不透明度漏进来的桌面是主窗两层结构的两倍，地板必须按单层口径算。
+      // 漏掉这个参数是个哑失败：地板照样有，只是超支一倍，预览里看不出来。
       T.applyTokens(payload.tokens, { silent: true, solo: true });
       // 全局界面不透明度随同一次广播过来；缺省（旧主界面）不动本地值
       if (payload.uiOpacity != null) T.applyUiOpacity(payload.uiOpacity);
+      applyBackdrop(payload);
     } catch { /* 令牌不合法就留着 mini.css 的兜底值 */ }
+  }
+
+  // 背景图与它那套参数。这批变量要和主窗 applyBackdrop 写进 CSS 的那批**逐项对齐**，
+  // 少一项就是「同一张图在两个窗口里长得不一样」：
+  //   --theme-bg-image / --bg-blur / --bg-brightness —— 底图本体与它的滤镜
+  //   --lens-filter —— 透镜（auto-levels 的 contrast/brightness/saturate）。主窗把它挂在
+  //     各表面的 backdrop-filter 上「只归一面板身后那块」；小窗的整个形态元素就是一块
+  //     面板，图又是元素**内部**的一层，所以同一组参数当普通 filter 铺满整层，等价。
+  //     这一项尤其不能省：漆层那套可读性契约（glassContract / 加固层的目标底色）
+  //     算的就是「透镜之后的合成面」，不铺透镜，契约的前提直接不成立。
+  //   --backdrop-dim / --backdrop-tint / --backdrop-veil / --backdrop-auto —— 图上那三层纱
+  //     （方向化 tint、守卫补偿层、纱的方向色）。少了 veil 浅色皮肤会用黑纱压图、
+  //     和主窗的白纱反着走；少了 autoDim 小窗整体比主窗亮一档。
+  //   --panel-op —— 面板不透明度滑杆，has-bg 那条路上漆层的口径（见 mini.css 末尾）
+  // 贴膜（wrap）模式由主窗下发 wrap: true：参数已换成贴膜口径（无纱无透镜、
+  // 漆浓度=贴膜浓度），这里只负责挂 html.wrap-bg 让底图模糊跟滑杆走
+  // （贴膜的膜是清晰的，不吃置底那条 16px 保底磨砂）。
+  // 不走 T.applyBackdrop：那个函数要 document.body.classList（小窗的 body 没有漆，
+  // 类得挂在 html 上，两层形态元素才同时吃到）、要 .backdrop 元素做交叉淡入、
+  // 还会写一串小窗用不到的变量（--wrap-op 那一套）。
+  function applyBackdrop(payload) {
+    const root = document.documentElement;
+    const b = payload.backdrop || {};
+    const bg = payload.background || '';
+    const has = !!bg;
+    root.style.setProperty('--theme-bg-image', has ? `url("${bg}")` : 'none');
+    root.classList.toggle('has-bg', has);
+    root.classList.toggle('wrap-bg', has && !!b.wrap);
+    const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    // 清图 / 贴膜回退时也要撤掉上一张图留下的硬钳地板。
+    root.style.setProperty('--panel-op-floor', has ? String(num(b.panelOpFloor, 0)) : '0');
+    if (!has) return;
+    root.style.setProperty('--panel-op', String(num(b.panelOpacity, 1)));
+    // 漆层地板由主窗按壁纸直方图算完后下发；常规未硬钳时值仍是 0。
+    //
+    // 这里曾经写的是 uiPaintFloor(tokens, true) —— 也就是 0.90，理由是「小窗没有
+    // 透镜，面板身后那张图亮度未知，只能按最坏情况推」。那个理由随透镜下发一起
+    // 作废了：图现在过同一组 --lens-filter 归一成一条窄亮度带，判据和主窗的
+    // backdropGuard 是同一条（那边也是「有透镜 → 地板退回 MIN_PANEL_OP」）。
+    // 留着 0.90 的后果就是用户报的那个：主窗面板滑杆拖到 0.45，小窗的漆仍按
+    // 0.90 铺 —— 壁纸在小窗上几乎看不见，滑杆对小窗等于空调。
+    root.style.setProperty('--bg-blur', `${Math.round(num(b.bgBlur, 0))}px`);
+    root.style.setProperty('--bg-brightness', String(num(b.brightness, 1)));
+    root.style.setProperty('--backdrop-dim', String(num(b.dim, 0)));
+    root.style.setProperty('--backdrop-auto', String(num(b.autoDim, 0)));
+    if (b.tint) root.style.setProperty('--backdrop-tint', b.tint);
+    // veil 是 rgb() 的分量串（'255 255 255' / '0 0 0'），不是 hex —— CSS 里写的是
+    // rgb(var(--backdrop-veil) / a)，塞 hex 进去整条声明会被丢弃（哑失败）。
+    if (b.veil) root.style.setProperty('--backdrop-veil', b.veil);
+    // 透镜在发送端已经拼成成品 filter 串（theme.lensFilter）：小窗只消费，
+    // 重新推导要 tokens + 图直方图，那是主窗才有的输入。
+    if (b.lens) root.style.setProperty('--lens-filter', b.lens);
+  }
+
+  // 启动时自己把背景图解析成 CSS 能吃的形式。三种来源分开处理，与主界面
+  // theme-ui.js 的 resolveBgUrl 同一套判断（那边是权威实现，这里是小窗的最小副本
+  // —— 小窗没有 storage 那层封装，直接 invoke 后端命令）：
+  //   data: 开头  —— 刚选的图，本身就是 data URL，原样用；
+  //   内置壁纸    —— 相对路径，webview 直接加载得到，不必读盘转码；
+  //   其余        —— 用户选图落盘后的绝对路径，走 read_background_image 读回 data URL。
+  // 不区分的话内置壁纸会被当文件路径去读、必然失败，表现是「主窗有壁纸小窗没有」。
+  //
+  // 只在启动这一次走这条路：之后主界面广播过来的 background 已经是解析好的。
+  async function resolveBg(p, state) {
+    const T = window.NetPeekTheme;
+    if (!p) return '';
+    // 贴膜模式照铺（退回置底那条路）：坐标系对不齐复刻不了「拼起来还是原图」，
+    // 但不铺就是「主窗有壁纸、小窗一块素色」—— 用户报的正是这个。
+    if (p.startsWith('data:')) return p;
+    if (T && T.WALLPAPERS && T.WALLPAPERS.some((w) => w.src === p)) return p;
+    try {
+      return await invoke('read_background_image', { path: p }) || '';
+    } catch {
+      return ''; // 图读不到就退回无图那条路（漆层有自己的地板，字仍然可读）
+    }
   }
 
   async function initTokens() {
@@ -326,7 +412,45 @@
       if (!T) return;
       const boot = await T.initTheme();
       const skin = T.resolveSkin(boot.state); // 内置 / image / 自定义皮肤统一从这走
-      applyTokens({ tokens: skin.tokens, uiOpacity: boot.state.uiOpacity });
+      const bg = await resolveBg(skin.background || '', boot.state);
+      const light = T.isLightSkin(skin.tokens);
+      // 贴膜模式的首帧口径（与 theme-ui.js backdropPayload 的 wrap 分支逐项对齐）：
+      // 漆浓度取贴膜浓度（clamp 到贴膜滑杆的值域）、无纱无补偿无透镜、地板 0
+      // （主窗的贴膜地板在下一次广播带过来，通常它也是 0 —— 浓度地板在发送端
+      // 已折进 effectiveWrapOpacity，小窗不必知道）。
+      const wrap = boot.state.backdropStyle === 'wrap';
+      const wrapOp = wrap ? T.clamp(boot.state.wrapOpacity ?? 0.62, 0.4, 0.9) : 0;
+      // 字色也要和主窗同一份：有底图时面板是「漆 + 图」的合成面，出厂字阶在那上面
+      // 不达标（text3 实测 Lc 20–23）。主窗 applyCurrent 上屏用的是加固表，广播下来
+      // 的也是加固表 —— 启动这一帧自己解析时漏掉加固，就会出现「开机头一眼字偏灰，
+      // 等主窗广播过来才变清楚」。判据与 theme-ui.js 的 glassHardenActive 同一条：有图即加固。
+      applyTokens({
+        tokens: bg ? T.glassHardenTokens(skin.tokens).tokens : skin.tokens,
+        uiOpacity: boot.state.uiOpacity,
+        background: bg,
+        backdrop: {
+          panelOpacity: wrap ? wrapOp : skin.panelOpacity,
+          bgBlur: skin.bgBlur,
+          brightness: boot.state.bgBrightness,
+          dim: wrap ? 0 : T.effectiveScrim(skin.scrim ?? 0.3, light),
+          tint: T.scrimTint(skin.tokens.bg, light),
+          // 纱的方向色，与主窗 applyBackdrop 同一条规则（浅色皮肤铺白纱抬暗区、
+          // 深色铺黑纱压亮区）。写成 rgb 分量串是因为 CSS 里是 rgb(var(--backdrop-veil) / a)。
+          veil: light ? '255 255 255' : '0 0 0',
+          // 守卫补偿按 0：它是主窗 backdropGuard 的输出，要图的直方图才算得出，
+          // 小窗没有那份输入。透镜在位时主窗算出来的也是 0（见 theme.backdropGuard
+          // 的透镜短路），所以这一帧按 0 铺与主窗一致；真有补偿时下一次广播带过来。
+          autoDim: 0,
+          // 启动首帧没有主窗的直方图守卫结果，先不硬钳；广播到达后覆盖。
+          panelOpFloor: 0,
+          wrap,
+          // 透镜同理走回落：按图反解要直方图，这里用 lensOf(tokens)——与主窗在
+          // 「图还没解码完」时走的是同一支，带的两端同源，只少一层按图拉张。
+          // 主窗解码完成后广播的是 lensFromImage 的结果，会覆盖这一帧。
+          // 贴膜口径发中性 saturate(1)（主窗贴膜的膜不带透镜）。
+          lens: wrap ? 'saturate(1)' : T.lensFilter(T.lensOf(skin.tokens)),
+        },
+      });
     } catch { /* 读不到配置就用兜底值 */ }
     finally {
       // 首帧守卫（mini.css html:not(.theme-ready)）：无论成败都要放行渲染，
@@ -405,8 +529,7 @@
   // 先落位：越早设越好，窗口显示前定位完，用户看不到中间态
   placeDefault();
 
-  setArc(els.arcDown, 0, false);
-  setArc(els.arcUp, 0, false);
+  setLevel(0);
   initTokens();
 
   // 图标增量必须在 render 之前入缓存：这一帧的行要靠它才画得出图标。
@@ -437,6 +560,8 @@
     els.dot.className = 'panel-dot is-error';
     els.dot.title = '未连接采集服务';
     els.dot.setAttribute('aria-label', '未连接采集服务');
+    els.orbDot.className = 'orb-dot is-error';
+    els.orbDot.setAttribute('aria-label', '未连接采集服务');
     els.orb.title = 'NetPeek · 未连接采集服务';
     els.orb.classList.remove('is-paused');
     els.btnPause.disabled = true;
@@ -444,9 +569,7 @@
     setNum(els.orbUpV, els.orbUpU, { v: '--', u: '' });
     setNum(els.ptDownV, els.ptDownU, { v: '--', u: '' });
     setNum(els.ptUpV, els.ptUpU, { v: '--', u: '' });
-    setArc(els.arcDown, 0, false);
-    setArc(els.arcUp, 0, false);
-    samples.length = 0;
-    last = { down: 0, up: 0, rd: 0, ru: 0 };
+    setLevel(0);
+    last = { down: 0, up: 0, level: 0 };
   });
 })();

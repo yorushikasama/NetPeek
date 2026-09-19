@@ -899,14 +899,72 @@ section('漆层地板的接线：只钳漆，不钳窗口底色 / 底图 / 滑�
       `滑杆 min ${m[1]} == UI_OPACITY_MIN（地板只垫漆层，不动滑杆行程）`);
   }
 
-  // 小窗是单层漆，球漆 / 面板漆 / 球面光照都必须走 --paint-op（含地板），
+  // 小窗是单层漆，球漆 / 面板漆 / 内缘光照都必须走 --paint-op（含地板），
   // 而投影这类「投在桌面上的影子」仍按裸 --ui-opacity —— 影子不是压在字后面的漆。
   ok(/--o:\s*calc\(var\(--paint-op\)\s*\*\s*100%\)/.test(miniCss),
     'mini.css：能量球的 --o 走 --paint-op（含单层漆地板）');
-  ok(/\.panel\s*\{[^}]*background:\s*color-mix\(in srgb,\s*var\(--panel\)\s*calc\(var\(--paint-op\)\s*\*\s*100%\)/.test(miniCss),
+  // 面板漆自 v3 起搬进 .panel::after：底图要垫在漆之下（.panel::before），
+  // 而 blur 只能挂在只含底图的那一层上，写进 .panel 自己的 background 会连边线一起糊。
+  ok(/\.panel::after\s*\{[^}]*background:\s*color-mix\(in srgb,\s*var\(--panel\)\s*calc\(var\(--paint-op\)\s*\*\s*100%\)/.test(miniCss),
     'mini.css：迷你窗面板漆走 --paint-op');
-  ok(/box-shadow:\s*0 2px 5px rgb\(0 0 0 \/ calc\(0\.35 \* var\(--ui-opacity\)\)\)/.test(miniCss),
-    'mini.css：球的落影仍按裸 --ui-opacity（投在桌面上的影子不是漆）');
+  // 球的窗口四周留 10px，offset 2 + blur 8 正好用满。
+  ok(/box-shadow:\s*0 2px 8px rgb\(0 0 0 \/ calc\(0\.28 \* var\(--ui-opacity\)\)\)/.test(miniCss),
+    'mini.css：能量球的落影仍按裸 --ui-opacity（投在桌面上的影子不是漆）');
+}
+
+section('能量球的几何：正圆 + 三处尺寸同源');
+{
+  // 「圆」是这个形态唯一的识别物，而它靠三处独立的数字凑出来：mini.css 的
+  // .orb 宽高、mini.rs 的 ORB_SIZE/ORB_PAD、tauri.conf.json 的 mini 窗口尺寸。
+  // 任何一处单独漂移都不报错，只是悄悄变形 —— 2026-09-19 用户两次否掉的正是
+  // 「读起来是椭圆」，所以把这条契约钉死在回归里。
+  const UI = path.resolve(HERE, '../../src/NetPeek.App/ui');
+  const TAURI = path.resolve(HERE, '../../src/NetPeek.App/src-tauri');
+  const miniCss = fs.readFileSync(path.join(UI, 'mini.css'), 'utf8');
+  const miniRs = fs.readFileSync(path.join(TAURI, 'src/mini.rs'), 'utf8');
+  const conf = JSON.parse(fs.readFileSync(path.join(TAURI, 'tauri.conf.json'), 'utf8'));
+
+  // CSS 侧：.orb 的宽高必须相等，且圆角是 50%（写死 46px 会在改边长时留下方块）。
+  const orbRule = miniCss.match(/\n\.orb\s*\{([\s\S]*?)\n\}/);
+  ok(orbRule !== null, 'mini.css 里能找到 .orb 规则（改名了就同步这条断言）');
+  if (orbRule) {
+    const w = Number((orbRule[1].match(/\bwidth:\s*(\d+)px/) || [])[1]);
+    const h = Number((orbRule[1].match(/\bheight:\s*(\d+)px/) || [])[1]);
+    eq(h, w, `.orb 宽高相等（${w}×${h}）—— 不等就被 50% 圆角渲染成椭圆`);
+    ok(/border-radius:\s*50%/.test(orbRule[1]),
+      '.orb 的圆角是 50%（跟着尺寸走，不是写死的半径）');
+
+    // Rust 侧的球体尺寸与四周投影余量
+    const size = Number((miniRs.match(/const ORB_SIZE:\s*f64\s*=\s*([\d.]+)/) || [])[1]);
+    const pad = Number((miniRs.match(/const ORB_PAD:\s*f64\s*=\s*([\d.]+)/) || [])[1]);
+    eq(size, w, `mini.rs 的 ORB_SIZE ${size} == mini.css 的 .orb 边长 ${w}（否则球不居中）`);
+
+    // 窗口尺寸 = 球 + 两侧投影余量，且宽高相等
+    const mini = (conf.app.windows || []).find((x) => x.label === 'mini');
+    ok(mini != null, 'tauri.conf.json 里有 label="mini" 的窗口');
+    if (mini) {
+      eq(mini.width, size + pad * 2,
+        `mini 窗口宽 ${mini.width} == ORB_SIZE + ORB_PAD×2（${size} + ${pad}×2）`);
+      eq(mini.height, mini.width,
+        `mini 窗口宽高相等（${mini.width}×${mini.height}）—— 窗口不方，球就没法是圆的`);
+    }
+
+    // 投影必须落在余量之内：offset + blur ≤ pad，否则被透明窗口的硬边界裁成直线。
+    const sh = miniCss.match(/\.orb\s*\{[\s\S]*?box-shadow:\s*0\s+(\d+)px\s+(\d+)px/);
+    ok(sh !== null, 'mini.css：.orb 有落影声明');
+    if (sh) {
+      const spend = Number(sh[1]) + Number(sh[2]);
+      ok(spend <= pad,
+        `球的落影 offset+blur = ${spend} ≤ ORB_PAD ${pad}（超了会被透明窗口裁成直线）`);
+    }
+  }
+
+  // 液面是**纵向**灌注：高度由 --level 驱动。胶囊那版用的是 width，
+  // 留着 width 就是「圆形球体里横向推进」——形状换了，动作没换。
+  ok(/\.orb-level i\s*\{[\s\S]*?height:\s*var\(--level,\s*0%\)/.test(miniCss),
+    'mini.css：能量液的高度由 --level 驱动（从球底向上灌，不是横向推进）');
+  ok(/\.orb-level\s*\{[\s\S]*?overflow:\s*hidden/.test(miniCss),
+    'mini.css：能量液被球轮廓裁住（少了它液面两端戳出球外）');
 }
 
 section('漆层地板随令牌上屏：applyTokens 写 --ui-paint-floor');
@@ -950,6 +1008,62 @@ section('漆层地板随令牌上屏：applyTokens 写 --ui-paint-floor');
   const miniJs = fs.readFileSync(path.resolve(HERE, '../../src/NetPeek.App/ui/mini.js'), 'utf8');
   ok(/applyTokens\(payload\.tokens,\s*\{[^}]*solo:\s*true/.test(miniJs),
     'mini.js 上屏时带 solo: true（漏了就按两层漆算，小窗超支一倍）');
+}
+
+section('小窗同步主窗按壁纸计算的面板地板');
+{
+  const UI = path.resolve(HERE, '../../src/NetPeek.App/ui');
+  const themeUi = fs.readFileSync(path.join(UI, 'theme-ui.js'), 'utf8');
+  const miniJs = fs.readFileSync(path.join(UI, 'mini.js'), 'utf8');
+
+  ok(/panelOpFloor\s*=\s*clamped\s*\?\s*guard\.floor\s*:\s*0/.test(themeUi),
+    'theme-ui.js：守卫每次重算都更新广播地板，无图 / 贴膜 / 未钳制时归零');
+  ok(/backdrop:\s*\{[\s\S]*?\bpanelOpFloor\s*,[\s\S]*?\blens:/.test(themeUi),
+    'theme-ui.js：backdrop payload 携带 panelOpFloor');
+  ok(/setProperty\('--panel-op-floor',\s*has\s*\?\s*String\(num\(b\.panelOpFloor,\s*0\)\)\s*:\s*'0'\)/.test(miniJs),
+    'mini.js：有图消费主窗地板，无图主动清零旧值');
+  ok(!/setProperty\('--panel-op-floor',\s*'0'\);\s*\n\s*root\.style\.setProperty\('--bg-blur'/.test(miniJs),
+    'mini.js：不再在有图路径把主窗地板写死为 0');
+}
+
+section('小窗主题共享：贴膜模式也发壁纸 + 底图磨砂与主窗表面对齐');
+{
+  const UI = path.resolve(HERE, '../../src/NetPeek.App/ui');
+  const themeUi = fs.readFileSync(path.join(UI, 'theme-ui.js'), 'utf8');
+  const miniJs = fs.readFileSync(path.join(UI, 'mini.js'), 'utf8');
+  const miniCss = fs.readFileSync(path.join(UI, 'mini.css'), 'utf8');
+
+  // 贴膜不再剥图：两个剥图点都必须消失。剥图的后果是「主窗有壁纸、小窗一块
+  // 素色」—— 小窗复刻不了贴膜的坐标系对齐，但退回复底铺法比没有图诚实。
+  ok(!/if \(wrap\) return \{ background: '', backdrop: null \};/.test(themeUi),
+    'theme-ui.js：贴膜模式不再把壁纸从广播里剥掉');
+  ok(/backdrop:\s*\{[\s\S]*?panelOpacity:\s*wrap \? effectiveWrapOpacity\(\)/.test(themeUi),
+    'theme-ui.js：贴膜漆浓度取 effectiveWrapOpacity（与主窗膜浓度同源，含地板）');
+  ok(/lens:\s*wrap \? 'saturate\(1\)'/.test(themeUi),
+    'theme-ui.js：贴膜发中性透镜 saturate(1)（主窗的膜不带透镜；发 none 会让整条 filter 声明作废）');
+  ok(/backdrop:\s*\{[\s\S]*?wrap,/.test(themeUi),
+    'theme-ui.js：payload 携带 wrap 标记');
+  ok(!/backdropStyle === 'wrap'\) return ''/.test(miniJs),
+    'mini.js：resolveBg 不再按贴膜剥图');
+  ok(/classList\.toggle\('wrap-bg',\s*has && !!b\.wrap\)/.test(miniJs),
+    'mini.js：html.wrap-bg 类随 payload.wrap 开关');
+  ok(/dim:\s*wrap \? 0 :/.test(miniJs),
+    'mini.js：启动首帧的贴膜分支口径与广播一致（无纱）');
+
+  // 底图磨砂档：主窗表面是 backdrop-filter blur(16px) 的固定磨砂，小窗的形态
+  // 元素整个都是「表面」，滑杆为 0 时壁纸原样透出、和主窗表面的读感割裂。
+  ok(/html\s*\{\s*--mini-blur:\s*max\(var\(--bg-blur,\s*0px\),\s*16px\)/.test(miniCss),
+    'mini.css：--mini-blur 置底保底 16px（与主窗表面磨砂同档）');
+  ok(/html\.wrap-bg\s*\{\s*--mini-blur:\s*var\(--bg-blur,\s*0px\)/.test(miniCss),
+    'mini.css：贴膜底图跟滑杆走（主窗的膜是清晰取景）');
+  ok(/\.panel::before\s*\{[^}]*filter:\s*blur\(var\(--mini-blur\)\)/.test(miniCss),
+    'mini.css：面板底图消费 --mini-blur');
+  ok(/\.orb-bg\s*\{[^}]*filter:\s*blur\(var\(--mini-blur\)\)/.test(miniCss),
+    'mini.css：球底图消费 --mini-blur');
+  ok(!/blur\(var\(--bg-blur\)\)/.test(miniCss),
+    'mini.css：不再有裸消费 --bg-blur 的磨砂声明（有就绕过了保底档）');
+  ok(/inset:\s*calc\(var\(--mini-blur\) \* -1\.5 - 6px\)/.test(miniCss),
+    'mini.css：负外扩公式跟着磨砂档走（软边永远吃得掉）');
 }
 
 section('对比度守卫补 panel-2（输入框 / 顶栏底色）');

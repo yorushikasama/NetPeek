@@ -226,4 +226,55 @@ section('vendor 库必须随页加载');
   }
 }
 
+section('HTML 里写的类名都在 CSS 里有规则');
+{
+  // 2026-09-19 实测的哑失败：把胶囊形态的 `class="orb"` 改名成 `class="cap"`，
+  // 而 mini.css 的规则全是 `.orb {...}` —— 没有任何一层报错，元素只是退回普通流，
+  // 于是宽度、flex、圆角、背景、定位全部消失（`.cap-level` 连定位祖先都没了，
+  // 直接飘到窗口上）。id 契约查不出这一类：id 都在、JS 也都找得到，错的是类名。
+  //
+  // 只查静态写在 HTML 里的类。JS 运行时加挂的状态类（is-*、has-bg 之类）不在
+  // 这条判据里：它们的「没有规则」是合法的（有些只作 JS 侧的标记）。
+  const STATE = /^(is|has|np|wrap|theme|light)-/;
+  // 有意的「无样式类」白名单：存在即合理，但每一项都要说得出来历，
+  // 新增条目必须补理由（和上面的死 id 白名单同一原则 —— 白名单自己也要过期检查）。
+  //   lbl         —— JS 文本钩子（#pauseLbl 等），样式由父级 .btn / .it 继承，自身无规则
+  //   screen-hist —— 屏幕分组的标识类（选择器按 data-screen 走），样式落在 .screen 上
+  //   hist-time   —— 原生 <select> 的增强标记（select-menu.js 按 data-menu 接管外观），
+  //                  原控件本身不需要规则
+  const STYLELESS_OK = {
+    'index.html': ['lbl', 'screen-hist', 'hist-time'],
+    'mini.html': ['lbl'],
+  };
+  for (const [page, sheets] of [
+    ['index.html', ['styles.css', 'tokens.css', 'boot.css']],
+    ['mini.html', ['mini.css', 'tokens.css']],
+  ]) {
+    const html = fs.readFileSync(path.join(UI_DIR, page), 'utf8');
+    const css = sheets
+      .filter((f) => fs.existsSync(path.join(UI_DIR, f)))
+      .map((f) => fs.readFileSync(path.join(UI_DIR, f), 'utf8'))
+      .join('\n');
+    const used = new Set();
+    for (const m of html.matchAll(/\bclass="([^"]+)"/g)) {
+      for (const c of m[1].trim().split(/\s+/)) {
+        if (c && !STATE.test(c)) used.add(c);
+      }
+    }
+    const allow = STYLELESS_OK[page] || [];
+    // 单词边界要自己造：`.cap` 不能被 `.cap-level` 满足，否则改错名照样漏过。
+    const styled = (c) => new RegExp(`\\.${c}(?![\\w-])`).test(css);
+    for (const c of used) {
+      if (allow.includes(c)) continue;
+      ok(styled(c), `${page} 的 .${c} 在 ${sheets.join(' / ')} 里有规则`);
+    }
+    // 白名单自己也要过期检查：条目对应的类后来补了规则、或干脆从 HTML 里删了，
+    // 都该把它从名单里摘掉 —— 不然名单会慢慢变成一张「豁免一切」的挡箭牌。
+    for (const c of allow) {
+      ok(used.has(c) && !styled(c),
+        `${page} 白名单项 .${c} 仍然「在用且无规则」（补了样式或已删除就摘掉它）`);
+    }
+  }
+}
+
 process.exit(report('dom-contract.test'));

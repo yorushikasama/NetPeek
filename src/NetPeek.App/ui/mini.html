@@ -9,48 +9,48 @@
   <link rel="stylesheet" href="mini.css" />
 </head>
 <body>
-  <!-- 能量球形态（默认，窗口 108×108，球 92×92，四周 8px 留给外发光） -->
-  <!-- 不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
+  <!-- 能量球形态（默认，窗口 112×112，球体 92×92 正圆，四周 10px 留给投影）。
+       中途曾改成 176×38 的横向胶囊，理由是排版预算；那一版被推翻 —— 宽高比 4.6:1
+       的圆角矩形读作椭圆，而「能量球」这个概念的载体首先是圆。预算改由**纵排**
+       解决：状态核心 / 下载 15px / 上传 11px 三行叠在球心那条宽带里（92 的圆在
+       中心一带弦宽 84–92px，三行合计只占 38px 高，够用）。上一版真正的瓶颈不是
+       圆，是那两圈同心环吃掉的 18px 环带 —— 环已撤掉，两条理由：
+       ① 内环 2px 笔画在 125%/150% 缩放下被光栅化成 2.5–3px，和 4px 外环的重量差
+          被抹平，两环读作一圈粗边；
+       ② 环的分母原是「近 60 秒峰值」这个浮动值，环走到 80% 读不出是 8 MB/s 还是
+          80 KB/s —— 环形进度天然暗示「占某个固定总量」，符号与语义本身错配。
+       水位改成球腔里自下而上的能量液，分母换成固定档位（见 mini.js 的 TIERS）。
+
+       不用 data-tauri-drag-region：它在 mousedown 就进入系统拖动，click 永远不会触发，
        球点不开。拖动由 mini.js 的位移阈值 + startDragging() 自己处理。 -->
   <div id="orb" class="orb" title="NetPeek" role="button" tabindex="0"
        aria-label="NetPeek：点击展开迷你窗">
-    <!-- 环形规：外圈 4px 琥珀 = 下载速率 ÷ 近 60 秒峰值，内圈 2px 钢蓝 = 上传（§2.9）。
-         轨道垫在下面，没有轨道就只剩一段孤立弧线，读不出「相对水位」。 -->
-    <svg class="orb-gauge" viewBox="0 0 92 92" aria-hidden="true">
-      <defs>
-        <!-- 环的管状明暗：同一盏左上光把环照成凸起的管子，而不是贴在球面上的
-             平线。g 所在组带 rotate(-90)，渐变轴按「局部右 = 屏幕上」补偿，
-             亮端落在真实的顶部。换肤跟随靠 stop-color 里的令牌（theme-anim
-             窗口对 stop-color 一并过渡）。 -->
-        <linearGradient id="ringDownG" x1="1" y1="0" x2="0" y2="0">
-          <stop offset="0" style="stop-color: color-mix(in srgb, var(--down) 82%, white)" />
-          <stop offset="0.55" style="stop-color: var(--down)" />
-          <stop offset="1" style="stop-color: color-mix(in srgb, var(--down) 58%, black)" />
-        </linearGradient>
-        <linearGradient id="ringUpG" x1="1" y1="0" x2="0" y2="0">
-          <stop offset="0" style="stop-color: color-mix(in srgb, var(--up) 82%, white)" />
-          <stop offset="0.55" style="stop-color: var(--up)" />
-          <stop offset="1" style="stop-color: color-mix(in srgb, var(--up) 58%, black)" />
-        </linearGradient>
-        <linearGradient id="trackG" x1="1" y1="0" x2="0" y2="0">
-          <stop offset="0" style="stop-color: color-mix(in srgb, var(--line) 62%, white)" />
-          <stop offset="1" style="stop-color: color-mix(in srgb, var(--line) 55%, black)" />
-        </linearGradient>
-      </defs>
-      <!-- 半径缩进球缘 3px（外环外缘 43 < 46）：原来外环外缘 = 46 正好压在球的
-           1px 边框上，边框线把环切了一道；内外环间隙也从 2px 拉到 3px，
-           小尺寸下两条环不再糊成一圈。 -->
-      <g transform="rotate(-90 46 46)" fill="none" stroke-linecap="butt">
-        <circle class="track" cx="46" cy="46" r="41" stroke-width="4" />
-        <circle class="track" cx="46" cy="46" r="35" stroke-width="2" />
-        <circle id="orbArcDown" class="arc arc-down" cx="46" cy="46" r="41" stroke-width="4" />
-        <circle id="orbArcUp" class="arc arc-up" cx="46" cy="46" r="35" stroke-width="2" />
-      </g>
-    </svg>
-    <div class="orb-nums">
-      <div class="orb-down"><span class="v" id="orbDownV">--</span><span class="u" id="orbDownU"></span></div>
-      <div class="orb-up"><svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg><span class="v" id="orbUpV">--</span><span class="u" id="orbUpU"></span></div>
-    </div>
+    <!-- 底图层。必须是真实元素而不是伪元素：球的两个伪元素已经被漆层（::after）
+         与内缘光照（::before）占满，而底图这一层要单独吃 filter（模糊 + 主窗那组
+         透镜），挂到 .orb 自己身上会把 1px 边线和球里的读数一起糊掉。
+         图的参数全部由 theme-changed 广播过来，无图时 --theme-bg-image 是 none，
+         整层不显影，所以这个元素在纯色皮肤下没有任何代价。 -->
+    <span class="orb-bg" aria-hidden="true"></span>
+    <!-- 状态点与迷你窗头部的 .panel-dot 同一族（同色同语义），只是这里没有
+         文字位可写，状态全靠颜色 + 整个球的 title。 -->
+    <span class="orb-dot" id="orbDot" role="img" aria-label="未连接采集服务"></span>
+    <!-- 下载是主值：字号 15，比上传大一档。方向除了颜色还给箭头，
+         因为「琥珀 = 下载」这条约定只在本应用内成立，第一次见的人读不出来。 -->
+    <span class="orb-rate is-down">
+      <svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg>
+      <span class="v" id="orbDownV">--</span><span class="u" id="orbDownU"></span>
+    </span>
+    <span class="orb-rate is-up">
+      <svg class="a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+      <span class="v" id="orbUpV">--</span><span class="u" id="orbUpU"></span>
+    </span>
+    <!-- 能量液：球即容器，下载速率是注进球腔的能量（分母是 mini.js 的固定档位
+         TIERS），从球底向上灌注、垫在读数之下，被圆轮廓裁成一段弓形。
+         不做成底边一条细线：悬在底边的细线读作「一条线」，读不出「容器里的
+         东西在多起来」。高度由 mini.js 写进 --level。 -->
+    <span class="orb-level" aria-hidden="true"><i id="orbLevel"></i></span>
   </div>
 
   <!-- 迷你窗形态（点击能量球展开，320×300 面板 / 窗口 344×324） -->
@@ -115,7 +115,7 @@
   <script src="vendor/color-thief.min.js"></script>
 <script src="theme.js"></script>
   <!-- 小窗里没有任何可复制的值，引入它只为把 WebView2 的原生右键菜单（刷新 / 另存为）
-       也一起拦掉 —— 一个 108×108 的能量球上弹出浏览器菜单，比主窗里更刺眼。 -->
+       也一起拦掉 —— 一个 92px 的能量球上弹出浏览器菜单，比主窗里更刺眼。 -->
   <script src="context-menu.js"></script>
   <script src="mini.js"></script>
 </body>

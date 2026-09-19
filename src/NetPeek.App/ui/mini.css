@@ -1,11 +1,18 @@
-/* NetPeek 小窗样式（v2）：能量球（窗口 108×108，球 92×92）与迷你窗
+/* NetPeek 小窗样式（v3）：能量球（窗口 112×112，球体 92×92 正圆）与迷你窗
    （窗口 344×324，面板本体 320×300，四周各 12px 留给投影）双形态。
    窗口 transparent: true，body 无底色，只有形态元素有背景。
 
-   v2 素壳：球与面板都是不透明纯色 + 1px 边线，无外发光、无光斑。层次交给
-   投影（面板）和球面明暗（球）。透明窗口的边界是硬的，任何超出去的光都会
-   被裁成直线，所以装饰一律不做。面板形态的预算：面板外沿到窗口边 12px，
-   投影的偏移 + 扩散之和要 ≤ 12。
+   v3 中途曾把球换成 176×38 的横向胶囊，理由是版面预算。那一版被推翻：宽高比
+   4.6:1 的圆角矩形读作椭圆，而「能量球」这个概念的载体首先是**圆** —— 形状是
+   这个形态唯一的识别物，拿它换字宽是把招牌拆了去换货架。
+   预算改由**纵排**解决：球内竖着摆「状态核心 / 下载 15px / 上传 11px」三行。
+   92 的圆在中心一带弦宽有 84–92px，三行合计只占 38px 高，预算本来就够用；
+   上一版真正的瓶颈不是圆，是那两圈同心环吃掉的 18px 环带（已撤，见下）。
+
+   素壳延续 v2：球与面板都是不透明纯色 + 1px 边线，无外发光、无光斑。
+   层次只交给投影。透明窗口的边界是硬的，任何超出去的光都会被裁成直线，
+   所以装饰一律不做。两种形态的留边预算同一条算法（偏移 + 扩散 ≤ 留边）：
+   球四周 10px（0 2px 8px），面板四周 12px（0 3px 9px）。
 
    令牌统一在 tokens.css 里声明，mini.html 在本文件之前加载它。小窗是独立 webview，
    主界面写在自己 documentElement 上的变量不会继承过来，所以 tokens.css 的默认值
@@ -14,13 +21,26 @@
 
    两条和主界面不同的规定：
    - 不做 backdrop-filter。透明窗口后面没有网页内容可采样，Windows 上这一项在透明窗口里
-     行为不一致（有时糊成灰块、有时完全无效），纯色底已经够。
+     行为不一致（有时糊成灰块、有时完全无效）。背景图改成铺在形态元素**内部**：
+     面板用 ::before（底图本体，带 blur）+ ::after（漆层），球直接把底图垫在
+     漆层渐变之下。图在元素内部就有真实内容可压，用不着采样窗口背后的桌面。
    - 按钮与滚动条比主界面小一档（.btn 28/12 对 30/13、.icon-btn 28 对 32、滚动条 6 对 8）：
      这里的头部只有 40px、脚只有 44px，主界面那一档塞不下。是适配，不是重复声明。 */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* .orb / .panel / .orb-nums 都是 display: flex，作者样式优先级高于浏览器默认表里的
+/* 底图磨砂档：与主窗「表面」的观感对齐。主窗各表面（卡片/顶栏/rail）有
+   backdrop-filter blur(16px) 的固定磨砂，底图滑杆只管缝隙里那块 —— 小窗整个
+   形态元素都是「表面」，没有缝隙可对比，滑杆为 0 时壁纸原样透出，和主窗表面
+   「一团柔色调」的读感割裂（用户报的「效果不够好」正出在这）。置底模式给
+   max(滑杆, 16px) 的保底；贴膜（html.wrap-bg）例外 —— 主窗的膜本来就是
+   清晰取景（fixed 剪下自己身上那块，不磨砂），小窗跟着滑杆走，0 就是清晰。
+   calc()/max() 里嵌 var() 是记号流，消费端（blur()/inset）展开时才求值，
+   与 styles.css 的 --paint-op 同一套写法。 */
+html { --mini-blur: max(var(--bg-blur, 0px), 16px); }
+html.wrap-bg { --mini-blur: var(--bg-blur, 0px); }
+
+/* .orb / .panel 都是 display: flex，作者样式优先级高于浏览器默认表里的
    [hidden] { display: none }，不加这条 hidden 属性会失效、两种形态同时渲染。 */
 [hidden] { display: none !important; }
 
@@ -42,182 +62,282 @@ html, body {
 html:not(.theme-ready) .orb,
 html:not(.theme-ready) .panel { visibility: hidden; }
 
+/* 球内子元素一律叫 orb-*。中途那版胶囊留下的 cap-* 前缀已经全部改掉：
+   形态是球，命名没有理由继续指着一个被推翻的形状。
+   而 `#orb.orb` 本身不能动 —— mini.rs 的 set_mini_shape、mini.js 的形态切换、
+   回归里的断言都按这个名字对接（2026-09-19 实测把它改成 cap 是个哑失败：
+   一层报错都没有，元素只是退回普通流，尺寸/圆角/定位全部消失）。 */
 .orb {
   position: absolute;
   /* 全局界面不透明度（与主窗 .frame 共用 --ui-opacity，theme-changed 广播）：
-     只淡「漆」不淡字 —— 球体底色 / 边线 / 光照层按 --o 淡出，速率数字与环形规
+     只淡「漆」不淡字 —— 球面光照 / 边线 / 内缘高光按 --o 淡出，速率数字与能量液
      是数据、保持不透明。原来整层 opacity 淡出，50% 档连球上唯一的读数也只剩一半。
      取 --paint-op（= max(--ui-opacity, --ui-paint-floor)，tokens.css）而不是裸的
-     --ui-opacity：小窗是**单层漆**（面板直接压在桌面上，body 透明），同一个不透明度
-     漏进来的桌面是主窗两层结构的两倍，所以 mini.js 用 solo 口径算地板（theme.js 的
-     uiPaintFloor(tokens, true)，实测比主窗高约 0.12）。桌面亮度采不到，地板按最坏
-     桌面推 —— 球上那两行速率数字是它唯一承载的信息，透底之后就没有别处可读。 */
+     --ui-opacity：小窗是**单层漆**（球/面板直接压在桌面上，body 透明），同一个
+     不透明度漏进来的桌面是主窗两层结构的两倍，所以 mini.js 用 solo 口径算地板
+     （theme.js 的 uiPaintFloor(tokens, true)，实测比主窗高约 0.12）。桌面亮度采不到，
+     地板按最坏桌面推 —— 球上那两个速率是它唯一承载的信息，透底之后没有别处可读。
+     有背景图时 --paint-op 由 .has-bg 改写成「面板滑杆 × 全局」，见文件末尾那一节：
+     那条路上漆层身后是自己的底图（不是桌面），守卫换成 --panel-op-floor。 */
   --o: calc(var(--paint-op) * 100%);
-  /* 92 的球放在 108 的窗口里居中，四周各 8px。窗口 108×108 由 mini.rs 的 ORB_W/H
-     写定，改球径要连那两个常量一起改，否则球不再居中。 */
+  /* 92×92 的正圆放在 112×112 的窗口里居中，四周各 10px 给投影。窗口尺寸由
+     mini.rs 的 ORB_SIZE/ORB_PAD 写定（92 + 10×2），改这里必须连那两个常量
+     一起改，否则球不再居中。
+     宽高必须相等：任一边被单独改动，下面 50% 的圆角就渲染成椭圆 —— 用户上一轮
+     否掉胶囊的原话就是「不是椭圆形，而是要圆形」。 */
   width: 92px;
   height: 92px;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
+  /* 50% 而不是 46px：圆角跟着尺寸走，改边长不会留下一个「差一点点才是圆」的方块。 */
   border-radius: 50%;
-  /* 球体自身的对角光照：左上提亮、右下压暗 —— 球面必须和环、投影共享同一盏
-     左上光，::before 的反射层只做点缀，主体明暗得长在球底上。
-     每一站都乘 --o：球漆随全局不透明度淡出，桌面从球底透上来。 */
-  background: radial-gradient(circle at 30% 24%,
-    color-mix(in srgb, color-mix(in srgb, var(--panel-hi) 86%, white 14%) var(--o), transparent) 0%,
-    color-mix(in srgb, var(--panel) var(--o), transparent) 46%,
-    color-mix(in srgb, color-mix(in srgb, var(--panel-2) 78%, black 22%) var(--o), transparent) 100%);
-  border: 1px solid color-mix(in srgb, var(--line) var(--o), transparent);
-  /* 回弹投影（不是外发光）：球悬在桌面之上，往页面上投一小片软阴影才有
-     「放上去」的重量。窗口四周只剩 8px，offset 2 + blur 5 = 7px 是不裁边的上限；
-     再大阴影会被透明窗口的硬边界切出一条直线。 */
-  box-shadow: 0 2px 5px rgb(0 0 0 / calc(0.35 * var(--ui-opacity)));
-  cursor: grab;
-  /* hover 微抬：cursor:grab 只说得出「可拖」，说不出「可点开」。
-     1.04 够感知、不越界（95.7 < 108 窗口）。
-     只动 transform，reduced-motion 由全局媒体查询关掉。 */
-  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
-}
-.orb:hover { transform: translate(-50%, -50%) scale(1.04); box-shadow: 0 3px 7px rgb(0 0 0 / 0.4); }
-.orb:active { transform: translate(-50%, -50%) scale(0.98); cursor: grabbing; }
-/* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪。
-   焦点环走交互强调（sel-bar），不占数据色。 */
-.orb:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 3px; }
-
-/* ---------- 球面光照（3D 材质，与流量无关） ----------
-   原来球是「一块纯色圆盘 + 向外的光」，没有任何球面明暗，所以读作平面。
-   这层补的是材质本身：左上受光、右下背光、球缘内侧压暗、底部一道环境反弹光。
-   为什么用伪元素而不是并进 .orb 的 background：并进去后 color-mix 的层级
-   会让明暗直接盖在边线上，单独一层好控强度。
-   ::before 是第一个子节点，落在环形规与数字之下。 */
-.orb::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  pointer-events: none;
-  background:
-    /* 底部内遮蔽（AO）：球底往里收的那一圈暗，是把「球」从「圆片」区分开的
-       关键一层 —— 没有它，再亮的高光也只是纸上的渐变。
-       整层跟着球漆的口径（--paint-op，含地板）：光照与球漆同步淡出，
-       不然球底透明了高光还悬在半空 */
-    radial-gradient(circle at 50% 118%,
-      color-mix(in srgb, black calc(46% * var(--paint-op)), transparent) 0%,
-      color-mix(in srgb, black calc(20% * var(--paint-op)), transparent) 28%,
-      transparent 50%),
-    /* 底部环境反弹：桌面把光打回球底，很淡 */
-    radial-gradient(circle at 50% 98%,
-      color-mix(in srgb, var(--down) calc(16% * var(--paint-op)), transparent) 0%,
-      transparent 44%),
-    /* 球面明暗：高光在 34%/28%，右下压到 30% 黑 —— 球体的体积感 */
-    radial-gradient(circle at 34% 28%,
-      color-mix(in srgb, white calc(14% * var(--paint-op)), transparent) 0%,
-      color-mix(in srgb, white calc(6% * var(--paint-op)), transparent) 20%,
-      transparent 46%,
-      color-mix(in srgb, black calc(11% * var(--paint-op)), transparent) 76%,
-      color-mix(in srgb, black calc(30% * var(--paint-op)), transparent) 100%);
-}
-
-/* 原来这里有一整套「能量光效」：绕球外扩的 halo 光晕、球心随负载点亮的 core
-   光斑、绕球旋转的 sheen 高光叶，外加一层 canvas 发光粒子，强度统一由 --e
-   （当前速率 ÷ 近 60 秒峰值）驱动。全部删掉了 —— 那套东西是在一个 92px 的球上
-   叠四层半透明橙光，实际观感是一团糊在桌面上的橙雾，廉价且盖住了球上唯一真正
-   要读的东西（速率数字和两圈环形规）。
-   现在球的层次只由三样东西给：::before 的球面明暗（材质，与流量无关）、
-   ::after 的镜面高光（固定不动）、以及环形规本身。速率高低看环的水位和数字，
-   不靠亮度猜 —— 那本来也是环形规存在的理由。 */
-
-/* SVG 和数字都不吃指针事件，点击一律落到 .orb 上（球要能点开）。
-   层序：球体/明暗（::before z1）→ 镜面高光（::after z2，压在环下面不抢数字）→
-   环形规（svg z3）→ 读数（nums z4）。 */
-.orb::before { z-index: 1; }
-.orb-gauge { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
-/* 注释里说过多年「::after 的镜面高光」，这条规则其实从来没落过地 —— 丢了。
-   第一版放在 10–11 点方向的球缘，恰好被内外两圈环的笔画整个压住（视觉验收
-   5/10 的主因）。挪进内圈之内的开阔球面、数字左上方，按实际像素给柔边亮点：
-   中心 50% 白自然衰减成光晕，z2 压在环下面。 */
-.orb::after {
-  content: '';
-  position: absolute;
-  left: 31px;
-  top: 21px;
-  width: 12px;
-  height: 8px;
-  z-index: 2;
-  border-radius: 50%;
-  pointer-events: none;
-  /* 与 ::before 的球面明暗同一口径（--paint-op，含地板）：高光是长在球漆上的
-     材质，球漆被地板托住时高光不能自己继续淡下去 —— 那会让球在低档位显得
-     「漆还在、光没了」。投影不在此列：它打在桌面上，本来就该随滑杆一起消。 */
-  background: radial-gradient(closest-side,
-    rgb(255 255 255 / calc(0.5 * var(--paint-op))) 0%,
-    rgb(255 255 255 / calc(0.14 * var(--paint-op))) 55%,
-    transparent 100%);
-  transform: rotate(-28deg);
-}
-/* 轨道：管状明暗（defs 里的渐变），凹进球面而不是画在球面上 */
-.orb-gauge .track { stroke: url(#trackG); }
-/* 进度弧：管状明暗 + 往球面投 2px 软阴影 —— 环是凸起物，影子才是「凸起」的
-   证据。这是投影不是辉光：方向固定向下、颜色只有黑，跟删掉的那套彩色光晕
-   不是一回事。 */
-.orb-gauge .arc {
-  filter: drop-shadow(0 2px 2px rgb(0 0 0 / 0.42));
-}
-.orb-gauge .arc-down { stroke: url(#ringDownG); }
-.orb-gauge .arc-up { stroke: url(#ringUpG); }
-
-/* 92px 的球扣掉两圈环，中心可写字的圆直径只剩约 76px，最上面那行更窄（约 66px）。
-   所以球上的下载只排「数值 + 单位」，方向靠琥珀色和下面那行的 ↑ 区分；
-   数值也压到最多 3 个字身（见 mini.js 的 fmtOrb）。 */
-.orb-nums {
-  position: absolute;
-  inset: 0;
-  z-index: 4;
+  /* 纵排三行：状态核心在最上，下载（主值）居中，上传收在底下。
+     center 居中而不是 space-between：球是圆的，越靠上下两极弦宽越窄
+     （92 的圆离中心 ±30px 处弦宽只剩 70px），行必须挤在中间那条宽带里。 */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  pointer-events: none;
-  text-align: center;
-  /* 数字嵌在球面上：一层贴地投影，把读数从渐变底上「托」出来 */
-  text-shadow: 0 1px 3px rgb(0 0 0 / 0.45);
+  gap: 3px;
+  /* 内边距按圆的最窄处给：三行合计约 38px 高，上下各留 14 之后可用带是 64px，
+     余量留给能量液顶面与顶部核心之间的呼吸。 */
+  padding: 14px 8px;
+  /* 底图与能量液都要被圆轮廓裁进去 —— 少了这条，cover 的底图会铺成直角矩形，
+     四角直接戳到窗口边缘。 */
+  overflow: hidden;
+  /* 球自己不画底：底图（.orb-bg）、漆（::after）、能量液（.orb-level）三层各自
+     独立，才能分别吃滤镜、吃不透明度、吃裁剪。原来底图和漆合在这里一条
+     background 多层栈里，结果是**透镜没法上**：filter 作用于整个元素，
+     挂上去会把 1px 边线和球里那两个读数一起糊掉（同 .panel 那处教训）。
+     而透镜不上，漆层那套可读性契约的前提就不成立（见 .orb-bg 的注释）。
+     层序（下→上）：.orb-bg(-3) → ::after 漆(-2) → .orb-level 液(-1) → 读数 → ::before 内缘。 */
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--line) var(--o), transparent);
+  /* 回弹投影（不是外发光）：球悬在桌面之上，往页面上投一小片软阴影才有
+     「放上去」的重量。窗口四周留了 10px，offset 2 + blur 8 = 10 正好用满，
+     再大就会被透明窗口的硬边界切出一条直线。 */
+  box-shadow: 0 2px 8px rgb(0 0 0 / calc(0.28 * var(--ui-opacity)));
+  cursor: grab;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
 }
-.orb-down {
-  color: var(--down);
-  font-family: var(--font-num);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  line-height: 1.1;
-  /* 球心是纯底色，数字直接压上去反而更利 —— 不垫任何微光。 */
+/* hover 仍然不放大，尽管圆这一维看着有余量：92 × 1.04 = 95.7，四周还剩 8.1px，
+   而投影要 10px —— 放大之后投影就被透明窗口的硬边界裁成直线。
+   （v2 的球能放大是因为那时窗口 108 而球 92，留边 8 用的是 0 2px 5px 那档小投影。）
+   改为提亮边线 + 加重投影，抬起感照旧，代价不落在会裁边的那一维上。 */
+.orb:hover {
+  border-color: color-mix(in srgb, color-mix(in srgb, var(--line) 62%, var(--text-2)) var(--o), transparent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / calc(0.38 * var(--ui-opacity)));
 }
-.orb-down .v { font-size: 20px; font-weight: 600; }
-.orb-down .u { font-size: 10px; font-weight: 500; margin-left: 2px; }
-.orb-up {
-  color: var(--up);
-  font-family: var(--font-num);
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  white-space: nowrap;
-  line-height: 1.1;
-}
-.orb-up .a { width: 9px; height: 9px; margin-right: 2px; flex: none; }
-.orb-up .u { margin-left: 2px; }
+/* 按下往里收：缩小不会越界，是这个形态里唯一安全的位移反馈。 */
+.orb:active { transform: translate(-50%, -50%) scale(0.985); cursor: grabbing; }
+/* 键盘焦点环：orb 是 role=button + tabindex，Tab 必须能看到它停在哪。
+   焦点环走交互强调（sel-bar），不占数据色。offset 3：投影占 10px，环还有位置。 */
+.orb:focus-visible { outline: 2px solid var(--sel-bar); outline-offset: 3px; }
 
-/* 暂停：环变虚线（虚线段由 mini.js 算进 stroke-dasharray）+ 数字降到 60%。
-   不再盖一层半透明遮罩加 30px 的 ⏸ —— 那把球上唯一的数字整个糊掉了。 */
-.orb.is-paused .orb-nums { opacity: 0.6; }
+/* 球的底图层：与 .panel::before 同一组滤镜、同一条负外扩公式，只是挂在一个真实
+   元素上（球的负层已经被漆与能量液占掉两个伪元素，::before 还要留给内缘光照）。
+   透镜（--lens-filter）是这一层的重点：主窗把同一组参数挂在各表面的
+   backdrop-filter 上，「只归一面板身后那块背景」；小窗的整个球就是一块面板、
+   图又在元素内部，所以同一组参数当普通 filter 铺满这一层，效果等价。
+   这一项不能省 —— 漆层那套可读性契约（theme.js 的 glassContract / 加固层的目标
+   底色）算的就是「透镜之后的合成面」；不铺透镜，前提不成立，而字色却已经按
+   那个前提被推过一轮了。
+   blur 取 --mini-blur（置底保底 16px 磨砂，与主窗表面同档）：球只截到壁纸
+   一小块，原样透出的图案比读数还抢眼；磨砂成柔色调后，球面读数才回到主角位。
+   用户把模糊拉大时这一层跟着更糊，与主窗同步。
+   整层按裸 --ui-opacity 淡出，与主窗 .backdrop 逐字一致：图是「底」不是「漆」，
+   全局滑杆拉低时桌面要从图后面透上来，这正是那根滑杆的主要观感。 */
+.orb-bg {
+  position: absolute;
+  inset: calc(var(--mini-blur) * -1.5 - 6px);
+  z-index: -3;
+  pointer-events: none;
+  border-radius: 50%;
+  opacity: var(--ui-opacity);
+  background-image: var(--theme-bg-image);
+  background-size: cover;
+  background-position: center;
+  filter: blur(var(--mini-blur)) var(--lens-filter, saturate(1.5)) brightness(var(--bg-brightness, 1));
+}
+
+/* 球的漆层 + 图上那三层纱。漆是球面光照那条 radial（光源左上 32%/26% 收到右下
+   背光）：radial 而不是 linear，因为球要读出「表面是弯的」—— 同一盏光在平面上
+   是条带、在球上是个亮斑。每一站乘 --o，漆随不透明度淡出、图从下面透上来。
+   纱三层与主窗 .backdrop::after 逐项同源（方向化 tint × dim、守卫补偿 auto、
+   噪点）：少了它们小窗的同一张图比主窗亮一档、浅色皮肤还会反着用黑纱压图。
+   噪点只在有图时铺（无图时 --theme-bg-image 是 none，纱与噪点都是白铺一层）。 */
+.orb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 32% 26%,
+      color-mix(in srgb, color-mix(in srgb, var(--panel-hi) 84%, white 16%) var(--o), transparent) 0%,
+      color-mix(in srgb, var(--panel) var(--o), transparent) 58%,
+      color-mix(in srgb, color-mix(in srgb, var(--panel-2) 82%, black 18%) var(--o), transparent) 100%);
+}
+html.has-bg .orb::after {
+  /* 末两层的纯色（tint 纱 / 守卫补偿）必须包 linear-gradient()：background 简写
+     的非末层只认 <image>，裸 color-mix()/rgb() 一条层非法整条声明作废 ——
+     2026-09-19 实测这条声明正是这样哑失败过，球漆、噪点、纱一起消失，
+     有图皮肤下球面上只剩壁纸与读数（用户报的「效果不够好」直接根源）。 */
+  background:
+    radial-gradient(circle at 32% 26%,
+      color-mix(in srgb, color-mix(in srgb, var(--panel-hi) 84%, white 16%) var(--o), transparent) 0%,
+      color-mix(in srgb, var(--panel) var(--o), transparent) 58%,
+      color-mix(in srgb, color-mix(in srgb, var(--panel-2) 82%, black 18%) var(--o), transparent) 100%),
+    var(--noise-url) repeat,
+    linear-gradient(color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
+      color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent)),
+    linear-gradient(rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)),
+      rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)));
+}
+
+/* 内缘高光与接地暗边，合起来把「一块圆色片」读成「一颗球」。
+   两条都用 inset box-shadow 的**扩散**而不是 border：border 会占掉内容盒的宽度、
+   把三行读数往里再挤 2px；inset 阴影不参与布局。
+   顶部 8px 的白扩散是球面受光的延续（与上面 radial 的光源同侧），底部 10px 的
+   黑扩散是球体自身的接地暗部 —— 有这两层，圆才不读作贴纸。
+   这里不再画 v2 那两圈同心环：2px 笔画在 125%/150% 缩放下被光栅化成 2.5–3px，
+   与 4px 外环的重量差被抹平、两环读作一圈粗边，而且环带白吃了 18px 的排字预算。
+   跟着 --paint-op（含地板）走：漆被地板托住时内缘不能自己继续淡下去，
+   那会让球在低档位显得「漆还在、边没了」。 */
+.orb::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 5px 8px -6px rgb(255 255 255 / calc(0.34 * var(--paint-op))),
+    inset 0 -6px 10px -6px rgb(0 0 0 / calc(0.30 * var(--paint-op))),
+    inset 0 0 0 1px rgb(255 255 255 / calc(0.06 * var(--paint-op)));
+}
+
+/* 状态核心：能量舱的心脏。白热的内核渐隐到状态色，外沿一圈同色的柔光 ——
+   一颗平色圆点只是图例，有内核有辉光的才是「核心」。
+   辉光半径 ≤7px：球外还有 10px 的投影余量，7px 的辉光即使落在球的边缘一带
+   也不出窗，不会被透明窗口的硬边界裁成直线。这颗点在球内是最上面一行，
+   离窗口边至少 10（投影）+ 12（球内顶部留白）px，实际非常宽裕。 */
+.orb-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+.orb-dot.is-ok, .orb-dot.is-warn, .orb-dot.is-error {
+  /* 内核：左上一点白热（与球面同一盏光）渐隐进状态色 */
+  background: radial-gradient(circle at 38% 32%,
+    rgb(255 255 255 / 0.85) 0%,
+    var(--dot-c, var(--text-2)) 68%);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--dot-c, var(--text-2)) 55%, transparent);
+}
+/* 呼吸只在「监控中」搏动 —— 异常态要的是被看见，不是优雅。
+   2.6s 一循环、幅度刻意小：常驻桌面的东西，任何抢注意力的节奏都会烦。
+   动的是 box-shadow 而非 transform：7px 的点不值得为它开合成层。 */
+.orb-dot.is-ok { --dot-c: var(--ok); animation: orb-core 2.6s var(--ease) infinite; }
+.orb-dot.is-warn { --dot-c: var(--warn); }
+.orb-dot.is-error { --dot-c: var(--error); }
+@keyframes orb-core {
+  0%, 100% { box-shadow: 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent); }
+  50% { box-shadow: 0 0 7px color-mix(in srgb, var(--ok) 60%, transparent); }
+}
+
+/* 两组读数，纵向叠放。方向除了颜色还给箭头：「琥珀 = 下载」这条约定只在本应用内
+   成立，第一次见的人读不出来，而球是常驻桌面、最可能被第一次看见的那个形态。
+   基线对齐 + tabular-nums：数值跳动时字宽不变，行不会左右抽动。
+
+   一行之内是「箭头 + 数值 + 单位」横排，两行之间才是纵向 —— 单位不另起一行：
+   92 的圆在中心带有 84px 弦宽，「12.34 MB/s」这一档在 15px 字号下约 76px，排得下；
+   而把单位甩到第三行会让球内变成四行，行距一压就糊成一团。 */
+.orb-rate {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 1px;
+  max-width: 100%;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  line-height: 1;
+  /* 漆层是渐变、身后还可能有底图与能量液，读数垫一层贴地投影才托得出来 */
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.45);
+}
+/* 箭头按字高居中，不跟数字走基线（三角形的视觉重心不在基线上） */
+.orb-rate .a { flex: none; align-self: center; }
+/* 下载是主值：15px。不取胶囊那版的 16 —— 圆的可用弦宽比横条窄，
+   「125 MB/s」这类四字身在 16px 下会顶到弧边。 */
+.orb-rate.is-down { color: var(--down); }
+.orb-rate.is-down .a { width: 11px; height: 11px; }
+.orb-rate.is-down .v { font-size: 15px; font-weight: 600; }
+.orb-rate.is-down .u { font-size: 9px; font-weight: 500; margin-left: 1px; }
+/* 上传小一档：同屏两个数字等大就分不出主次，而桌面常驻形态先要答的是「在下多快」 */
+.orb-rate.is-up { color: var(--up); }
+.orb-rate.is-up .a { width: 9px; height: 9px; }
+.orb-rate.is-up .v { font-size: 11px; font-weight: 600; }
+.orb-rate.is-up .u { font-size: 8px; font-weight: 500; margin-left: 1px; }
+
+/* 能量液：球即容器，下载速率是注进球腔的能量（分母是 mini.js 的固定档位 TIERS），
+   从球底**向上**灌注。这是「能量球」这个概念的本体动作 —— 横条那版把它译成
+   从左向右推进，随形状一起作废了。
+   层级：z-index -1，垫在漆与内缘光照（::before）之下 —— 液体是球腔里的内容物，
+   不是贴在表面的一张贴纸；这样球的顶亮/底暗内缘仍然压在液面上面，
+   「透过球壳看见里面的液体」这个读感才成立。轨道不单独画：球腔本身就是量程。 */
+.orb-level {
+  position: absolute;
+  inset: 1px;
+  z-index: -1;
+  border-radius: inherit;
+  /* 液柱是个方块，靠这条被裁成圆里的一段弓形。少了它液面两端会戳出球外。 */
+  overflow: hidden;
+  pointer-events: none;
+}
+.orb-level i {
+  /* 贴在底部向上长：top: auto + bottom: 0，高度由 --level 给。
+     用绝对定位而不是 flex 对齐，是为了让高度过渡只动这一个盒子、不触发父级重排。 */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--level, 0%);
+  background:
+    /* 液面：顶端 3px 一条亮边，是「水位线」本身 —— 液体与空腔的交界要有一条
+       比液身亮的界面，否则读作一片渐隐的雾。放在 background 的第一层（最上面）。 */
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--down) 62%, transparent) 0px,
+      color-mix(in srgb, var(--down) 62%, transparent) 2px,
+      transparent 3px),
+    /* 液身：从液面往下逐渐变浓（22% → 40%），深度感来自浓度而不是明度 ——
+       越深的液体透光越少。都用 color-mix 的半透明而不是实色：漆与底图要能
+       透上来，液体才有「在球腔里」的深度；实色会读成糊在球下半截的色块。 */
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--down) 22%, transparent) 0%,
+      color-mix(in srgb, var(--down) 40%, transparent) 100%);
+  /* 档位切换时高度会跳一大截，短过渡把它读作「灌上去」而不是闪烁。
+     写 180ms 字面量：令牌表只有 --t-fast 一档，引用不存在的变量会让
+     整条 transition 声明失效（哑失败，不报错）。reduced-motion 由末尾媒体查询关掉。 */
+  transition: height 180ms var(--ease);
+}
+
+/* 暂停：读数降到 60%，液体整体淡到 35%（能量休眠而不是消失 —— 暂停不是
+   「空了」，恢复时它还在）。不盖半透明遮罩加大号 ⏸ —— 那把球上唯一的
+   两个数字整个糊掉。 */
+.orb.is-paused .orb-rate { opacity: 0.6; }
+.orb.is-paused .orb-level { opacity: 0.35; }
 
 /* ---------- 迷你窗 ---------- */
 
 .panel {
   position: absolute;
-  /* 全局界面不透明度：面板只淡「漆」不淡字（与主窗 .frame 同一原则，共用
-     --ui-opacity）——列表里的应用名、速率在 50% 档仍然清晰，桌面从面板底下透上来。
-     与球同一个口径 --paint-op（含单层漆的地板）：这块面板身后没有任何东西，
-     漏进来的就是桌面本身，比主窗那两层漏得多一倍。 */
-  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
+  /* 面板本体不画底：漆层与底图分别由 ::after / ::before 承担（见下），
+     两层都要被圆角和 overflow 裁到面板形状里，写在这里裁不出来。 */
+  background: transparent;
   /* 四周退 12px 给投影让位（窗口 344×324 = 面板 320×300 + 12×2）。
      原来 inset:0，box-shadow 整个落在窗口外一点都看不见，圆角外的四个角
      反而被自己的投影填上了色 —— 面板既没有浮起的层次，又像被一层方框框住。 */
@@ -230,6 +350,75 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   /* 只留投影：向下 3 + blur 9 = 12，正好够到窗口下边，强度在边缘已接近 0。
      原来还叠了一层 12px 的同色外发光，那圈橙雾没有光源依据，观感廉价。 */
   box-shadow: 0 3px 9px rgba(0, 0, 0, 0.30);
+}
+
+/* 面板的两层底，都用负 z-index 压到内容之下（头/总量/列表/脚是普通流内元素，
+   绘制顺序天然在负层之上，不必给它们逐个补 z-index）：
+   ::before 底图本体 —— 与主窗 .backdrop::before 同一组滤镜（blur / saturate /
+     brightness），底图参数由 theme-changed 广播过来，无图时 --theme-bg-image
+     是 none，整层不显影；
+   ::after 漆层 —— 面板底色按 --paint-op 铺在底图之上，和主窗各表面同一口径。
+   为什么不写成 .panel 自己的 background 多层栈：blur 必须挂在只含底图的那一层
+   上，写进 .panel 会连边线一起糊（filter 作用于整个元素）。 */
+.panel::before {
+  content: '';
+  position: absolute;
+  /* 负外扩吃掉模糊的软边：与主窗同一条公式（模糊半径 ×1.5 + 6），
+     不外扩的话大半径模糊会在面板四边露出一圈透明的虚边。 */
+  inset: calc(var(--mini-blur) * -1.5 - 6px);
+  z-index: -2;
+  pointer-events: none;
+  background-image: var(--theme-bg-image);
+  background-size: cover;
+  background-position: center;
+  /* 底图随全局不透明度一起淡出，与主窗 .backdrop 的 opacity: var(--ui-opacity)
+     同一行。漏掉它的后果是滑杆拉到 50% 时主窗的壁纸淡下去、小窗的没动 —— 桌面
+     从图后透上来本来就是那根滑杆的主要观感。 */
+  opacity: var(--ui-opacity);
+  /* 前三项与主窗 .backdrop::before 逐字相同；blur 取 --mini-blur（置底保底
+     16px，与主窗表面磨砂同档，理由见文件头）；末尾多挂一个 --lens-filter，
+     那是主窗写在各表面 backdrop-filter 里的**同一组参数**（auto-levels 反解出的
+     contrast/brightness/saturate，theme.lensFilter 拼串后随 theme-changed 下发）。
+     主窗必须用 backdrop-filter 是因为它要「只归一面板身后那块、缝隙里保持原样锐利」；
+     小窗整个形态元素就是一块面板，图又在元素**内部**，所以当普通 filter 铺满整层等价。
+     这一项不能省：漆层那套可读性契约（glassContract / 加固层的目标底色）算的就是
+     「透镜之后的合成面」，不铺透镜，契约的前提就不成立 —— 表现是同一张壁纸在小窗上
+     偏色、偏对比，且字阶按错的底色加固。 */
+  filter: blur(var(--mini-blur)) saturate(var(--bg-sat, 1.35))
+    brightness(var(--bg-brightness, 1)) var(--lens-filter, saturate(1.5));
+}
+.panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* 漆 + 图上那几层纱，栈序（上→下）与主窗一致 —— 主窗的纱铺在 .backdrop::after
+     上、漆在各表面自己身上，小窗没有独立的 backdrop 元素，两者合在这一层里，
+     但相对顺序不变：漆永远在最上，纱垫在漆与底图之间。
+       漆    —— 有底图时 --paint-op 走面板不透明度那条路（见文件末尾 html.has-bg
+                覆写），无底图时它是 max(--ui-opacity, 单层漆地板)，两种情况同一行；
+       噪点  —— 与主窗同一张 SVG（--noise-url）。烘在图里的 4% 盐椒，作用是把大面积
+                平涂的渐变打碎，不铺的话小窗的图比主窗「干净」一档；
+       tint  —— 方向化的纱（--backdrop-dim × --backdrop-tint）；
+       auto  —— 守卫的补偿层（--backdrop-auto），方向色走 --backdrop-veil：浅色皮肤
+                铺白纱抬暗区、深色铺黑纱压亮区。写死黑色会让浅色皮肤和主窗反着走。
+     纯色层（漆 / tint / auto）全部包 linear-gradient()：background 简写的非末层
+     只认 <image>，裸 color-mix()/rgb() 一条层非法整条声明作废 —— 2026-09-19
+     实测这条声明哑失败过，面板漆从未铺上，壁纸原样压在文字后面。 */
+  background:
+    linear-gradient(color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent),
+      color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent)),
+    var(--noise-url) repeat,
+    linear-gradient(color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
+      color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent)),
+    linear-gradient(rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)),
+      rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)));
+}
+/* 无图时这几层一概不铺：--backdrop-dim / --backdrop-auto 此刻是 0，但噪点不吃它们，
+   会在纯色面板上留下一层看得见的颗粒（主窗用 body:not(.has-bg) 那条同名规则挡掉）。 */
+html:not(.has-bg) .panel::after {
+  background: color-mix(in srgb, var(--panel) calc(var(--paint-op) * 100%), transparent);
 }
 
 /* 头 40 / 总量 52 / 脚 44 定高（§2.9 分段表），列表吃掉剩下的 162。
@@ -446,3 +635,27 @@ html:not(.theme-ready) .panel { visibility: hidden; }
   border-radius: 3px;
 }
 ::-webkit-scrollbar-button, ::-webkit-scrollbar-corner { display: none; }
+
+/* ---------- 有背景图时的漆层口径（与主窗 styles.css 的 body.has-bg 同源） ----------
+   无图时 --paint-op = max(--ui-opacity, --ui-paint-floor)（tokens.css 缺省）：
+   那条路上漆层身后是**桌面**，守卫是按 solo 口径算的 --ui-paint-floor。
+   有图时漆层身后换成了**自己的底图**，桌面被底图整片挡住 —— 桌面那条守卫此刻
+   无事可做，口径必须切到「面板滑杆 × 全局不透明度」，和主窗逐字一致，否则
+   小窗的面板不透明度滑杆在这条路上等于空调（漆恒为地板值、底图永远透不出来）。
+   calc() 不能省：自定义属性存的是未解析的记号流，裸写 A * B 只在消费端整体
+   再包一层 calc() 时才凑巧算得出（同 styles.css 那处教训）。
+   类挂在 html 而不是 body：小窗的 body 是透明的、没有任何漆，两层形态元素
+   （.orb / .panel）都是 body 的直接子节点，挂在根上两者同时吃到。 */
+html.has-bg {
+  --paint-op: calc(max(var(--panel-op), var(--panel-op-floor)) * var(--ui-opacity));
+}
+
+/* 减弱动效：液面的高度过渡、核心的呼吸、球的按压位移都关掉。主窗的同名媒体查询在
+   styles.css 里，小窗是独立文档，得自己写一份。
+   选择器跟着 orb-* 改名走：这里写错名字是纯哑失败（媒体查询本身仍然匹配，
+   只是规则选不中任何元素，reduced-motion 下动效照旧在动）。 */
+@media (prefers-reduced-motion: reduce) {
+  .orb, .orb-level i, .icon-btn, .btn { transition: none; }
+  .orb-dot.is-ok { animation: none; }
+  .orb:active { transform: translate(-50%, -50%); }
+}

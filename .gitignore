@@ -29,3 +29,6 @@ src/NetPeek.Installer/payload/
 
 # 工作区临时资料（图标包下载缓存、解包中间物等，单个数 MB，不入库）
 .workbuddy/tmp/
+
+# 工作区临时资料（本轮小窗/主题调试的截图、CDP 脚本等，不入库）
+.tmp/

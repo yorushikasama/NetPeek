@@ -103,11 +103,17 @@ button { font-family: inherit; }
   content: '';
   position: absolute;
   inset: 0;
+  /* 纯色层必须包 linear-gradient()：background 简写的非末层只认 <image>，
+    裸 color-mix()/rgb() 是 <color>，一条层非法整条声明作废（computed 落回
+    transparent/none）—— 2026-09-19 实测这份声明就是这样整条哑失败过，
+    噪点、顶栏渐变、tint 纱、自动补偿四层一个都没铺。 */
   background:
     var(--noise-url) repeat,
     linear-gradient(to bottom, rgb(var(--backdrop-veil, 0 0 0) / calc(var(--backdrop-dim) * 0.55)), rgb(var(--backdrop-veil, 0 0 0) / 0) 96px),
-    color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
-    rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0));
+    linear-gradient(color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent),
+      color-mix(in srgb, var(--backdrop-tint) calc(var(--backdrop-dim) * 100%), transparent)),
+    linear-gradient(rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)),
+      rgb(var(--backdrop-veil, 0 0 0) / var(--backdrop-auto, 0)));
 }
 body:not(.has-bg) .backdrop::after { content: none; }
 
