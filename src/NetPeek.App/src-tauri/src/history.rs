@@ -39,6 +39,23 @@ const MAX_PENDING_MINUTES: usize = 120;
 const HOUR: i64 = 3600;
 const WEEK: i64 = 7 * 86400;
 
+/// 单进程单帧增量的上限（字节）。一帧 = 1 秒（IpcConstants::SnapshotIntervalMs），
+/// 所以这个值就是「该进程这一秒最多能走多少」的物理上界。
+///
+/// 为什么要设这条（2026-09-21，在用户库里查到 2.32 GB 被记到一个分钟上）：
+/// 采集服务重启后第一帧读到的是**停机期间累积的全部增量**，那一帧带着「现在」的
+/// 时间戳落库，整段停机流量就被记到重启那一分钟。这类帧的增量不是「一秒的量」，
+/// 而是「几十分钟的量」，与本常量差着三个数量级。
+///
+/// 阈值取 1 GiB/s：实测本机正常峰值是单进程单分钟 160 MB（≈2.7 MB/s 持续），
+/// 异常帧单进程 631 MB/分钟（≈10.5 MB/s），两者都远在阈值之下 ——
+/// 也就是说这条**不会误伤任何真实流量**（本机网卡也跑不到 1 GiB/s），
+/// 只在「帧增量明显不是一秒的量」时才拦。
+///
+/// 拦下来是丢弃而不是钳到阈值：钳位会把一段来路不明的量伪装成一次合法的突发，
+/// 那比丢掉更糟 —— 丢掉至少是诚实的缺失，钳位是编造。
+const MAX_FRAME_DELTA_BYTES: i64 = 1_000_000_000;
+
 /// 建表 SQL。init() 用于真实库；单测用同一份 SQL 在内存库上建表，
 /// 保证测试与生产的表结构永不漂移。
 const SCHEMA_SQL: &str = "PRAGMA journal_mode=WAL;
@@ -266,6 +283,8 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
     if snap.get("Status").and_then(Value::as_str) != Some("ok") {
         return; // 暂停 / 异常期间速率为 0，无增量可记
     }
+    // 本帧被判定为「增量不是一秒的量」而丢弃的进程数，帧末统一留痕（见下）。
+    let mut dropped_frame_bytes = 0usize;
     let now = now_secs();
     let ts = snap
         .get("TimestampUnixMs")
@@ -302,6 +321,18 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
             // 靠上面那个 Status 检查拦不住 —— 但它的每个增量都是 0，到这里被跳过。
             continue;
         }
+        // 单帧增量过大 = 这一帧装的不是「一秒的量」（停机期间累积的存量、
+        // 或采集端基线逻辑失效）。丢弃并留痕，理由见 MAX_FRAME_DELTA_BYTES。
+        // 这里只挡超额的那一项，另一项（通常是正常量级）照记 ——
+        // 把整行丢掉会连正常的那一半一起损失。
+        let (down, up) = (
+            if down > MAX_FRAME_DELTA_BYTES { 0 } else { down },
+            if up > MAX_FRAME_DELTA_BYTES { 0 } else { up },
+        );
+        if down <= 0 && up <= 0 {
+            dropped_frame_bytes += 1;
+            continue;
+        }
         // 启动时间（unix 毫秒）转秒，与 pid 组成身份键，区分同一分钟内被复用的 PID。
         let start_ts = p
             .get("StartTimeUnixMs")
@@ -334,6 +365,19 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
                 }
             })
             .or_insert((name, down, up));
+    }
+    drop(pending);
+
+    // 丢帧留痕。写进库那一刻就没法分辨「这行是正常的还是被钳过的」，
+    // 所以必须在这里说一声 —— 事后对不上账时能查到是这里丢的，而不是去怀疑采集。
+    // 频率上它只在异常时出现（正常帧不会有任何进程越过 MAX_FRAME_DELTA_BYTES）。
+    if dropped_frame_bytes > 0 {
+        log_error(
+            state,
+            &format!(
+                "丢弃 {dropped_frame_bytes} 个进程的本帧增量：单帧超过 {MAX_FRAME_DELTA_BYTES} 字节，疑似含停机期间累积的存量"
+            ),
+        );
     }
 }
 
@@ -824,6 +868,60 @@ mod tests {
             "越界时间戳应按「现在」记账，实际分钟：{}",
             minutes[0]
         );
+    }
+
+    /// 单帧增量超过上限时丢弃该进程本帧的量。
+    ///
+    /// 起因（2026-09-21）：采集服务重启后第一帧读到的是停机期间累积的全部增量，
+    /// 那一帧带着「现在」的时间戳落库，整段停机流量被记到重启那一分钟 ——
+    /// 实测用户库里 09:00–09:48 连续 49 分钟无数据，09:49 突然 372 行 / 2.32 GB。
+    /// 采集端已修（首帧当基线丢弃），这里是第二道防线：即使基线逻辑失效，
+    /// 也不能让「不是一秒的量」写进库里。
+    #[test]
+    fn record_drops_frame_delta_beyond_physical_limit() {
+        let state = HistoryState::new();
+        let snap = json!({
+            "Status": "ok",
+            "TimestampUnixMs": now_secs() * 1000,
+            "Processes": [
+                // 越界：这一帧装了远超一秒的量（停机期间累积的存量）
+                {"Pid": 1, "StartTimeUnixMs": 1000, "Name": "big.exe",
+                 "DownloadBytes": MAX_FRAME_DELTA_BYTES + 1, "UploadBytes": 0},
+                // 同帧的正常进程必须照记 —— 丢的是那一项，不是整帧
+                {"Pid": 2, "StartTimeUnixMs": 2000, "Name": "ok.exe",
+                 "DownloadBytes": 1234, "UploadBytes": 7},
+            ],
+        });
+        record(&state, &snap);
+
+        let pending = state.pending.lock().unwrap();
+        let bucket = pending.values().next().expect("应有分钟桶");
+        assert!(
+            !bucket.contains_key(&(1, 1)),
+            "越界的进程不该落库（否则 2.32 GB 会被记成一分钟内的流量）"
+        );
+        let ok = bucket.get(&(2, 2)).expect("正常进程应照记");
+        assert_eq!(ok.1, 1234, "正常进程的下载量");
+        assert_eq!(ok.2, 7, "正常进程的上传量");
+    }
+
+    /// 边界：正好等于上限的量要放行（阈值是「超过才丢」，不是「达到就丢」）。
+    /// 写错成 >= 会把一次恰好一 GiB/s 的合法突发一起丢掉。
+    #[test]
+    fn record_keeps_frame_delta_at_exact_limit() {
+        let state = HistoryState::new();
+        let snap = json!({
+            "Status": "ok",
+            "TimestampUnixMs": now_secs() * 1000,
+            "Processes": [
+                {"Pid": 9, "StartTimeUnixMs": 500, "Name": "edge.exe",
+                 "DownloadBytes": MAX_FRAME_DELTA_BYTES, "UploadBytes": 0},
+            ],
+        });
+        record(&state, &snap);
+        let pending = state.pending.lock().unwrap();
+        let bucket = pending.values().next().expect("应有分钟桶");
+        assert!(bucket.contains_key(&(9, 0)), "等于上限应放行");
     }
 
     /// 落库线程只带走「已经结束」的分钟，当前分钟留在桶里继续累加 ——

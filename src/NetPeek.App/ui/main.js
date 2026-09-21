@@ -963,22 +963,51 @@ function renderDetail(snap, p) {
   render30Day(name);
 }
 
-// 归因覆盖率是算出来的，不是采集端给的：名字为空的那部分就是没归因上的。
-// 「归因说明」不另设入口，点这一行就展开（§2.4）。
+// 归因覆盖率：用「接口计数 − 进程合计」算，而不是从进程列表内部数名字。
+//
+// 2026-09-21 改（原实现在进程列表里统计名字非空的占比）。那个口径有个根本问题：
+// 它只能看到**已经在列表里**的进程，而真正没归因上的那部分（受保护进程、
+// 短命连接、协议头、回环）压根不会进列表 —— 于是它永远显示接近 100%，
+// 恒定的好看，恒定的没信息量。§9 要的是「接口总量与归因总量的差额」，
+// 那就必须拿一条不经过归因的量尺来比，即采集端下发的 Unattributed* 字段。
+//
+// 口径与 §9 一致：差额单独显示，**不按比例摊回各应用**。
+// 「归因说明」不另设入口，点这一行展开（§2.4）。
 let histStats = null;
 
-function renderFields(snap) {
-  const all = snap.Processes || [];
-  let named = 0;
-  let total = 0;
-  for (const p of all) {
-    const bytes = (p.DownloadTotal || 0) + (p.UploadTotal || 0);
-    total += bytes;
-    if ((p.Name || '').trim()) named += bytes;
+/**
+ * 覆盖率单元格的文案（纯函数，便于单测）。
+ *
+ * 三种出口必须分清，它们看着都是「0」但含义完全不同：
+ * · known=false → 破折号。没拿到接口计数，那个 0 是**没测到**；
+ * · 总量为 0    → 「暂无流量」。接口和进程都没动，是真的没流量；
+ * · 其余        → 百分比。差额按 §9 如实呈现，不摊回各应用。
+ *
+ * 写错第一条是最危险的：把「没测到」显示成「100% 已归因」，
+ * 等于报了一个好看但与事实相反的读数。
+ */
+function coverageCell(snap) {
+  const known = snap.UnattributedKnown !== false;
+  const un = (snap.UnattributedDownloadBytes || 0) + (snap.UnattributedUploadBytes || 0);
+  const attributed = (snap.TotalDownloadBytes || 0) + (snap.TotalUploadBytes || 0);
+  const grand = attributed + un;
+
+  if (!known) {
+    return { text: '—', title: '本帧未能读到网卡接口计数，覆盖率暂不可用' };
   }
-  els.fldCoverage.textContent = total > 0
-    ? `${((named / total) * 100).toFixed(1)}% 已归因`
-    : '暂无流量';
+  if (grand <= 0) {
+    return { text: '暂无流量', title: '' };
+  }
+  return {
+    text: `${((attributed / grand) * 100).toFixed(1)}% 已归因`,
+    title: `已归因 ${fmtBytes(attributed)} · 系统/未归因 ${fmtBytes(un)}（含协议头、回环与本地代理）`,
+  };
+}
+
+function renderFields(snap) {
+  const cov = coverageCell(snap);
+  els.fldCoverage.textContent = cov.text;
+  els.fldCoverage.title = cov.title;
 
   els.fldService.textContent = STATUS[statusKey(snap.Status)].text;
 

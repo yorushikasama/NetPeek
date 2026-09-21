@@ -49,6 +49,9 @@ public class ProtocolTests
                  {
                      "TimestampUnixMs", "TotalDownloadBytes", "TotalUploadBytes",
                      "EventsLost", "SessionStartedUnixMs", "Status", "Processes", "IconUpdates",
+                     // 系统/未归因（2026-09-21）：消费者是 Rust 侧转发 + 前端状态栏。
+                     // 改名或漏发都会让它静默显示 0 —— 读起来像「全部归因成功」，与事实相反。
+                     "UnattributedDownloadBytes", "UnattributedUploadBytes", "UnattributedKnown",
                  })
         {
             Assert.True(root.TryGetProperty(name, out _), $"快照缺少契约字段 {name}");

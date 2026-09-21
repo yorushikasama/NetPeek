@@ -62,6 +62,37 @@ public sealed class TrafficSnapshot
     /// <summary>本周期所有进程的上传字节合计。</summary>
     public ulong TotalUploadBytes { get; set; }
 
+    /// <summary>
+    /// 本周期**未能归因到任何进程**的下载字节（网卡接口计数 − 进程合计）。
+    ///
+    /// 来源是接口累计计数（<c>NetworkInterface.GetIPv4Statistics</c>，内核按网卡记账），
+    /// 与 ETW 归因无关 —— 这正是它唯一的价值：ETW 的合计拿自己跟自己比恒等于零，
+    /// 要看出「漏了多少」必须有第二条不经过归因的量尺。
+    ///
+    /// 读法（docs/技术选型.md §9）：差额由协议头、回环/本地代理、归因失败三部分构成，
+    /// 都属正常，所以它是「量级参考」。界面上必须作**单独一类**显示为「系统/未归因」，
+    /// 绝不按比例摊回各应用 —— 摊回去等于给每个进程编一个数。
+    ///
+    /// 与 TotalDownloadBytes 同一时间口径：本周期增量，不是累计值。
+    /// </summary>
+    public ulong UnattributedDownloadBytes { get; set; }
+
+    /// <summary>本周期未能归因到任何进程的上传字节。读法见 <see cref="UnattributedDownloadBytes"/>。</summary>
+    public ulong UnattributedUploadBytes { get; set; }
+
+    /// <summary>
+    /// 本帧的「系统/未归因」读数是否可信。
+    ///
+    /// false 的情形：本帧拿不到接口计数（驱动不支持、刚好在切换网络）。
+    /// 此时上面两个字段是 0，但**不能读作「全部归因成功」** —— 那是把「没测到」
+    /// 显示成「没有」。UI 应据此显示破折号而不是 0 B，与顶栏断连、
+    /// 「近 24 小时」无记录同一套规矩。
+    ///
+    /// 默认 true 是为兼容：旧采集端不发这个字段时 UI 当作「可信的 0」，
+    /// 与旧行为一致，不会因为升级错位而整片显示破折号。
+    /// </summary>
+    public bool UnattributedKnown { get; set; } = true;
+
     /// <summary>ETW 丢失事件累计值（用于 UI 健康提示）。</summary>
     public ulong EventsLost { get; set; }
 

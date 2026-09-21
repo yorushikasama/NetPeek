@@ -69,6 +69,37 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     /// </summary>
     private volatile bool _rateBaselinePending;
 
+    /// <summary>
+    /// 会话就绪后**第一帧**也要当基线帧处理。
+    ///
+    /// 为什么需要它（2026-09-21，在用户库里查到 2.32 GB 被记到一个分钟上）：
+    /// 采集服务不运行时收不到任何 ETW 事件，但**进程的累计值并不归零** ——
+    /// 服务重启后第一帧读到的，是从上一次退出到现在的全部增量。那一帧带着
+    /// 「现在」的时间戳落库（history.rs 按帧时间戳决定分钟），于是整段停机期间的
+    /// 流量被记到重启那一分钟上。
+    /// 实测：用户库 09:00–09:48 连续 49 分钟无数据，09:49 突现 372 行 / 2.32 GB，
+    /// 09:50 起回落到 22 行 / 5.9 MB。那 2.32 GB 是停机期间的真实流量，
+    /// 却被记成「09:49 这一分钟产生的」，速率曲线上是一个假尖峰。
+    ///
+    /// 丢弃而不是补记：这段流量发生在服务没运行的时候，**无从知道它分布在哪几分钟**
+    /// （可能是 09:12 的一波下载，也可能是均匀散布）。按重启时刻记是错的，
+    /// 平摊到 49 个分钟也是编出来的分布。宁可少记一段，也不要往库里写假时间戳
+    /// —— 历史屏的价值全在「什么时候用了多少」这个时间维上。
+    ///
+    /// 与 _rateBaselinePending 分开而不是复用：那个管「UI 换了一个客户端」（连接级），
+    /// 这个管「采集端自己刚起来」（会话级）。两者时机不同，也可能同时成立
+    /// （服务刚起来、UI 立刻连上）—— 复用会让其中一个被另一个提前消费掉。
+    /// </summary>
+    private volatile bool _sessionBaselinePending = true;
+
+    /// <summary>
+    /// 会话首帧被丢弃的存量，仅用于日志留痕（见 GetSnapshot 末尾）。
+    /// 只在快照线程读写。丢的这段是真实流量，只是没有可靠的时间归属 ——
+    /// 记一笔，事后对不上账时能查到去向，而不是让人怀疑是采集坏了。
+    /// </summary>
+    private long sessionBaselineDropped;
+    private long sessionBaselineDroppedUp;
+
     // 暂停状态的读-改-写需原子完成，否则并发的 toggle 命令会互相抵消。
     private readonly object _pauseGate = new();
 
@@ -325,11 +356,14 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     public TrafficSnapshot GetSnapshot()
     {
         var paused = _paused;
-        // 基线标志本帧读一次。它只被「真正算速率」的那条分支消费（见下）：
+        // 基线标志本帧读一次。两个来源取「或」：连接级（UI 换客户端）与会话级
+        // （采集端自己刚起来，累计值里含着停机期间的全部增量）。任一成立都要走基线，
+        // 否则那一帧的增量就是个假尖峰。
+        // 它只被「真正算速率」的那条分支消费（见下）：
         // starting / error 的早返回不消费（那时没有增量可言），paused 也不消费
         // （paused 不推进 LastTotal，若在那里清掉，恢复监控的第一帧仍会把
         // 暂停 + 断开期间攒下的存量当成速率报出去）。
-        var baseline = _rateBaselinePending;
+        var baseline = _rateBaselinePending || _sessionBaselinePending;
         var state = _state;
         var snapshot = new TrafficSnapshot
         {
@@ -402,6 +436,13 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                     // 基线帧：只把基线拉到当前值，速率报 0。
                     // 这一帧的「上一帧」可能是几分钟前（UI 断开期间），
                     // 用它的增量当 1 秒的速率没有意义 —— 见 ResetRateBaseline。
+                    // 会话首帧还要把这段增量记下来给日志：它是停机期间的真实流量，
+                    // 只是无从知道分布在哪几分钟（见 _sessionBaselinePending）。
+                    if (_sessionBaselinePending)
+                    {
+                        sessionBaselineDropped += Math.Max(0, down - counter.LastDownloadTotal);
+                        sessionBaselineDroppedUp += Math.Max(0, up - counter.LastUploadTotal);
+                    }
                     downDelta = 0;
                     upDelta = 0;
                 }
@@ -479,10 +520,15 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 基线帧到此消费完毕，从下一帧起正常报速率。
         // 放在循环之后而不是开头：循环中途抛异常时标志仍然有效，
         // 下一帧还会再走一次基线，宁可多一帧 0 速率，也不要漏报一次假尖峰。
+        // 两个标志一起清：这一帧已经把两侧的存量都拉平了。
         if (baseline)
         {
             _rateBaselinePending = false;
+            _sessionBaselinePending = false;
         }
+
+        // 会话第一帧的存量被丢弃时留一条痕（见 LogDroppedSessionBacklog）
+        LogDroppedSessionBacklog();
 
         // 按累计流量降序，方便 UI 直接取 Top N。
         processes.Sort(static (a, b) =>
@@ -492,7 +538,93 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         snapshot.TotalUploadBytes = totalUp;
         snapshot.IconUpdates = iconUpdates; // null = 本帧没有新图标，序列化时省略
         snapshot.Processes = processes;
+
+        // 「系统/未归因」= 接口增量 − 进程合计增量。**必须在 TotalDownload/UploadBytes
+        // 赋值之后**：它要读这两个合计做减法（先调就会拿上一帧的合计，差一位）。
+        ComputeUnattributed(snapshot);
+
         return snapshot;
+    }
+
+    /// <summary>
+    /// 上一帧读到的接口累计计数，用来求增量。null = 还没读到过（首帧或上一帧失败）。
+    /// 只在快照线程访问。
+    /// </summary>
+    private InterfaceCounters.Sample? _lastInterfaceSample;
+
+    /// <summary>
+    /// 算本帧「系统/未归因」流量 = 接口增量 − 已归因的进程合计。
+    ///
+    /// 必须用**增量**而不是接口累计值的绝对值：接口计数在接口重连/驱动重置后会归零，
+    /// 累计值本身没有可比性；而且进程合计是增量，两者不同口径相减没有意义。
+    ///
+    /// 结果为负时钳到 0：接口增量小于进程合计是可能的 —— ETW 的 size 是网络栈口径，
+    /// 而接口计数在不同栈层采样，两者本就不严格包含；再加上接口在帧间隙里断开重连
+    /// 会让增量偏小。负的「未归因流量」是个没有意义的读数，显示出来只会让人以为坏了。
+    /// 钳位而不是丢弃：正的差额（正常情形）照常给出。
+    /// </summary>
+    private void ComputeUnattributed(TrafficSnapshot snapshot)
+    {
+        var sample = InterfaceCounters.Read();
+        if (sample is not { } now)
+        {
+            // 拿不到接口计数：如实报「不可信」，让 UI 显示破折号而不是 0。
+            // 同时把上一个采样作废 —— 否则下次拿到计数时，增量会横跨这段空窗，
+            // 变成一个虚高的差额。
+            _lastInterfaceSample = null;
+            snapshot.UnattributedKnown = false;
+            return;
+        }
+
+        if (_lastInterfaceSample is not { } prev)
+        {
+            // 首次采样（或刚经历一次失败）：没有基准就算不出增量。
+            // 记下基准但本帧不给读数 —— 报 0 会被读成「全部归因成功」。
+            _lastInterfaceSample = now;
+            snapshot.UnattributedKnown = false;
+            return;
+        }
+
+        _lastInterfaceSample = now;
+
+        // 接口重连/计数器回绕会让 now < prev。此时的差值是垃圾数，
+        // 这一帧不给读数并留一条日志（正常不该频繁出现，频繁出现说明有接口在抖）。
+        if (now.Received < prev.Received || now.Sent < prev.Sent)
+        {
+            snapshot.UnattributedKnown = false;
+            return;
+        }
+
+        var downDelta = now.Received - prev.Received;
+        var upDelta = now.Sent - prev.Sent;
+
+        snapshot.UnattributedKnown = true;
+        // 差额为负说明接口增量小于进程合计。这会发生，而且不是故障：
+        // ETW 的 size 是网络栈口径的载荷字节，接口计数在另一层采样，两者不严格包含；
+        // 接口在帧间隙里断开重连也会让增量偏小。钳到 0 —— 负的「未归因流量」
+        // 是个没有意义的读数，显示出来只会让人以为坏了。
+        snapshot.UnattributedDownloadBytes =
+            (ulong)Math.Max(0, downDelta - (long)snapshot.TotalDownloadBytes);
+        snapshot.UnattributedUploadBytes =
+            (ulong)Math.Max(0, upDelta - (long)snapshot.TotalUploadBytes);
+    }
+
+    /// <summary>
+    /// 会话第一帧的存量被丢弃时留一条痕。丢的是真实流量，只是不知道它发生在
+    /// 哪几分钟；日志记下来，事后对不上账时能查到「是这一帧丢的」而不是猜。
+    /// </summary>
+    private void LogDroppedSessionBacklog()
+    {
+        if (sessionBaselineDropped <= 0 && sessionBaselineDroppedUp <= 0)
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "采集会话首帧：丢弃停机期间累积的 {Down} / {Up} 字节（发生在服务未运行期间，无可靠时间归属）",
+            sessionBaselineDropped, sessionBaselineDroppedUp);
+        sessionBaselineDropped = 0;
+        sessionBaselineDroppedUp = 0;
     }
 
     /// <summary>UI 重连后清空已发记录，让下一帧 IconUpdates 重发全量图标。</summary>
