@@ -65,10 +65,13 @@ public sealed class ProcessMetadataCache
     private readonly long _ttlMs;
     private long _lastSweepMs;
 
-    // PID → 进程名索引。只在快照线程访问（Get 由 GetSnapshot 串行调用），无需锁：
+    // PID → (名字, 启动时间)。只在快照线程访问（Get 由 GetSnapshot 串行调用），无需锁：
     // 它不承担跨线程可见性，纯粹是「一帧内多个 PID 共享一次系统快照」的缓存。
-    private Dictionary<uint, string> _nameIndex = new();
-    private long _nameIndexAtMs;
+    // 两者同源是刻意的：名字和启动时间必须来自**同一次**快照，否则会拼出一个
+    // 「A 进程的名字 + B 进程的启动时间」的身份键（PID 复用窗口内）。原来的实现正是
+    // 名字走快照、启动时间走句柄，两条路不一致时就会产生 start_ts=0 的孤儿行。
+    private Dictionary<uint, (string Name, long StartTimeUtcFileTime)> _snapshot = new();
+    private long _snapshotAtMs;
 
     public ProcessMetadataCache(TimeSpan? ttl = null)
     {
@@ -124,8 +127,7 @@ public sealed class ProcessMetadataCache
             pid);
         if (handle == IntPtr.Zero)
         {
-            var deadName = NameOf(pid, now);
-            return new ProcessMeta(deadName, "", 0, false);
+            return ResolveWithoutHandle(pid, now);
         }
 
         try
@@ -155,54 +157,82 @@ public sealed class ProcessMetadataCache
         }
     }
 
-    /// <summary>从全系统进程名索引取名字，索引过期时重建。</summary>
+    /// <summary>
+    /// 拿不到进程句柄时的元数据解析：**启动时间退回全系统快照**。
+    ///
+    /// 这条分支是 2026-09-21 修的数据丢失 bug 的正身。原来这里硬把启动时间写成 0，
+    /// 于是「句柄开不出来、但名字拿得到」的进程（受保护进程如杀软/反作弊、服务，
+    /// 或 ETW 回调与 OpenProcess 之间刚好退出的短命进程）会带着 <c>start_ts=0</c>
+    /// 落进历史库。而「近 24 小时」列是按 <c>pid:start_ts</c> 查库的，0 是个
+    /// 谁也匹配不上的键：那一行在实时列表里看得见、字节数也真实落盘了，
+    /// 两边的键却对不上，于是那一列永远是破折号 —— 用户报的「数据有损失」正是这个。
+    /// 实测用户库 97,407 行里有 2,387 行是 start_ts=0、累计约 5.7 GB
+    ///（其中 539 行有名字，即本条分支的产物）。
+    ///
+    /// 快照不按进程开句柄，所以它能覆盖句柄失败的那些进程。句柄成功时仍以
+    /// <c>GetProcessTimes</c> 为准（那是权威值，且能顺带拿到路径）。
+    ///
+    /// 抽成独立方法是为了可测：以管理员身份运行时这条分支在本机永远走不到
+    ///（OpenProcess 不会失败），留在 Fetch 里就等于没有回归覆盖 ——
+    /// 注入「启动时间返回 0」这种回退改动时，测试全绿但 bug 已经回来了。
+    /// </summary>
+    private ProcessMeta ResolveWithoutHandle(uint pid, long now)
+    {
+        var name = NameOf(pid, now);
+        return new ProcessMeta(
+            name,
+            "",
+            StartTimeFromSnapshot(pid, now),
+            false);
+    }
+
+    /// <summary>从全系统进程快照取名字，快照过期时重建。</summary>
     private string NameOf(uint pid, long now)
     {
-        if (now - _nameIndexAtMs >= NameIndexTtlMs || _nameIndex.Count == 0)
-        {
-            RebuildNameIndex(now);
-        }
-
-        return _nameIndex.TryGetValue(pid, out var name) ? name : "";
+        EnsureSnapshot(now);
+        return _snapshot.TryGetValue(pid, out var e) ? e.Name : "";
     }
 
     /// <summary>
-    /// 重建 PID → 进程名索引。<see cref="Process.GetProcesses"/> 内部是一次
-    /// NtQuerySystemInformation，名字直接来自那份快照，不需要按进程开句柄。
+    /// 从全系统进程快照取启动时间（UTC FILETIME），快照过期时重建。
+    /// 句柄路径拿不到启动时间时的兜底 —— 见 <see cref="ResolveWithoutHandle"/>。
     /// </summary>
-    private void RebuildNameIndex(long now)
+    private long StartTimeFromSnapshot(uint pid, long now)
     {
-        Process[] all;
-        try
+        EnsureSnapshot(now);
+        return _snapshot.TryGetValue(pid, out var e) ? e.StartTimeUtcFileTime : 0;
+    }
+
+    private void EnsureSnapshot(long now)
+    {
+        if (now - _snapshotAtMs >= NameIndexTtlMs || _snapshot.Count == 0)
         {
-            all = Process.GetProcesses();
+            RebuildSnapshot(now);
         }
-        catch
+    }
+
+    /// <summary>
+    /// 重建 PID → (名字, 启动时间) 索引。
+    ///
+    /// 2026-09-21 起改用 <see cref="SystemProcessSnapshot"/> 而不是
+    /// <c>Process.GetProcesses()</c>：两者底层都是同一次 NtQuerySystemInformation，
+    /// 但托管 API 只暴露名字，取启动时间要再开一次句柄（<c>Process.StartTime</c>）——
+    /// 而句柄正是受保护进程上会失败的东西，绕回去就等于没修。快照本身就带
+    /// CreateTime，一次调用把名字和启动时间一起拿全。
+    /// </summary>
+    private void RebuildSnapshot(long now)
+    {
+        var index = SystemProcessSnapshot.Read();
+        if (index.Count == 0)
         {
             // 拿不到快照就沿用上一份（哪怕过期）：空手而归会让整帧的名字全丢。
-            _nameIndexAtMs = now;
+            // 只推进时间戳避免每帧重试式地反复分配大缓冲。
+            _snapshotAtMs = now;
             return;
         }
 
-        var index = new Dictionary<uint, string>(all.Length + 32);
-        foreach (var p in all)
-        {
-            try
-            {
-                index[(uint)p.Id] = p.ProcessName;
-            }
-            catch
-            {
-                // 单个进程读名字失败（枚举与读取之间退出）不影响整份索引。
-            }
-            finally
-            {
-                p.Dispose();
-            }
-        }
-
-        _nameIndex = index;
-        _nameIndexAtMs = now;
+        _snapshot = index;
+        _snapshotAtMs = now;
     }
 
     /// <summary>

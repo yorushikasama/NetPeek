@@ -117,6 +117,44 @@ section('day24Of：没这个身份 / 表还没建好都返回 null');
   eq(day24Of(empty, { Name: 'a.exe' }, 'app'), null, '未就绪时一律 null');
 }
 
+// ---------- start_ts=0 的老行：按 PID 兜底认领 ----------
+
+section('day24Of：实时行没有启动时间时，认领 start_ts=0 的老行');
+{
+  const { buildDay24, day24Of } = api();
+  // 采集端 2026-09-21 之前会在拿不到启动时间时写 start_ts=0
+  //（句柄开不出来但名字拿得到：受保护进程、或刚好退出的短命进程）。
+  // 用户库里这样的行有 2,387 条、约 5.7 GB，最近 24 小时窗口内 491 MB ——
+  // 全都在这一列上显示破折号，数据等于消失。
+  const t = buildDay24([
+    { name: 'WorkBuddy', pid: 20768, startTs: 0, down: 500_000_000, up: 10 },
+    { name: 'chrome', pid: 999, startTs: 1700000000, down: 700, up: 30 },
+  ]);
+
+  // ① 实时行自己也没拿到启动时间 → 按 PID 认领那条老行
+  eq(day24Of(t, proc({ Pid: 20768, Name: 'WorkBuddy', StartTimeUnixMs: 0 }), 'process').down,
+    500_000_000, '实时行缺启动时间时，按 PID 认领老行');
+  eq(day24Of(t, { Pid: 20768, Name: 'WorkBuddy' }, 'process').down,
+    500_000_000, '字段整个缺失（undefined）同样认领');
+
+  // ② 实时行**有**启动时间时不许走兜底：PID 会被系统复用，
+  //    否则「今天的 20768」会认领「上周那个 20768」的流量。
+  eq(day24Of(t, proc({ Pid: 20768, Name: 'WorkBuddy', StartTimeUnixMs: 1700000000 }), 'process'),
+    null, '实时行有启动时间时不认领老行（PID 复用会串数）');
+
+  // ③ 正常身份键优先级高于兜底：库里同时有精确键就该用精确键
+  const t2 = buildDay24([
+    { name: 'x', pid: 5, startTs: 0, down: 111, up: 0 },
+    { name: 'x', pid: 5, startTs: 4242, down: 222, up: 0 },
+  ]);
+  eq(day24Of(t2, proc({ Pid: 5, StartTimeUnixMs: 4242000 }), 'process').down,
+    222, '有精确键时取精确键，不被兜底表盖掉');
+
+  // ④ 老行表只收 start_ts=0 的行：有身份键的行不该出现在兜底表里
+  eq(t.byPidOrphan.has('999'), false, '有正常启动时间的行不进兜底表');
+  eq(t.byPidOrphan.get('20768').down, 500_000_000, 'start_ts=0 的行进兜底表');
+}
+
 // ---------- 单元格文案 ----------
 
 section('day24Cell：命中给数值，未命中给破折号');

@@ -219,35 +219,17 @@ html.has-bg .orb::after {
     inset 0 0 0 1px rgb(255 255 255 / calc(0.06 * var(--paint-op)));
 }
 
-/* 状态核心：能量舱的心脏。白热的内核渐隐到状态色，外沿一圈同色的柔光 ——
-   一颗平色圆点只是图例，有内核有辉光的才是「核心」。
-   辉光半径 ≤7px：球外还有 10px 的投影余量，7px 的辉光即使落在球的边缘一带
-   也不出窗，不会被透明窗口的硬边界裁成直线。这颗点在球内是最上面一行，
-   离窗口边至少 10（投影）+ 12（球内顶部留白）px，实际非常宽裕。 */
-.orb-dot {
-  width: 7px;
-  height: 7px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--text-2);
-}
-.orb-dot.is-ok, .orb-dot.is-warn, .orb-dot.is-error {
-  /* 内核：左上一点白热（与球面同一盏光）渐隐进状态色 */
-  background: radial-gradient(circle at 38% 32%,
-    rgb(255 255 255 / 0.85) 0%,
-    var(--dot-c, var(--text-2)) 68%);
-  box-shadow: 0 0 7px color-mix(in srgb, var(--dot-c, var(--text-2)) 55%, transparent);
-}
-/* 呼吸只在「监控中」搏动 —— 异常态要的是被看见，不是优雅。
-   2.6s 一循环、幅度刻意小：常驻桌面的东西，任何抢注意力的节奏都会烦。
-   动的是 box-shadow 而非 transform：7px 的点不值得为它开合成层。 */
-.orb-dot.is-ok { --dot-c: var(--ok); animation: orb-core 2.6s var(--ease) infinite; }
-.orb-dot.is-warn { --dot-c: var(--warn); }
-.orb-dot.is-error { --dot-c: var(--error); }
-@keyframes orb-core {
-  0%, 100% { box-shadow: 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent); }
-  50% { box-shadow: 0 0 7px color-mix(in srgb, var(--ok) 60%, transparent); }
-}
+/* 这里原本是球上那颗状态点的样式（纵排三行顶上的 7px「状态核心」，白热内核 +
+   同色辉光 + 呼吸关键帧），连同后来挪到左下 8 点方向的位置修正版一起删掉了。
+   两版都被否，但否掉的不是位置 —— 用户要的是球上不要这颗点：
+   92px 的球里已经是下载/上传两个读数，状态塞进去就要跟数据抢视觉重量，
+   而它一个字节都不代表。状态的正式位置是迷你窗面板头（.panel-dot）与主界面顶栏，
+   球只回答「在下多快 / 在上多快」。
+   撤干净了：规则与关键帧只在这一处定义过、没有别处引用，mini.js 里对应的元素
+   引用也一并删了（留一个取到 null 的引用，下次改 paintStatus 就是空指针）。
+   回归里钉了「球上只留速率」那条契约（scripts/ui-tests/theme.test.mjs），
+   所以本节的注释里刻意不复述那三个选择器的字面量 —— 断言是全文匹配的。
+   这一节原来的位置留给下面那两组读数，不留空洞。 */
 
 /* 两组读数，纵向叠放。方向除了颜色还给箭头：「琥珀 = 下载」这条约定只在本应用内
    成立，第一次见的人读不出来，而球是常驻桌面、最可能被第一次看见的那个形态。
@@ -266,8 +248,18 @@ html.has-bg .orb::after {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   line-height: 1;
-  /* 漆层是渐变、身后还可能有底图与能量液，读数垫一层贴地投影才托得出来 */
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.45);
+  /* 漆层是渐变、身后还可能有底图与能量液，读数垫一层贴地投影才托得出来。
+     电量液漫过读数时，这一层是字号唯一的支撑：下载读数本身是琥珀色，
+     与液体同色，没有描边就等于把字溶进液里（2026-09-21 截图实测：
+     水位过 60% 后「12.3 KB/s」几乎读不出来）。
+     所以这里用**四向暗描边 + 下落投影**两层，而不是原来单向下落：
+     单向下落只在字的下缘加暗，字身在液体上仍然糊成一团；
+     四向描边把字的轮廓从任意背景上切出来，代价是笔画细了一点点，
+     但 15px/600 的字重扛得住。 */
+  text-shadow:
+    -1px 0 0 rgb(0 0 0 / 0.55), 1px 0 0 rgb(0 0 0 / 0.55),
+    0 -1px 0 rgb(0 0 0 / 0.55), 0 1px 0 rgb(0 0 0 / 0.55),
+    0 1px 3px rgb(0 0 0 / 0.6);
 }
 /* 箭头按字高居中，不跟数字走基线（三角形的视觉重心不在基线上） */
 .orb-rate .a { flex: none; align-self: center; }
@@ -300,29 +292,72 @@ html.has-bg .orb::after {
 }
 .orb-level i {
   /* 贴在底部向上长：top: auto + bottom: 0，高度由 --level 给。
-     用绝对定位而不是 flex 对齐，是为了让高度过渡只动这一个盒子、不触发父级重排。 */
+     用绝对定位而不是 flex 对齐，是为了让高度过渡只动这一个盒子、不触发父级重排。
+
+     这一层只画**液身**，液面交给上面的 .orb-wave —— 液身自己的顶边是一条
+     水平的直线，正是那条直线让球读作「一块被裁成弓形的色块」。这里把它
+     特意画得比水位线低一点点（顶边贴一条透明→液的过渡），让波峰盖住它。 */
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   height: var(--level, 0%);
   background:
-    /* 液面：顶端 3px 一条亮边，是「水位线」本身 —— 液体与空腔的交界要有一条
-       比液身亮的界面，否则读作一片渐隐的雾。放在 background 的第一层（最上面）。 */
-    linear-gradient(180deg,
-      color-mix(in srgb, var(--down) 62%, transparent) 0px,
-      color-mix(in srgb, var(--down) 62%, transparent) 2px,
-      transparent 3px),
-    /* 液身：从液面往下逐渐变浓（22% → 40%），深度感来自浓度而不是明度 ——
+    /* 液身：从液面往下逐渐变浓（22% → 42%），深度感来自浓度而不是明度 ——
        越深的液体透光越少。都用 color-mix 的半透明而不是实色：漆与底图要能
        透上来，液体才有「在球腔里」的深度；实色会读成糊在球下半截的色块。 */
     linear-gradient(180deg,
       color-mix(in srgb, var(--down) 22%, transparent) 0%,
-      color-mix(in srgb, var(--down) 40%, transparent) 100%);
+      color-mix(in srgb, var(--down) 42%, transparent) 100%);
   /* 档位切换时高度会跳一大截，短过渡把它读作「灌上去」而不是闪烁。
      写 180ms 字面量：令牌表只有 --t-fast 一档，引用不存在的变量会让
      整条 transition 声明失效（哑失败，不报错）。reduced-motion 由末尾媒体查询关掉。 */
   transition: height 180ms var(--ease);
+}
+
+/* 液面波形：一条正弦路径沿 X 平移，波峰一个接一个从一侧进、另一侧出。
+   这是「球里有液体」与「球里有一块色块」的分界 —— 静态的水平面无论做多亮，
+   都读作色块的顶边。
+
+   为什么最后落在 SVG 路径（而不是前几版试过的其它做法）：
+   · 圆角方块绕中心旋转（CodePen 上最常见的那一类）：波形确实来自
+     「非圆形轮廓转动」，但振幅是容器高的固定比例（约 40%），既不能调、
+     也远大于球上这条 14px 的液面带宽 —— 实机试装后它在球里是一记横扫的
+     斜切和一口深勺，不是涟漪。92px 的球要的是 ±3px。
+   · 两块大椭圆各推 10%：形状几乎不变，只是那条边在原地微微晃，
+     读不出「浪在走」。
+   · 径向渐变拼一排半圆：能横向流过，但峰谷交界处是尖角，读作锯齿。
+   · SVG 正弦路径：振幅、波长、相位都是显式参数，起伏连续（无尖角），
+     且路径只有几十个字符。代价是它走 CPU 而非合成器，但一个 200×16 的
+     平移路径在 92px 的球上可以忽略（同类库 react-wavify 也是这条路）。
+
+   几何：viewBox 200×16，波长 50 用户单位 → 球宽内约 3 个波峰，
+   振幅 3 单位（曲线在 y=8 上下各走 3）→ 92px 球上约 3px。
+   轨道的**右边复制了同一个周期**（translate(200 0)）：位移走到一个波长时，
+   副本恰好顶到起点位置，于是循环点前后完全重合，接缝看不出来。
+   跟着 --level 上下走，下沿就是液面；-4px 让波谷压进液身，
+   保证液身那条水平顶边永远被波的实体盖住。 */
+.orb-wave {
+  position: absolute;
+  /* 左右各外扩一倍球宽：视口里要同时有两个以上完整周期，平移才读得出「流过」。
+     只放一个周期的话，位移一个波长等于原地复原。 */
+  left: -100%;
+  width: 300%;
+  bottom: calc(var(--level, 0%) - 4px);
+  height: 14px;
+  pointer-events: none;
+  overflow: visible;
+  /* 波形是半透明的液体色：漆层与底图要能透上来，才有「在球腔里」的深度 */
+  fill: color-mix(in srgb, var(--down) 62%, transparent);
+}
+.orb-wave-track {
+  /* 平移一个波长（viewBox 单位 50 = 总宽 200 的 25%）。
+     linear + 无限循环：水面匀速流过；用 ease 会在折返处露出「推一下、停一下」。 */
+  animation: orb-wave-a 6s linear infinite;
+}
+@keyframes orb-wave-a {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50px); }
 }
 
 /* 暂停：读数降到 60%，液体整体淡到 35%（能量休眠而不是消失 —— 暂停不是
@@ -650,12 +685,16 @@ html.has-bg {
   --paint-op: calc(max(var(--panel-op), var(--panel-op-floor)) * var(--ui-opacity));
 }
 
-/* 减弱动效：液面的高度过渡、核心的呼吸、球的按压位移都关掉。主窗的同名媒体查询在
-   styles.css 里，小窗是独立文档，得自己写一份。
-   选择器跟着 orb-* 改名走：这里写错名字是纯哑失败（媒体查询本身仍然匹配，
-   只是规则选不中任何元素，reduced-motion 下动效照旧在动）。 */
+/* 减弱动效：液面的高度过渡与球的按压位移关掉。主窗的同名媒体查询在 styles.css 里，
+   小窗是独立文档，得自己写一份。
+   （球上那颗状态点的呼吸已经随删点一起去掉了，这条媒体查询里不再有它那一支；
+   这条注释留着是个提醒：选择器写错名字是**哑失败** —— 媒体查询本身照样匹配，
+   只是规则选不中任何元素，reduced-motion 下动效照旧在跑，没有任何一层报错。） */
 @media (prefers-reduced-motion: reduce) {
   .orb, .orb-level i, .icon-btn, .btn { transition: none; }
-  .orb-dot.is-ok { animation: none; }
   .orb:active { transform: translate(-50%, -50%); }
+  /* 液面的起伏也关掉：它是常驻动画，而 reduced-motion 要的正是「屏幕上有
+     东西自己在动」这件事本身停止。关掉之后水面定格成一条静止的波浪线 ——
+     液面仍然是弯的（不是原来的水平直边），只是不再漂移。 */
+  .orb-wave-track { animation: none; }
 }

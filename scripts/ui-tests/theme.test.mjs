@@ -965,6 +965,66 @@ section('能量球的几何：正圆 + 三处尺寸同源');
     'mini.css：能量液的高度由 --level 驱动（从球底向上灌，不是横向推进）');
   ok(/\.orb-level\s*\{[\s\S]*?overflow:\s*hidden/.test(miniCss),
     'mini.css：能量液被球轮廓裁住（少了它液面两端戳出球外）');
+
+  // 球上只有两个读数，没有状态点。2026-09-20 用户否掉了两版：纵排三行顶上那颗
+  // 7px「状态核心」（白热内核 + 同色辉光），以及后来挪到左下 8 点方向的修正版 ——
+  // 原话「去掉能量球上的那个小绿点」。否掉的不是位置：92px 的球里已经是
+  // 下载/上传两个读数，状态点塞进去就要跟数据抢视觉重量，而它一个字节都不代表。
+  // 这条钉住的是「球上只留速率」：状态点只要有一处复活，这颗点就会自己长回来
+  // （CSS 有规则、JS 有赋值，只是没人再为它报错）。
+  // 状态的正式位置是 .panel-dot（面板头）与主界面顶栏，不在球上。
+  const miniHtml = fs.readFileSync(path.join(UI, 'mini.html'), 'utf8');
+  const miniJs = fs.readFileSync(path.join(UI, 'mini.js'), 'utf8');
+  const orbMarkup = (miniHtml.match(/<div id="orb"[\s\S]*?\n  <\/div>/) || [''])[0];
+  eq((orbMarkup.match(/class="orb-rate\b/g) || []).length, 2,
+    '球内正好两组读数（下载 / 上传）——多一组少一组都是排版事故');
+  ok(!/class="orb-dot|class="orb-status/.test(orbMarkup),
+    '球内没有状态点元素（用户已否掉两版，理由见本段注释）');
+  ok(!/\.orb-dot\s*\{|\.orb-status\s*\{/.test(miniCss),
+    'mini.css 里没有状态点的样式规则（留一条就是给它留了复活的路）');
+  ok(!/@keyframes\s+orb-core/.test(miniCss),
+    'mini.css 里没有状态点的呼吸关键帧（点没了，动画没有载体）');
+  ok(!/orbDot|orbStatus/.test(miniJs),
+    'mini.js 里没有状态点的元素引用（取到 null 的引用会在下次改 paintStatus 时空指针）');
+
+  // 液面必须是**流动的正弦波**，不是一条边在原地晃。
+  // 2026-09-21 用户两次指出，两次都不是「水位不够高」：
+  //   ①「都是平着上下，没有数据起伏的那种波浪感」→ 液柱顶边是水平直线；
+  //   ②「不是水位的问题，而是水位的动画应该呈现波浪状」→ 上一版改成两块大椭圆
+  //      各推 10%，形状几乎不变，读起来仍是一条边在微微晃。
+  // 试过并否掉的做法记在这里，免得下一个人再走一遍：
+  //   · 圆角方块绕中心旋转（CodePen 上最常见那一类）：波形确实来自「非圆形
+  //     轮廓转动」，但振幅是容器高的固定比例（约 40%），既不可调、也远大于
+  //     球上这条 14px 的液面带 —— 实机装上去是一记横扫的斜切和一口深勺。
+  //   · 径向渐变拼一排半圆：能横向流过，但峰谷交界处是尖角，读作锯齿。
+  // 最终用 SVG 正弦路径：振幅/波长/相位都是显式参数，起伏连续无尖角。
+  //
+  // 这几条钉的都是会**哑失败**的地方（波形全是 CSS，写错不报错，球看着还是老样子）：
+  ok(/class="orb-wave"/.test(miniHtml), '球内有液面波形层（.orb-wave）');
+  ok(/<svg[^>]*class="orb-wave"/.test(miniHtml),
+    '波形是 SVG（路径才能给出连续的正弦起伏，渐变拼圆弧在峰谷交界是尖角）');
+  ok(/orb-wave-track/.test(miniHtml), '波形有可位移的轨道组（.orb-wave-track）');
+  ok(/class="orb-wave-track"[\s\S]{0,900}?transform="translate\(/.test(miniHtml),
+    '轨道右侧复制了一个完整周期 —— 位移一个波长后才无缝，少了它循环点会跳');
+  ok(/\.orb-wave\s*\{[\s\S]*?bottom:\s*calc\(var\(--level,\s*0%\)/.test(miniCss),
+    'mini.css：波形贴着水位线走（不跟 --level 联动就会浮在固定高度）');
+  const kf = miniCss.match(/@keyframes\s+orb-wave-a\s*\{([\s\S]*?)\n\}/);
+  ok(kf !== null, 'mini.css：有波形流动关键帧 orb-wave-a');
+  if (kf) {
+    ok(/translateX/.test(kf[1]),
+      '关键帧位移走 translateX（动 transform 才在合成层上跑，不触发重排）');
+  }
+  ok(/\.orb-wave-track\s*\{[\s\S]*?animation:\s*orb-wave-a/.test(miniCss),
+    'mini.css：轨道带 animation（静态波形读不出「在流」）');
+  // --level 必须写在 .orb 上：液柱（高度）与波形（bottom 基准）是两个**兄弟**
+  // 消费者，变量挂在液柱自己身上时波形继承不到，calc 静默退化成 0、波面沉到球底。
+  // 2026-09-21 实测踩过：getComputedStyle 的 bottom 是 -4px 而不是 57.6px。
+  ok(/els\.orb\.style\.setProperty\('--level'/.test(miniJs),
+    "mini.js：--level 写在 .orb（共同祖先）上，液柱与波形都要读它");
+  ok(/\.orb-wave[^>]*\{\s*animation:\s*none|\.orb-wave-track\s*\{\s*animation:\s*none/.test(miniCss),
+    'mini.css：reduced-motion 下液面停动（常驻动画必须能关）');
+
+
 }
 
 section('漆层地板随令牌上屏：applyTokens 写 --ui-paint-floor');

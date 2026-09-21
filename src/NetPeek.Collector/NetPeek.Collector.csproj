@@ -17,4 +17,13 @@
   <ItemGroup>
     <ProjectReference Include="..\NetPeek.Shared\NetPeek.Shared.csproj" />
   </ItemGroup>
+
+  <!-- 单测要直接打 SystemProcessSnapshot 的真实系统调用。
+       不把它改成 public：它是采集端内部实现，公开出去只会变成别人可以随手依赖的 API；
+       而这条逻辑恰恰必须用真机验证（本次 start_ts=0 的 bug 就是「托管 API 的外形
+       与实际行为不一致」，用 mock 测等于把同一份误解再写一遍）。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="NetPeek.Collector.Tests" />
+  </ItemGroup>
+
 </Project>

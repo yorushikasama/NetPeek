@@ -246,10 +246,25 @@ function day24Key(p) {
  * 「(系统/未归因)」—— 不归一，那一行的近 24 小时永远是破折号。
  * 同名同键的多行累加而不是覆盖：进程改名会让库里留下两行（后端把 name 也放进了
  * 分组键），覆盖等于把改名之前的量整段丢掉。
+ *
+ * 第三张表 byPid 是为**历史遗留的 start_ts=0 行**准备的（2026-09-21）。
+ * 采集端曾经在拿不到进程启动时间时把它写成 0（成因见 ProcessMetadataCache.Fetch：
+ * 句柄开不出来但名字拿得到，于是那一行有名字、没有身份键）。这类行按
+ * `pid:0` 也能查到，**但前提是实时行那一侧也算出同一个键** —— 而实时行的
+ * StartTimeUnixMs 同样可能缺失（那条路会给出 0 或干脆没有这个字段），
+ * 于是两边一个写 0、一个写别的，键对不上，数据就"消失"了。
+ *
+ * 所以这里对 start_ts=0 的行额外登记一份「按 PID 兜底」的表：只有当实时行
+ * 自己也没有可用启动时间时才会用到它（见 day24Of）。这样
+ * ① 新数据不再产生这类行（采集端已修）；
+ * ② 库里已有的老行也能重新被看见 —— 用户库里这样的行有 2,387 条、约 5.7 GB。
  */
 function buildDay24(rows) {
   const byKey = new Map();
   const byName = new Map();
+  // 仅收 start_ts=0 的行：有正常身份键的行不需要兜底（键就能精确匹配），
+  // 把所有的行都塞进来只会让「按 PID 匹配」命中一堆同名不同实例的记录。
+  const byPidOrphan = new Map();
   const unattr = UNATTR.toLowerCase();
   const add = (map, key, down, up) => {
     const hit = map.get(key);
@@ -258,20 +273,41 @@ function buildDay24(rows) {
   for (const r of rows || []) {
     const down = Number(r.down) || 0;
     const up = Number(r.up) || 0;
-    add(byKey, `${r.pid}:${r.startTs || 0}`, down, up);
+    const startTs = Number(r.startTs) || 0;
+    add(byKey, `${r.pid}:${startTs}`, down, up);
     add(byName, String(r.name || '').trim().toLowerCase() || unattr, down, up);
+    // 名字为空的老行也收：它们只能靠 PID 认领（本来就没有别的线索）。
+    if (startTs === 0) add(byPidOrphan, String(r.pid), down, up);
   }
-  return { byKey, byName, ready: true };
+  return { byKey, byName, byPidOrphan, ready: true };
 }
 
-/** 取某一行对应的近 24 小时合计；历史库里没有这个身份/应用就返回 null。 */
+/**
+ * 取某一行对应的近 24 小时合计；历史库里没有这个身份/应用就返回 null。
+ *
+ * 进程视图的查找顺序（2026-09-21 起）：
+ * 1. 精确身份键 `pid:start_ts` —— 正常路径，PID 复用时不会串到别的实例上。
+ * 2. 实时行自己**没有可用启动时间**时（StartTimeUnixMs 缺失或为 0），
+ *    退到 byPidOrphan 里按 PID 认领 start_ts=0 的老行。
+ *
+ * 第 2 条只在实时行确实没有身份时启用，这是刻意的：PID 会被系统复用，
+ * 无差别按 PID 匹配会让「今天的 chrome(1234)」认领「三天前的某个 1234」的流量。
+ * 而实时行自己都没拿到启动时间时，它本来就无法证明自己不是那个 1234 ——
+ * 与其让那一段数据彻底不可见（旧行为），不如认领并如实显示。
+ */
 function day24Of(tables, p, mode) {
   if (!tables || !tables.ready) return null;
   if (mode === 'app') {
     const name = (p.Name || '').trim().toLowerCase() || UNATTR.toLowerCase();
     return tables.byName.get(name) || null;
   }
-  return tables.byKey.get(day24Key(p)) || null;
+  const hit = tables.byKey.get(day24Key(p));
+  if (hit) return hit;
+  // 实时行没有启动时间 → 身份键是 `pid:0` 这个不可靠的形态，去老行表里认领。
+  if (!(p.StartTimeUnixMs > 0)) {
+    return tables.byPidOrphan.get(String(p.Pid)) || null;
+  }
+  return null;
 }
 
 /**
@@ -782,11 +818,11 @@ const PROC_STATES = {
     retry: true, skeleton: false,
   },
   idle: {
-    title: '当前没有检测到网络活动', desc: '有进程收发数据时会立刻出现在这里。',
+    title: '当前没有检测到网络活动', desc: '有进程收发数据时即刻显示。',
     retry: false, skeleton: false,
   },
   empty: {
-    title: '没有匹配的进程', desc: '换个关键词，或清空搜索框看全部。', retry: false, skeleton: false,
+    title: '没有匹配的进程', desc: '可更换关键词，或清空搜索框查看全部。', retry: false, skeleton: false,
   },
 };
 

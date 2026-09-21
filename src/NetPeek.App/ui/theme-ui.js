@@ -123,14 +123,14 @@
   function syncDirectionLabels(lightSkin) {
     if (els.scrimLabel) {
       els.scrimLabel.innerHTML = lightSkin
-        ? '<b>背景亮纱</b><small>给底图铺一层很轻的亮纱统一观感（浅色下自动收敛浓度）</small>'
-        : '<b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small>';
+        ? '<b>背景亮纱</b><small>为底图叠加一层亮纱以统一观感</small>'
+        : '<b>背景压暗</b><small>为底图叠加一层暗纱以提升文字对比度</small>';
       els.scrim.setAttribute('aria-label', lightSkin ? '背景亮纱' : '背景压暗');
     }
     if (els.opHint) {
       els.opHint.textContent = lightSkin
-        ? '越低底图越透出来。面板身后那块背景会自动归一成柔色，拉到最低也读得清'
-        : '越低底图越透出来。面板身后那块背景会自动归一成暗调，拉到最低也读得清';
+        ? '面板对底图的遮盖程度；面板背后会自动归一为浅色柔色以保持文字对比度'
+        : '面板对底图的遮盖程度；面板背后会自动归一为暗色柔色以保持文字对比度';
     }
   }
 
@@ -644,7 +644,7 @@
       const user = T.clamp(state.wrapOpacity ?? 0.62, 0.4, 0.9);
       if (wrapFloorVal > user + 1e-9) {
         els.opFloorNote.hidden = false;
-        els.opFloorNote.textContent = `这张图偏亮，贴膜浓度已自动加深到 ${wrapFloorVal.toFixed(2)} 保证文字可读（滑杆数值保留你的选择）。想要更透的贴膜效果，可以换一张更暗或更亮的壁纸——中间调的图最吃浓度。`;
+        els.opFloorNote.textContent = `底图偏亮，贴膜浓度已自动加深至 ${wrapFloorVal.toFixed(2)} 以保证文字对比度（滑杆数值保留你的设置）。`;
         els.opFloorNote.className = 'note';
       } else {
         els.opFloorNote.hidden = true;
@@ -659,17 +659,17 @@
       els.opFloorNote.hidden = true;
     } else if (clamped) {
       els.opFloorNote.hidden = false;
-      // 措辞对应「明度带」判据 + 新的处置方式：漆层按地板铺、滑杆保留用户的选择，
+      // 措辞对应「明度带」判据 + 处置方式：漆层按地板铺、滑杆保留用户的选择，
       // 差值说清楚；再给一条真能让底图更显的操作（模糊），而不是让人去动滑杆。
       els.opFloorNote.textContent = lightSkin
-        ? `这张图整幅极暗：面板在你选的不透明度下会和身后那块背景混成一块中调灰（说明字、单位、图标最先糊），所以漆层按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的选择）。透镜已经把面板身后那块背景提亮成浅色柔色，垫这一档是为了让「面板＝一块浅色表面」这条线不塌；想让底图再显一点，试试把「背景模糊」往大调。`
-        : `这张图整幅极亮：面板在你选的不透明度下会失去「深色表面」的明度，所以漆层按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的选择）。透镜已经把面板身后那块背景压成暗调，垫这一档是为了让「面板＝一块深色表面」这条线不塌；想让底图再显一点，试试把「背景模糊」往大调。`;
+        ? `底图整体过暗，当前不透明度下面板会与背景混为一片中调灰而削弱文字对比度，漆层已按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的设置）。`
+        : `底图整体过亮，当前不透明度下面板会失去深色表面的明度分层，漆层已按 ${guard.floor.toFixed(2)} 铺（滑杆数值保留你的设置）。`;
       els.opFloorNote.className = 'note is-warn';
     } else if (guard.autoDim > 0.005) {
       els.opFloorNote.hidden = false;
       els.opFloorNote.textContent = lightSkin
-        ? `这张图局部偏暗，已自动补 ${guard.autoDim.toFixed(2)} 亮纱保证文字可读；把「面板不透明度」调高，自动补偿会随之减少。`
-        : `这张图局部偏亮，已自动补 ${guard.autoDim.toFixed(2)} 压暗保证文字可读；把「面板不透明度」调高，自动压暗会随之减少。`;
+        ? `底图局部过暗，已自动补偿 ${guard.autoDim.toFixed(2)} 亮纱以保证文字对比度；提高「面板不透明度」可相应减少补偿。`
+        : `底图局部过亮，已自动补偿 ${guard.autoDim.toFixed(2)} 压暗以保证文字对比度；提高「面板不透明度」可相应减少补偿。`;
       els.opFloorNote.className = 'note';
     } else {
       els.opFloorNote.hidden = true;
@@ -766,10 +766,10 @@
       syncBackdropGuard();
       await applyCurrent();
       fillSwatches(tokens);
-      els.aiStatus.textContent = '已应用，可在下方编辑并另存为自己的皮肤';
+      els.aiStatus.textContent = '已应用；可在下方调整并另存为自定义皮肤';
       els.aiStatus.className = 'note is-ok';
     } catch (err) {
-      els.aiStatus.textContent = `AI 失败（${err.message}），已回退本地取色`;
+      els.aiStatus.textContent = `AI 生成失败（${err.message}），已回退本地取色`;
       els.aiStatus.className = 'note is-error';
       await runImageColor();
     }
@@ -807,7 +807,7 @@
     renderThemeList();
     applyDraft();
     if (fromImage && els.themeHint) {
-      els.themeHint.textContent = '已进入自定义编辑：背景图随「跟随背景图」皮肤一起撤下，配置仍保留，点回该皮肤即可恢复。';
+      els.themeHint.textContent = '已进入自定义编辑：背景图随「跟随背景图」皮肤一并撤下，配置仍保留；切回该皮肤即可恢复。';
       els.themeHint.className = 'note';
     }
   }
@@ -833,7 +833,7 @@
     }
     const names = adjusted.map((k) => GUARD_LABELS[k] || k).join('、');
     els.guardNote.hidden = false;
-    els.guardNote.textContent = `${names} 已自动调整到可读对比度（4.5:1）——原色在当前面板上读不出来。`;
+    els.guardNote.textContent = `${names} 已自动调整至可读对比度（4.5:1）：原色在当前面板上无法满足可读性要求。`;
     els.guardNote.className = 'note is-warn';
   }
 
@@ -920,7 +920,7 @@
     // 改成一个已存在的名字会静默覆盖掉那套皮肤 —— 同样是不可逆的数据丢失，
     // 只是更隐蔽（用户以为自己在改名，实际删了另一套）。这里直接拒绝并说明。
     if (state.themes[trimmed]) {
-      els.themeHint.textContent = `已有皮肤「${trimmed}」，换个名字（改名不会覆盖已有皮肤）`;
+      els.themeHint.textContent = `已存在名为「${trimmed}」的皮肤，请使用其他名称`;
       els.themeHint.className = 'note is-warn';
       return;
     }
@@ -1217,12 +1217,12 @@
   els.themeSave.addEventListener('click', async () => {
     const name = els.themeName.value.trim();
     if (!name) {
-      els.bgStatus.textContent = '请先给皮肤起个名字';
+      els.bgStatus.textContent = '请输入皮肤名称';
       els.bgStatus.className = 'note is-warn';
       return;
     }
     // 同名会覆盖掉一份用户手调出来的配色，而且无法撤销 —— 先问一声。
-    if (state.themes[name] && !window.confirm(`已有皮肤「${name}」，覆盖它？`)) return;
+    if (state.themes[name] && !window.confirm(`已存在名为「${name}」的皮肤，是否覆盖？`)) return;
     // 存的就是预览时那张表：预览已经过守卫，这里再走一次同一个函数，
     // 所见即所存。原来预览不校验、保存才静默改写，两者对不上。
     const tokens = T.guardTokens(cloneTokens(draftTokens())).tokens;

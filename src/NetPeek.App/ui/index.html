@@ -125,14 +125,14 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                    stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20.5 20.5-4.2-4.2" /></svg>
               <input id="search" type="search" placeholder="搜索应用 / PID / IP" autocomplete="off"
-                     title="支持前缀：=精确匹配  !=不等于  !不包含；其余按包含匹配。可搜应用名、路径、PID、对端 IP、端口、服务名、国家码"
+                     title="支持前缀：=精确匹配  !=不等于  !不包含；其余按包含匹配。可检索应用名、路径、PID、对端 IP、端口、服务名与国家码"
                      aria-label="搜索应用、PID、对端 IP 或服务名" />
             </label>
             <!-- 取消排序的表外入口：只在排序生效时露出（renderSortMarks 同步 hidden）。
                  默认态表格也有顺序（合计从高到低），但那是表格的默认呈现、不是用户选的
                  排序，所以默认态既不标箭头也不给这个按钮。 -->
             <button type="button" class="icon-btn sort-reset" id="sortReset" hidden
-                    title="恢复默认排序（按下载 + 上传从高到低）" aria-label="恢复默认排序">
+                    title="恢复默认排序：按下载与上传合计从高到低" aria-label="恢复默认排序">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
             </button>
@@ -151,7 +151,7 @@
                     <th class="is-num" data-sort="pid" scope="col" aria-sort="none"><span id="pidLabel">PID</span> <span class="sort-mark"></span></th>
                     <th class="is-num" data-sort="download" scope="col" aria-sort="none"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg> 下载 <span class="sort-mark"></span></th>
                     <th class="is-num" data-sort="upload" scope="col" aria-sort="none"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg> 上传 <span class="sort-mark"></span></th>
-                    <th class="is-num" data-sort="day24" scope="col" aria-sort="none" title="最近 24 小时的下载 + 上传累计（下载 / 上传分开的数在行悬浮提示里）">近 24 小时 <span class="sort-mark"></span></th>
+                    <th class="is-num" data-sort="day24" scope="col" aria-sort="none" title="最近 24 小时的下载与上传累计；分项数值见行悬浮提示">近 24 小时 <span class="sort-mark"></span></th>
                   </tr>
                 </thead>
                 <tbody id="rows"></tbody>
@@ -181,7 +181,7 @@
           <div class="rc-head">
             <h5>今日</h5>
             <span class="sp"></span>
-            <button type="button" class="linkish" id="todayBtn" title="查看历史明细">
+            <button type="button" class="linkish" id="todayBtn" title="查看历史详情">
               详情<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
             </button>
           </div>
@@ -235,16 +235,16 @@
           <!-- 总览态：字段组。归因说明挂在归因覆盖率上，不另设入口。 -->
           <dl class="insp-fields" id="inspFieldsSec">
             <dt>归因覆盖率</dt><dd class="is-link" id="fldCoverage" role="button" tabindex="0"
-                title="点开查看归因规则">—</dd>
+                title="查看归因规则">—</dd>
             <dt>采集服务</dt><dd id="fldService">—</dd>
             <dt>ETW 丢事件</dt><dd id="fldLost">—</dd>
             <dt>历史库占用</dt><dd id="fldDbSize">—</dd>
           </dl>
           <div class="attrib-note" id="attribNote" hidden>
             <ul>
-              <li>流量按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
-              <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
-              <li>重传单独统计，不混入上传量。</li>
+              <li>按事件载荷中的 PID 归因，不使用内核事件头 PID（后者通常指向中断进程）。</li>
+              <li>忽略「数据复制」事件，避免下载量重复计数。</li>
+              <li>重传字节单独统计，不计入上传量。</li>
             </ul>
           </div>
         </div>
@@ -421,9 +421,9 @@
         <!-- 常规 -->
         <div class="sgroup" data-sec="general">
           <h4>常规</h4>
-          <p>显示单位与系统行为。改动防抖自动写盘，没有「保存」按钮。</p>
+          <p>显示单位与系统行为。改动即时保存。</p>
           <div class="srow">
-            <div class="t"><b>速率显示单位</b><small>自动挡按数值大小逐级切换；固定值后速率与总量都按该单位显示</small></div>
+            <div class="t"><b>速率显示单位</b><small>自动挡按数值量级逐级切换；固定挡下速率与总量统一使用该单位</small></div>
             <label class="field-inline">
               <select id="setRateUnit" data-menu>
                 <option value="auto">自动（B / KB / MB / GB）</option>
@@ -434,11 +434,11 @@
             </label>
           </div>
           <div class="srow">
-            <div class="t"><b>登录时自动启动</b><small>写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run</small></div>
+            <div class="t"><b>登录时自动启动</b><small>开机后随系统登录自动运行</small></div>
             <label class="switch"><input type="checkbox" id="setAutostart" /><i></i></label>
           </div>
           <div class="srow">
-            <div class="t"><b>记录系统未归因流量</b><small>采集端尚未分表，字段已预留</small></div>
+            <div class="t"><b>记录系统未归因流量</b><small>单独记录无法归因到具体进程的流量</small></div>
             <label class="switch"><input type="checkbox" id="setRecordUnattributed" /><i></i></label>
           </div>
         </div>
@@ -452,19 +452,19 @@
           <div class="skin-cards" id="skinCards">
             <button type="button" class="skin-card" data-skin="plain">
               <span class="pv pv-plain" aria-hidden="true"></span>
-              <b>默认 · 朴素</b><small>中性灰黑 + 反白交互。出厂皮肤。</small>
+              <b>默认 · 朴素</b><small>中性灰黑 + 反白交互</small>
             </button>
             <button type="button" class="skin-card" data-skin="light">
               <span class="pv pv-light" aria-hidden="true"></span>
-              <b>浅色</b><small>明亮环境，语义色调到浅底可读。</small>
+              <b>浅色</b><small>明亮环境下的浅底配色</small>
             </button>
             <button type="button" class="skin-card" data-skin="amber">
               <span class="pv pv-amber" aria-hidden="true"></span>
-              <b>琥珀暖意</b><small>暖黑底 + 琥珀交互色。</small>
+              <b>琥珀暖意</b><small>暖黑底 + 琥珀交互色</small>
             </button>
             <button type="button" class="skin-card" data-skin="image">
               <span class="pv pv-image" aria-hidden="true"></span>
-              <b>跟随背景图</b><small>从图片取色生成；含 AI 取色（高级）。</small>
+              <b>跟随背景图</b><small>由图片取色生成</small>
             </button>
           </div>
 
@@ -474,13 +474,13 @@
             <input type="checkbox" id="followSystem" />
             <span>跟随系统深浅色</span>
           </label>
-          <div class="note" id="followSystemNote">朴素与浅色皮肤随系统深浅自动切换；琥珀、跟随背景图和自定义皮肤是你的显式选择，不参与切换。</div>
+          <div class="note" id="followSystemNote">仅「朴素」与「浅色」随系统深浅自动切换；其余皮肤为显式选择，不参与切换。</div>
 
           <!-- 全局界面不透明度：theme.applyUiOpacity 挂 --ui-opacity，
                只淡底色与底图（主窗 .frame/.backdrop、小窗 .panel、能量球 .orb），
                文字与边线不参与淡出；50% 为最淡一档。 -->
           <div class="srow">
-            <div class="t"><b>界面不透明度</b><small>底色与底图变透、桌面透上来，文字保持清晰；50% 为最淡一档</small></div>
+            <div class="t"><b>界面不透明度</b><small>降低后底色与底图透出桌面，文字保持不透明</small></div>
             <div class="slider">
               <input type="range" id="uiOpacity" min="0.5" max="1" step="0.05" value="1" aria-label="界面不透明度" />
               <span class="value" id="uiOpacityValue">100%</span>
@@ -490,20 +490,20 @@
           <!-- 自定义皮肤编辑器：在当前皮肤基础上改 token，命名另存 -->
           <div class="custom-skin-block" id="customSkinBlock">
             <h5>自定义皮肤</h5>
-            <p class="note">改动当场生效并可另存为自己的皮肤；下载与上传语义锁定，可调明度不能换语义。</p>
+            <p class="note">改动即时生效，可命名另存为自定义皮肤。下载与上传为语义色，仅可调整明度。</p>
             <div class="swatches">
               <label class="swatch"><input type="color" id="cBg" /><span>窗口底</span></label>
               <label class="swatch"><input type="color" id="cPanel" /><span>面板</span></label>
               <label class="swatch"><input type="color" id="cText" /><span>主文字</span></label>
               <label class="swatch"><input type="color" id="cMuted" /><span>次要字</span></label>
-              <label class="swatch" title="交互强调：选中条 / 主按钮 / 开关"><input type="color" id="cAccent" /><span>强调</span></label>
-              <label class="swatch is-locked" title="语义锁定：下载永远暖橙">
+              <label class="swatch" title="交互强调色：选中条 / 主按钮 / 开关"><input type="color" id="cAccent" /><span>强调</span></label>
+              <label class="swatch is-locked" title="语义锁定：下载固定为暖橙色">
                 <input type="color" id="cDown" /><span>下载 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
-              <label class="swatch is-locked" title="语义锁定：上传永远钢蓝">
+              <label class="swatch is-locked" title="语义锁定：上传固定为钢蓝色">
                 <input type="color" id="cUp" /><span>上传 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></span></label>
               <label class="swatch"><input type="color" id="cOk" /><span>监控中</span></label>
-              <label class="swatch" title="暂停与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
-              <label class="swatch" title="采集服务异常"><input type="color" id="cError" /><span>异常</span></label>
+              <label class="swatch" title="暂停状态与 ETW 丢事件"><input type="color" id="cWarn" /><span>警告</span></label>
+              <label class="swatch" title="采集服务异常状态"><input type="color" id="cError" /><span>异常</span></label>
               <label class="swatch"><input type="color" id="cBorder" /><span>边线</span></label>
             </div>
             <div class="bg-actions is-spaced">
@@ -520,7 +520,7 @@
             </div>
             <div class="note" id="themeHint"></div>
             <div class="theme-list" id="themeList"></div>
-            <div class="note" id="themeEmpty">还没有另存的皮肤。上面改出满意的配色后起个名字存下来，随时可以切回。</div>
+            <div class="note" id="themeEmpty">尚未另存皮肤。调整配色并命名保存后，可随时切换。</div>
             <button type="button" class="btn" id="themeReset">还原默认</button>
           </div>
         </div>
@@ -536,7 +536,7 @@
           <p>壁纸与它的呈现方式。仅「跟随背景图」皮肤使用这里的设置。</p>
           <div class="image-skin-block" id="imageSkinBlock" hidden>
             <div class="srow">
-              <div class="t"><b>背景图</b><small>铺在整个窗口底层，面板微微透出</small></div>
+              <div class="t"><b>背景图</b><small>铺在窗口底层，面板在其上叠加</small></div>
               <div class="srow-actions">
                 <div class="bg-thumb" id="bgThumb" hidden></div>
                 <button type="button" class="btn" id="bgPick">选择图片…</button>
@@ -554,7 +554,7 @@
                  贴膜 = 壁纸按窗口坐标对齐,每块面板表面"剪"下落在自己身上的那块图,
                  缝隙与窗口底是不可贴区、露素底（类似车膜,图案只留在可贴表面） -->
             <div class="srow">
-              <div class="t"><b>显示方式</b><small>置底：壁纸垫底、面板悬浮；贴膜：壁纸只贴在面板表面，缝隙露素底</small></div>
+              <div class="t"><b>显示方式</b><small>置底：壁纸铺满窗口；贴膜：壁纸仅附着于面板表面</small></div>
               <div class="seg" id="backdropStyleSeg" role="group" aria-label="显示方式">
                 <button type="button" data-style="underlay">置底</button>
                 <button type="button" data-style="wrap">贴膜</button>
@@ -564,7 +564,7 @@
             <!-- 背景亮度（置底/贴膜通用）：暗图提亮、亮图压暗,深色模式下嫌底图
                  太暗就往右拖;守卫按调亮后的实际亮度重算浓度/压暗地板 -->
             <div class="srow">
-              <div class="t"><b>背景亮度</b><small>暗图提亮、亮图压暗；深色模式下底图太暗就往右拖</small></div>
+              <div class="t"><b>背景亮度</b><small>整体提亮或压暗底图，用于校正过暗 / 过亮的壁纸</small></div>
               <div class="slider">
                 <input type="range" id="bgBrightness" min="0.5" max="1.5" step="0.05" value="1"
                        aria-label="背景亮度" />
@@ -573,7 +573,7 @@
             </div>
 
             <div class="srow" id="opRow">
-              <div class="t"><b>面板不透明度</b><small id="opHint">越低底图越透出来。面板身后那块背景会自动归一成柔色，拉到最低也读得清</small></div>
+              <div class="t"><b>面板不透明度</b><small id="opHint">面板对底图的遮盖程度；面板背后会自动归一为柔色以保持文字对比度</small></div>
               <div class="slider">
                 <input type="range" id="stdOpacity" min="0.3" max="1" step="0.01" value="0.45"
                        aria-label="面板不透明度" />
@@ -583,14 +583,14 @@
             <!-- 这张图触发自动压暗 / 硬钳时才出现 -->
             <div class="note is-warn" id="opFloorNote" hidden></div>
             <div class="srow" id="blurRow">
-              <div class="t"><b>背景模糊</b><small>只模糊底图，不模糊面板内容</small></div>
+              <div class="t"><b>背景模糊</b><small>仅作用于底图，不影响面板内容</small></div>
               <div class="slider">
                 <input type="range" id="stdBlur" min="0" max="60" step="1" value="0" aria-label="背景模糊" />
                 <span class="value" id="blurValue">0 px</span>
               </div>
             </div>
             <div class="srow" id="scrimRow">
-              <div class="t" id="scrimLabel"><b>背景压暗</b><small>给底图整体加一层暗纱，文字读不清时用它</small></div>
+              <div class="t" id="scrimLabel"><b>背景压暗</b><small>为底图叠加一层暗纱以提升文字对比度</small></div>
               <div class="slider">
                 <input type="range" id="stdScrim" min="0.2" max="0.6" step="0.01" value="0.30"
                        aria-label="背景压暗" />
@@ -601,7 +601,7 @@
             <!-- 贴膜浓度（仅贴膜模式）：面板底色与壁纸的调和比,越高文字越清楚;
                  图偏亮时守卫自动加深（提示条复用 opFloorNote） -->
             <div class="srow" id="wrapOpRow" hidden>
-              <div class="t"><b>贴膜浓度</b><small>越低图案越鲜活；图偏亮时自动加深保证文字可读</small></div>
+              <div class="t"><b>贴膜浓度</b><small>面板底色与壁纸的调和比例；底图偏亮时自动加深以保证文字对比度</small></div>
               <div class="slider">
                 <input type="range" id="wrapOpacity" min="0.4" max="0.9" step="0.01" value="0.62"
                        aria-label="贴膜浓度" />
@@ -612,7 +612,7 @@
             <!-- 深浅偏好：auto 按壁纸主色亮度分深浅；dark / light 把方向钉死，
                  改动会整条重跑取色管线 -->
             <div class="srow">
-              <div class="t"><b>深浅偏好</b><small>自动按壁纸明暗决定，或固定为深色 / 浅色基底</small></div>
+              <div class="t"><b>深浅偏好</b><small>按壁纸明暗自动判定，或固定为深色 / 浅色基底</small></div>
               <div class="seg" id="imageModeSeg" role="group" aria-label="深浅偏好">
                 <button type="button" data-mode="light">浅色</button>
                 <button type="button" data-mode="auto">自动</button>
@@ -623,23 +623,23 @@
             <!-- 强调色色板：取色管线按「彩度 × 占比」评分挑选；自动选中的带环，
                  点任何一颗都把交互强调切到它 -->
             <div class="srow is-full">
-              <div class="t"><b>强调色</b><small>从背景图提取的候选，点色板可换交互强调</small></div>
+              <div class="t"><b>强调色</b><small>由背景图提取的候选色，可用于替换交互强调色</small></div>
             </div>
             <div class="pal-row" id="palRow" hidden></div>
 
             <!-- AI 取色：跟随背景图皮肤的高级选项 -->
             <div class="ai-fields" id="aiSection">
               <h5>AI 取色（高级）</h5>
-              <p class="note">把背景缩略图交给多模态模型生成整套配色；失败自动回退本地取色。</p>
+              <p class="note">将背景缩略图交由多模态模型生成整套配色；失败时回退本地取色。</p>
               <label class="field">接口地址<input type="text" id="aiEndpoint" placeholder="https://api.openai.com/v1" /></label>
               <label class="field">API Key<input type="password" id="aiApiKey" placeholder="sk-…" autocomplete="off" /></label>
               <!-- 明示而不是默默存：这个 key 会随 theme-config.json 明文落盘，
                    用户有权在填写前知道它存在哪、何时离开本机。 -->
-              <div class="note">API Key 明文保存在本机配置文件（theme-config.json），不随皮肤导出；仅在你点「生成并应用」时随缩略图发往上面填写的接口地址。</div>
+              <div class="note">API Key 以明文保存于本机配置文件（theme-config.json），不随皮肤导出；仅在执行「生成并应用」时随缩略图发送至上述接口地址。</div>
               <label class="field">模型<input type="text" id="aiModel" placeholder="gpt-4o-mini" /></label>
               <label class="check">
                 <input type="checkbox" id="aiConsent" />
-                <span>我已了解：背景缩略图将上传至上述服务用于生成配色</span>
+                <span>已了解：背景缩略图将上传至上述服务用于生成配色</span>
               </label>
               <button type="button" class="btn is-primary" id="aiGenerate" disabled>生成并应用</button>
               <div class="note" id="aiStatus"></div>
@@ -649,14 +649,14 @@
                标题的空屏。这条说明兜住那个状态并给出去处；显隐全靠上面那块的
                [hidden] ~ 兄弟选择器，不需要 JS（见 styles.css .bg-needs-skin）。 -->
           <div class="note bg-needs-skin">
-            背景图只在「跟随背景图」皮肤下生效。到「皮肤」分区选中它，这里就会出现壁纸、显示方式与取色选项。
+            背景图仅在「跟随背景图」皮肤下生效。在「皮肤」分区选中该皮肤后，此处将显示壁纸、显示方式与取色选项。
           </div>
         </div>
 
         <!-- 数据 -->
         <div class="sgroup" data-sec="data" hidden>
           <h4>历史数据</h4>
-          <p>分钟聚合每整分钟落库一次；保留周期之外的数据自动修剪。</p>
+          <p>按分钟聚合落库；超出保留周期的数据自动清理。</p>
           <div class="srow">
             <div class="t"><b>保留周期</b><small id="histStats">暂无历史数据</small></div>
             <label class="field-inline">
@@ -670,7 +670,7 @@
             </label>
           </div>
           <div class="srow">
-            <div class="t"><b>清空历史</b><small>删除全部已落库数据，不可恢复；原地二次确认</small></div>
+            <div class="t"><b>清空历史</b><small>删除全部已落库数据，不可恢复</small></div>
             <div class="srow-actions">
               <button type="button" class="btn" id="histRefresh">刷新概览</button>
               <button type="button" class="btn is-danger" id="histClear">清空历史</button>
@@ -684,7 +684,7 @@
           <h4 class="is-spaced">国家 / 地区库</h4>
           <div class="note" id="geoDbInfo">内嵌 DB-IP 库</div>
           <div class="srow">
-            <div class="t"><b>换用自定义库</b><small>对端国家默认由内嵌 DB-IP 免费库判断，装到哪个版本就停在那。换成自己的 MaxMind GeoLite2 / DB-IP 的 .mmdb 即可随时更新，换完立即生效</small></div>
+            <div class="t"><b>换用自定义库</b><small>对端国家默认由内嵌 DB-IP 库判定，版本随安装包固定。可改用自备的 MaxMind GeoLite2 / DB-IP .mmdb 文件，以便自行更新</small></div>
             <div class="srow-actions">
               <button type="button" class="btn" id="geoDbPick">选择 MMDB…</button>
               <button type="button" class="btn" id="geoDbReset">用回内置库</button>
@@ -709,7 +709,7 @@
         <!-- 服务 -->
         <div class="sgroup" data-sec="service" hidden>
           <h4>采集服务</h4>
-          <p>NetPeekCollector 以 LocalSystem 运行，ETW 内核会话需要管理员权限。</p>
+          <p>NetPeekCollector 以 LocalSystem 运行；ETW 内核会话需要管理员权限。</p>
           <div class="srow">
             <div class="t"><b>状态</b><small id="svcEventsLost"></small></div>
             <!-- 状态是读数不是按钮：原来它裹在 .srow-actions（按钮容器）里，于是一个
@@ -718,7 +718,7 @@
             <div class="sval"><span class="note" id="svcStatus">未连接采集服务</span></div>
           </div>
           <div class="srow">
-            <div class="t"><b>暂停 / 恢复</b><small>暂停只停止累计与落库，服务本身不退出，恢复后从当前时刻接着算</small></div>
+            <div class="t"><b>暂停 / 恢复</b><small>暂停期间停止累计与落库，采集服务保持运行；恢复后从当前时刻继续</small></div>
             <div class="srow-actions">
               <button type="button" class="btn" id="svcPause">暂停采集</button>
               <button type="button" class="btn" id="svcLog">查看日志</button>
@@ -726,7 +726,7 @@
           </div>
           <div class="note num" id="svcLogPath"></div>
           <div class="note">
-            采集服务没有控制台输出，启动失败、采集异常、进程崩溃的堆栈都只写进上面这个日志文件。
+            采集服务无控制台输出；启动失败、采集异常与崩溃记录均写入上述日志文件。
           </div>
         </div>
 
@@ -758,10 +758,10 @@
           <h4 class="is-spaced">归因边界</h4>
           <div class="attrib-note">
             <ul>
-              <li>按事件载荷中的 PID 归因，不用内核事件头 PID（那常是中断进程）。</li>
-              <li>忽略 Event 18（数据复制事件），避免下载量重复计数。</li>
-              <li>重传单独统计，不混入上传量。</li>
-              <li>代理 / VPN / WSL 的流量归到代理进程本身，不还原到发起方。</li>
+              <li>按事件载荷中的 PID 归因，不使用内核事件头 PID（后者通常指向中断进程）。</li>
+              <li>忽略「数据复制」事件，避免下载量重复计数。</li>
+              <li>重传字节单独统计，不计入上传量。</li>
+              <li>代理 / VPN / WSL 的流量归入对应代理进程，不回溯至发起进程。</li>
             </ul>
           </div>
         </div>

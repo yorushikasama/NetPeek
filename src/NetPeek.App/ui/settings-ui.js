@@ -129,11 +129,11 @@
       const range = stats.rows ? fmtRange(stats.firstTs, stats.lastTs) : '';
       els.histStats.textContent = stats.rows
         ? [`${stats.rows} 条`, range, fmtSize(stats.bytes)].filter(Boolean).join(' · ')
-        : '暂无历史数据（分钟聚合每整分钟落库一次）';
+        : '暂无历史数据';
       els.histStats.className = 'note';
     } catch {
       stats = null;
-      els.histStats.textContent = '历史概览不可用（浏览器预览模式）';
+      els.histStats.textContent = '历史概览不可用';
       els.histStats.className = 'note is-warn';
     }
     window.dispatchEvent(new CustomEvent('netpeek-historystats', { detail: { stats } }));
@@ -241,7 +241,7 @@
         // 日期框会继续把 min 钉在一个已删掉的日期上。
         window.dispatchEvent(new CustomEvent('netpeek-historycleared'));
       } catch {
-        els.histStats.textContent = '清空失败（浏览器预览模式不可用）';
+        els.histStats.textContent = '清空失败';
         els.histStats.className = 'note is-error';
       }
     });
@@ -335,7 +335,7 @@
     try {
       view = geoDbLabel(JSON.parse(await invoke('country_db_info')));
     } catch {
-      view = { text: '国家库状态不可用（浏览器预览模式）', className: 'note is-warn', title: '', canReset: false };
+      view = { text: '国家库状态不可用', className: 'note is-warn', title: '', canReset: false };
     }
     els.geoDbInfo.textContent = view.text;
     els.geoDbInfo.className = view.className;
