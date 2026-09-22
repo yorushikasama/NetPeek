@@ -1570,7 +1570,7 @@ function applyBackdrop({ background, panelOpacity, bgBlur, scrim, tint, autoDim,
 
   const prev = lastBackdropUrl;
   lastBackdropUrl = background || null;
-  const setUrl = () => root.style.setProperty('--theme-bg-image', hasBg ? `url("${background}")` : 'none');
+  const setUrl = () => root.style.setProperty('--theme-bg-image', hasBg ? `url("${window.NetPeekCommon.cssUrl(background)}")` : 'none');
   if (reduceMotion() || !hasBg || !prev || prev === background) {
     fadeSeq++; // 作废在飞的淡入：其回调只清理临时层，不再切根变量
     fadingTo = null;
@@ -1587,7 +1587,7 @@ function applyBackdrop({ background, panelOpacity, bgBlur, scrim, tint, autoDim,
   }
   const temp = document.createElement('div');
   temp.className = 'backdrop is-fade-in';
-  temp.style.setProperty('--theme-bg-image', `url("${background}")`);
+  temp.style.setProperty('--theme-bg-image', `url("${window.NetPeekCommon.cssUrl(background)}")`);
   base.after(temp);
   void temp.offsetWidth; // 先强制一帧布局，transition 才会真的从 opacity:0 起跑
   temp.classList.add('is-visible');

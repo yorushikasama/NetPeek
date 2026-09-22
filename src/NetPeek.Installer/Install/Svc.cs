@@ -22,8 +22,13 @@ internal static class Svc
 
     public static (bool Ok, string Output) Delete(string name) => Run("sc", $"delete \"{name}\"", ignoreExitCode: true);
 
+    /// binPath 必须让**注册表 ImagePath 值本身含引号**，否则是经典的 unquoted service path
+    /// 提权漏洞：sc 命令行里外层引号会被 CommandLineToArgvW 消费掉，写进注册表的是带空格的
+    /// 裸路径（Program Files 必然带空格）。服务以 LocalSystem 运行，SCM 会依次尝试
+    /// C:\Program.exe → C:\Program Files\NetPeek\... —— 谁能在更靠前的路径段放 EXE 就拿到 SYSTEM。
+    /// 解法：给 binPath 值再包一层转义引号 \"...\"，让 sc 解析后得到「带引号的路径」写入 ImagePath。
     public static (bool Ok, string Output) Create(string name, string binPath) =>
-        Run("sc", $"create \"{name}\" binPath= \"{binPath}\" start= auto obj= LocalSystem DisplayName= \"{Defs.ServiceDisplayName}\"");
+        Run("sc", $"create \"{name}\" binPath= \"\\\"{binPath}\\\"\" start= auto obj= LocalSystem DisplayName= \"{Defs.ServiceDisplayName}\"");
 
     public static (bool Ok, string Output) SetDescription(string name, string desc) =>
         Run("sc", $"description \"{name}\" \"{desc}\"");

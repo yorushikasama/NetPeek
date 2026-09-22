@@ -120,7 +120,7 @@ fn minute_of(ts_secs: i64) -> i64 {
 /// 把一条错误追加写入 netpeek.log（best-effort，日志写入失败也不影响主流程）。
 pub(crate) fn log_error(state: &HistoryState, msg: &str) {
     use std::io::Write;
-    let path = state.log_path.lock().unwrap().clone();
+    let path = state.log_path.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if path.as_os_str().is_empty() {
         return;
     }
@@ -146,7 +146,7 @@ fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 pub fn init(app: &AppHandle, state: &Arc<HistoryState>) -> Result<(), String> {
     let dir = data_dir(app)?;
     let path = dir.join(DB_FILE);
-    *state.log_path.lock().unwrap() = dir.join(LOG_FILE);
+    *state.log_path.lock().unwrap_or_else(|e| e.into_inner()) = dir.join(LOG_FILE);
     let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
@@ -154,7 +154,7 @@ pub fn init(app: &AppHandle, state: &Arc<HistoryState>) -> Result<(), String> {
         .map_err(|e| format!("初始化历史库失败: {e}"))?;
     migrate_schema(&conn).map_err(|e| format!("迁移历史库失败: {e}"))?;
 
-    *state.conn.lock().unwrap() = conn;
+    *state.conn.lock().unwrap_or_else(|e| e.into_inner()) = conn;
     // 真实库就绪必须在 prune 之前置位：prune 读 conn，而落库线程只看这个标志。
     state.db_ready.store(true, Ordering::SeqCst);
     prune(state).map_err(|e| e.to_string())?;
@@ -203,7 +203,7 @@ fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// 取出所有「已经结束」的分钟（< 截止分钟）。当前分钟留在桶里继续累加。
 /// 传 i64::MAX 表示连当前分钟一起取走（退出前的收尾落库）。
 fn take_due(state: &HistoryState, before_minute: i64) -> Vec<(i64, Bucket)> {
-    let mut pending = state.pending.lock().unwrap();
+    let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
     // BTreeMap 有序，due 的分钟一定是前缀，split_off 一刀切开即可。
     let mut due = std::mem::take(&mut *pending);
     let keep = due.split_off(&before_minute);
@@ -221,7 +221,7 @@ fn flush_due(state: &Arc<HistoryState>, due: Vec<(i64, Bucket)>) {
     //（磁盘满、目录不可写），那时候不能无限攒 —— 只保留最近 MAX_PENDING_MINUTES 分钟，
     // 更早的丢掉并记一条日志，宁可丢一段历史也不能把内存吃穿。
     if !state.db_ready.load(Ordering::SeqCst) {
-        let mut pending = state.pending.lock().unwrap();
+        let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
         for (minute, bucket) in due {
             let slot = pending.entry(minute).or_default();
             for (key, (name, down, up)) in bucket {
@@ -244,7 +244,7 @@ fn flush_due(state: &Arc<HistoryState>, due: Vec<(i64, Bucket)>) {
         }
         return;
     }
-    let mut conn = state.conn.lock().unwrap();
+    let mut conn = state.conn.lock().unwrap_or_else(|e| e.into_inner());
     for (minute, bucket) in &due {
         if bucket.is_empty() {
             continue;
@@ -351,7 +351,7 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
     }
     // 按帧自己的分钟取桶：归属只由帧的时间戳决定，与落库线程的轮询节奏无关。
     // 落库线程只取走「已经结束」的分钟，所以这里即使写进一个刚翻过去的分钟也不会丢。
-    let mut pending = state.pending.lock().unwrap();
+    let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
     let bucket = pending.entry(minute).or_default();
     for (key, (name, down, up)) in frame {
         bucket
@@ -407,7 +407,7 @@ fn prune(state: &HistoryState) -> rusqlite::Result<usize> {
         return Ok(0);
     }
     let cutoff = now_secs() - days * 86_400;
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().unwrap_or_else(|e| e.into_inner());
     conn.execute("DELETE FROM minute_stats WHERE ts < ?1", params![cutoff])
 }
 
@@ -466,7 +466,9 @@ fn is_iso_day(s: &str) -> bool {
 #[tauri::command]
 pub fn history_daily(app: AppHandle, days: i64) -> Result<String, String> {
     let (conn, _) = open_db(&app)?;
-    let cutoff = now_secs() - days.max(1) * 86_400;
+    // 夹到 [1 天, 10 年]，与 history_process_totals 的上下限钳位口径一致：
+    // 只 max(1) 不设上限时，一个超大 days 会算出远古下界（返回全部数据），是个 foot-gun。
+    let cutoff = now_secs() - days.clamp(1, 3660) * 86_400;
     let mut stmt = conn
         .prepare(
             "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,
@@ -681,8 +683,16 @@ pub fn history_process_totals(app: AppHandle, hours: i64) -> Result<String, Stri
 #[tauri::command]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
     let (conn, _) = open_db(&app)?;
-    conn.execute_batch("DELETE FROM minute_stats; VACUUM;")
-        .map_err(|e| format!("清空历史失败: {e}"))
+    // DELETE 是真正要保证的操作；VACUUM 只是回收磁盘空间，属 best-effort。
+    // 分两步执行：并发写入时 VACUUM 可能撞 busy_timeout 返回 Err，但此时 DELETE 已提交
+    // ——若一并 map_err 会向用户报「清空失败」，而数据其实已经清掉了（口径与事实相反）。
+    conn.execute("DELETE FROM minute_stats", [])
+        .map_err(|e| format!("清空历史失败: {e}"))?;
+    // VACUUM 失败不致命：数据已清，空间回收可等下次；只记日志不向用户报错。
+    if let Err(e) = conn.execute_batch("VACUUM") {
+        eprintln!("[netpeek] VACUUM 失败（空间未回收，数据已清空）: {e}");
+    }
+    Ok(())
 }
 
 /// 启动时把 settings.json 里的保留期灌进内存态。

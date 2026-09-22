@@ -12,6 +12,13 @@ public static class IpcConstants
     /// <summary>单帧最大字节数，超过视为协议错误。</summary>
     public const int MaxFrameBytes = 16 * 1024 * 1024;
 
+    /// <summary>
+    /// 快照协议版本。破坏性 schema 变更时 +1，供 UI 侧检测采集端版本是否兼容。
+    /// 旧采集端不发此字段时反序列化为 0，UI 可据此提示「采集端需升级」，
+    /// 而不是让异版本帧以默认值静默通过。
+    /// </summary>
+    public const int ProtocolVersion = 1;
+
     /// <summary>快照推送周期（毫秒）。</summary>
     public const int SnapshotIntervalMs = 1000;
 }

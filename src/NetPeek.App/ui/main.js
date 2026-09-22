@@ -91,9 +91,21 @@ const procHist = new Map();    // "pid:startMs" -> { t: [], down: [], up: [] }
 // 这里收下并按路径解析 —— 进程数据里只带 Path，不再带图标本体。
 const iconCache = new Map();
 
+// 常驻托盘数天时，不同可执行文件路径会持续累积。Map 按插入序迭代，超上限时
+// 从最旧的键开始逐条淘汰（近似 LRU）：图标丢了下一帧采集端会重发，只是一次额外提取，
+// 不影响正确性。上限取机器上不同可执行文件数量级的宽松值。
+const ICON_CACHE_MAX = 2048;
+function capMap(map, max) {
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    map.delete(oldest);
+  }
+}
+
 function mergeIcons(snap) {
   const updates = snap.IconUpdates;
   if (updates) for (const k of Object.keys(updates)) iconCache.set(k, updates[k]);
+  capMap(iconCache, ICON_CACHE_MAX);
 }
 
 // 名称 -> 图标，本次会话只增不减。历史屏要给「昨天跑过、现在已经退出」的应用配
@@ -109,6 +121,7 @@ function rememberIcons(snap) {
     const icon = iconOf(p);
     if (icon) iconByName.set(name, icon);
   }
+  capMap(iconByName, ICON_CACHE_MAX);
 }
 
 // 进程行图标解析：兼容旧协议（IconBase64 内联），新协议按 Path 查缓存。

@@ -325,7 +325,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         {
             counter.EndpointWindow?.Clear();
             counter.TopBytes = 0;
-            counter.TopPort = 0;
+            Volatile.Write(ref counter.TopPort, 0);
             Volatile.Write(ref counter.TopAddr, null);
             counter.LocalWindowId = windowId;
         }
@@ -337,7 +337,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         if (bytes > counter.TopBytes)
         {
             counter.TopBytes = bytes;
-            counter.TopPort = remotePort;
+            Volatile.Write(ref counter.TopPort, remotePort);
             Volatile.Write(ref counter.TopAddr, remoteAddr);
         }
     }
@@ -492,7 +492,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             // 对端：读两个 volatile 值后把窗口推进一格，下一个事件周期自动重计。
             // 只有真正有过事件的进程才有端点；纯空闲行保持为空，UI 显示「—」。
             var topAddr = Volatile.Read(ref counter.TopAddr);
-            var topPort = counter.TopPort;
+            var topPort = Volatile.Read(ref counter.TopPort);
             Interlocked.Increment(ref counter.WindowId);
 
             processes.Add(new ProcessTraffic

@@ -159,9 +159,23 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
 }
 
 /// 读取已保存的背景图，转回 data URL 供 CSS 使用。
+///
+/// 路径必须落在背景目录（data_dir/BG_DIR）内：这个命令会把任意路径的文件内容 base64
+/// 回吐给前端，若不做限制就是一个通用的任意文件读取原语（私钥、.env、浏览器数据等
+/// 凡进程可读的都能被读走并转成 data URL）。虽然 Tauri 命令通常只有本应用 webview 可达，
+/// 但一旦发生 XSS 或将来加载远端内容，它就变成磁盘外泄通道。canonicalize 后校验前缀，
+/// 越界即拒。
 #[tauri::command]
-pub fn read_background_image(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
+pub fn read_background_image(app: AppHandle, path: String) -> Result<String, String> {
+    let bg_dir = data_dir(&app)?.join(BG_DIR);
+    // canonicalize 解析 .. 与符号链接，杜绝用 ..\..\ 逃逸出背景目录。
+    let canon_dir = fs::canonicalize(&bg_dir).map_err(|e| format!("定位背景目录失败: {e}"))?;
+    let canon_path =
+        fs::canonicalize(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
+    if !canon_path.starts_with(&canon_dir) {
+        return Err("背景图路径越界，拒绝读取".into());
+    }
+    let bytes = fs::read(&canon_path).map_err(|e| format!("读取背景图失败: {e}"))?;
     let ext = PathBuf::from(&path)
         .extension()
         .map(|s| s.to_string_lossy().to_lowercase())

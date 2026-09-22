@@ -422,7 +422,7 @@
   function updateBgThumb() {
     if (bgDataUrl) {
       els.bgThumb.hidden = false;
-      els.bgThumb.style.backgroundImage = `url("${bgDataUrl}")`;
+      els.bgThumb.style.backgroundImage = `url("${window.NetPeekCommon.cssUrl(bgDataUrl)}")`;
     } else {
       els.bgThumb.hidden = true;
       els.bgThumb.style.backgroundImage = '';
@@ -704,7 +704,7 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'wall-card' + (state.backgroundImage === w.src ? ' is-on' : '');
-      b.style.backgroundImage = `url("${w.src}")`;
+      b.style.backgroundImage = `url("${window.NetPeekCommon.cssUrl(w.src)}")`;
       b.title = w.name;
       b.setAttribute('aria-label', `使用内置壁纸「${w.name}」`);
       b.setAttribute('aria-pressed', state.backgroundImage === w.src ? 'true' : 'false');

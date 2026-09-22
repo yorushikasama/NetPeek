@@ -121,7 +121,7 @@ fn spawn_tray_sync(app: tauri::AppHandle) {
 /// 回执永远不会来 —— 直接自锁，界面冻死。同步线程、pipe 线程都是安全的。
 fn sync_tray(app: &tauri::AppHandle) {
     let state = app.state::<TrayState>();
-    let Some(items) = state.items.lock().unwrap().clone() else {
+    let Some(items) = state.items.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
         return; // 菜单项还没注册（setup 早期）
     };
 
@@ -142,7 +142,7 @@ fn sync_tray(app: &tauri::AppHandle) {
         initialized: true,
     };
     {
-        let mut applied = state.applied.lock().unwrap();
+        let mut applied = state.applied.lock().unwrap_or_else(|e| e.into_inner());
         if *applied == next {
             return;
         }
@@ -353,7 +353,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &mini, &pause, &quit])?;
 
             // 菜单项交给共享状态，后台同步线程才改得到文案。
-            *app.state::<TrayState>().items.lock().unwrap() = Some(TrayItems {
+            *app.state::<TrayState>().items.lock().unwrap_or_else(|e| e.into_inner()) = Some(TrayItems {
                 main: show.clone(),
                 mini: mini.clone(),
                 pause: pause.clone(),
@@ -443,7 +443,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // 关闭主窗改为隐藏到托盘，程序继续运行。
-                window.hide().unwrap();
+                // 这里在事件循环线程上，hide() 出错时不能 unwrap —— 那会 panic 掉整个
+                // 事件循环使 UI 进程崩溃。忽略错误、继续走隐藏语义即可（与本文件其余窗口操作一致）。
+                let _ = window.hide();
                 notify_visibility(window.app_handle(), window.label(), false);
                 api.prevent_close();
             }

@@ -53,6 +53,12 @@ public sealed class ProcessTraffic
 /// <summary>采集服务每秒推送给 UI 的一帧快照。</summary>
 public sealed class TrafficSnapshot
 {
+    /// <summary>
+    /// 协议版本（见 <see cref="IpcConstants.ProtocolVersion"/>）。
+    /// 旧采集端不发此字段时反序列化为 0，UI 可据此识别不兼容的采集端并提示升级。
+    /// </summary>
+    public int ProtocolVersion { get; set; } = IpcConstants.ProtocolVersion;
+
     /// <summary>采集时间戳（Unix 毫秒）。</summary>
     public long TimestampUnixMs { get; set; }
 

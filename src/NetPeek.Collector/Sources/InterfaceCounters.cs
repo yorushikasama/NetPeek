@@ -60,10 +60,14 @@ internal static class InterfaceCounters
                 if (ni.OperationalStatus != OperationalStatus.Up) continue;
                 if (ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
 
-                IPv4InterfaceStatistics stats;
+                IPInterfaceStatistics stats;
                 try
                 {
-                    stats = ni.GetIPv4Statistics();
+                    // 用 GetIPStatistics 而不是 GetIPv4Statistics：后者只计 IPv4，而 ETW 归因
+                    // 侧同时统计 IPv4/IPv6（见 EtwSnapshotSource 的 V6 事件）。两者口径不一致时，
+                    // IPv6 为主的环境里「接口增量 − 进程合计」会经常算成负数而被钳到 0，
+                    // 该显示的系统/未归因流量显示不出来。GetIPStatistics 合计两族，与 ETW 对齐。
+                    stats = ni.GetIPStatistics();
                 }
                 catch
                 {
@@ -71,9 +75,7 @@ internal static class InterfaceCounters
                     continue;
                 }
 
-                // BytesReceived/Sent 的 CLR 类型是 Int64（2026-09-21 用反射实测确认，
-                // 不是照抄文档 —— 文档有些版本写的是 uint）。所以 4 GB 不会回绕，
-                // 本机实测单接口已累计 4.9 GB 仍正确。
+                // BytesReceived/Sent 的 CLR 类型是 Int64，4 GB 不会回绕。
                 // 即便如此，调用方仍必须用「增量」而不是绝对值：绝对值只反映
                 // 「这块网卡自开机以来收了多少」，与「本秒的流量」无关。
                 received += stats.BytesReceived;

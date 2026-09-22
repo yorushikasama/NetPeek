@@ -111,9 +111,17 @@ internal sealed class UninstallFlow
         var exe = Environment.ProcessPath;
         if (exe is null) return;
         var dir = Path.GetDirectoryName(exe);
+
+        // 路径要拼进 cmd /c 字符串，含 & | ^ < > " % 会造成命令拆分/注入（在卸载器的
+        // 提权上下文里尤其危险）。exe 路径与 installDir 均可能来源于外部（进程路径、注册表
+        // InstallLocation），拼串前逐个校验，命中即放弃自删（残留一个可手动删的 setup.exe，
+        // 远好过执行注入命令）。
+        static bool HasCmdMeta(string s) => s.IndexOfAny(new[] { '&', '|', '^', '<', '>', '"', '%' }) >= 0;
+        if (HasCmdMeta(exe)) return;
+
         var args = $"/c ping -n 5 127.0.0.1 > nul & del /f /q \"{exe}\"" +
                    $" & ping -n 2 127.0.0.1 > nul & del /f /q \"{exe}\"";
-        if (dir is not null && installDir is not null &&
+        if (dir is not null && !HasCmdMeta(dir) && installDir is not null &&
             string.Equals(
                 Path.GetFullPath(dir).TrimEnd('\\'),
                 Path.GetFullPath(installDir).TrimEnd('\\'),

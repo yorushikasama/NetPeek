@@ -19,18 +19,19 @@ internal static class Elevation
         if (exe is null) return false;
         try
         {
+            // 用 ArgumentList 而不是手工拼 Arguments 字符串：手写 Quote 不处理内嵌 " 与
+            // 末尾 \（"...\" 里的末尾反斜杠会转义掉收尾引号，导致参数被拆/被注入）。
+            // ArgumentList 由运行时按 Windows CommandLineToArgvW 规则正确转义，跨 UAC 边界安全。
             var psi = new ProcessStartInfo(exe)
             {
-                Arguments = string.Join(' ', args.Select(Quote)),
                 UseShellExecute = true,
                 Verb = "runas",
             };
+            foreach (var a in args) psi.ArgumentList.Add(a);
             Process.Start(psi);
             return true;
         }
         catch (System.ComponentModel.Win32Exception) { return false; } // UAC 被拒绝
         catch (Exception) { return false; }
     }
-
-    private static string Quote(string s) => s.Contains(' ') ? "\"" + s + "\"" : s;
 }

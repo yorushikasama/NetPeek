@@ -110,7 +110,15 @@
 
   // 图标缓存：采集端改按路径增量下发（IconUpdates），小窗是独立 webview，
   // 得自己收一份缓存；解析逻辑与主界面 iconOf 相同（含旧协议内联回退）。
+  // 常驻数天会持续累积路径，Map 按插入序迭代，超上限从最旧键淘汰（近似 LRU）：
+  // 丢了下一帧采集端会重发，不影响正确性。
   const iconCache = new Map();
+  const ICON_CACHE_MAX = 2048;
+  function capIconCache() {
+    while (iconCache.size > ICON_CACHE_MAX) {
+      iconCache.delete(iconCache.keys().next().value);
+    }
+  }
 
   function iconOf(p) {
     if (p.IconBase64) return p.IconBase64;
@@ -274,7 +282,7 @@
       const u = splitRate(a.UpBytes);
       row.innerHTML = `
         ${a.IconBase64
-          ? `<img src="${a.IconBase64}" alt="" />`
+          ? `<img src="${esc(a.IconBase64)}" alt="" />`
           : `<span class="pico">${esc(initialOf(a.Name))}</span>`}
         <span class="pname" title="${esc(a.Name)}">${esc(a.Name)}</span>
         <span class="prate is-down">${ic('arrow-down')}${d.v} ${d.u}</span>
@@ -392,7 +400,7 @@
     const b = payload.backdrop || {};
     const bg = payload.background || '';
     const has = !!bg;
-    root.style.setProperty('--theme-bg-image', has ? `url("${bg}")` : 'none');
+    root.style.setProperty('--theme-bg-image', has ? `url("${window.NetPeekCommon.cssUrl(bg)}")` : 'none');
     root.classList.toggle('has-bg', has);
     root.classList.toggle('wrap-bg', has && !!b.wrap);
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -574,7 +582,10 @@
   // 缓存更新不受可见性影响 —— 隐藏期间照收，恢复时 repaintMini 补画的那帧才有图。
   listen('snapshot', (e) => {
     const snap = e.payload;
-    if (snap.IconUpdates) for (const k of Object.keys(snap.IconUpdates)) iconCache.set(k, snap.IconUpdates[k]);
+    if (snap.IconUpdates) {
+      for (const k of Object.keys(snap.IconUpdates)) iconCache.set(k, snap.IconUpdates[k]);
+      capIconCache();
+    }
     render(snap);
   });
   // 隐藏到托盘时跳过重绘（§4.1）：document.hidden 在 WebView2 隐藏宿主窗口时不保证触发，

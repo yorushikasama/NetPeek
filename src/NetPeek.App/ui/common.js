@@ -33,6 +33,14 @@ window.NetPeekCommon = {
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   },
 
+  // 供 CSS url("...") 内嵌用：把能突破 url() 字符串的字符（" ) \ 换行）转义/剔除。
+  // 背景值可能是本地文件路径（save_background_image 返回的绝对路径），路径含 ") 会
+  // 突破 url() 注入任意 CSS，含 " 也会静默让整条声明失效。CSS.escape 是给标识符用的，
+  // 不适合 URL 字符串内容，这里按 url() 的转义规则处理。
+  cssUrl(s) {
+    return String(s).replace(/[\\"\r\n()]/g, (c) => '\\' + c);
+  },
+
   /**
    * 统一图标组件（Lucide 线性族：24 viewBox / stroke currentColor / round 线帽，
    * 与导航、窗口钮、搜索框里的内联 SVG 同一族）。界面上不再直接写 emoji 或

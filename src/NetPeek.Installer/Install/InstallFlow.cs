@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
@@ -42,6 +44,13 @@ internal sealed class InstallFlow
     public static string ValidateDir(string dir)
     {
         var full = Path.GetFullPath(dir).TrimEnd('\\');
+
+        // 拒绝 cmd/shell 元字符：卸载时 SelfDelete 会把安装目录拼进 cmd /c 字符串
+        // （del/rd），路径含 & | ^ < > " % 会造成命令拆分/注入。合法安装路径不该有这些，
+        // 直接在入口挡掉，从源头消除注入面。
+        if (full.IndexOfAny(new[] { '&', '|', '^', '<', '>', '"', '%' }) >= 0)
+            throw new InvalidOperationException("安装目录不能包含 & | ^ < > \" % 等特殊字符，请另选目录。");
+
         var root = Path.GetPathRoot(full)?.TrimEnd('\\');
         if (!string.IsNullOrEmpty(root) &&
             string.Equals(root, full, StringComparison.OrdinalIgnoreCase))
@@ -95,6 +104,11 @@ internal sealed class InstallFlow
     private string WriteFiles()
     {
         Directory.CreateDirectory(InstallDir);
+        // 建目录后立刻加固 ACL：采集服务以 LocalSystem 运行，其 EXE 落在这里。若安装目录
+        // 落在非管理员可写的位置（ProgramData / Public 等），标准用户就能覆盖 collector EXE
+        // 或在旁边放劫持 DLL，从而提权到 SYSTEM。这里断掉继承、显式收权（SYSTEM/管理员完全控制，
+        // Users 只读+执行），使 EXE 即便装在宽松父目录下也不可被普通用户写入。
+        HardenDirAcl(InstallDir);
         Directory.CreateDirectory(Path.Combine(InstallDir, Defs.CollectorRelDir));
         File.WriteAllBytes(Path.Combine(InstallDir, Defs.AppExeName), Payload.Read(Payload.AppResource));
         File.WriteAllBytes(Path.Combine(InstallDir, Defs.CollectorExeRelPath), Payload.Read(Payload.CollectorResource));
@@ -121,7 +135,9 @@ internal sealed class InstallFlow
         var installed = WebView2Runtime.FindVersion();
         if (installed is not null) return "已存在 " + installed;
 
-        WebView2Runtime.InstallViaBootstrapper();
+        // 引导器落到已加固的安装目录（HardenDirAcl 已保证普通用户不可写），而不是
+        // 世界可写的 %TEMP% —— 从 %TEMP% 提权执行 EXE 会招致 DLL 劫持（旁路加载同目录恶意 DLL）。
+        WebView2Runtime.InstallViaBootstrapper(InstallDir);
         var now = WebView2Runtime.FindVersion();
         return now is null
             ? "引导器执行完毕但未检出运行时（主程序可能需要重启后再开）"
@@ -289,6 +305,33 @@ internal sealed class InstallFlow
         }
     }
 
+    /// 收紧目录 DACL：关闭继承（不让宽松父目录把「Users 可写」继承下来），
+    /// 只授 SYSTEM / Administrators 完全控制、Users 读取+执行。
+    /// 用于让 LocalSystem 服务的 EXE 目录不可被普通用户写入，杜绝 EXE 替换 / DLL 劫持提权。
+    private static void HardenDirAcl(string dir)
+    {
+        var info = new DirectoryInfo(dir);
+        var sec = new DirectorySecurity();
+
+        // 断继承、不保留继承来的规则：从一张干净的 ACL 重建，避免父目录的宽松授权残留。
+        sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        var inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+
+        sec.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        sec.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        sec.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+            FileSystemRights.ReadAndExecute, inherit, PropagationFlags.None, AccessControlType.Allow));
+
+        // Owner/Group 交给 SYSTEM，避免安装者账户对目录保留隐式所有者权限。
+        info.SetAccessControl(sec);
+    }
+
     private static void CreateLnk(string target, string lnkPath, string desc, string? args = null, string? iconTarget = null)
     {
         var type = Type.GetTypeFromProgID("WScript.Shell")
@@ -404,9 +447,11 @@ internal static class WebView2Runtime
         return null;
     }
 
-    public static void InstallViaBootstrapper()
+    public static void InstallViaBootstrapper(string workDir)
     {
-        var bootstrapper = Path.Combine(Path.GetTempPath(), "MicrosoftEdgeWebview2Setup.exe");
+        // 落到受保护目录（安装目录，ACL 已收紧到「普通用户不可写」）而不是 %TEMP%，
+        // 断掉「提权进程从世界可写目录旁路加载恶意 DLL」的路径。
+        var bootstrapper = Path.Combine(workDir, "MicrosoftEdgeWebview2Setup.exe");
         try
         {
             using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(3) })
@@ -427,6 +472,10 @@ internal static class WebView2Runtime
                 }
                 File.WriteAllBytes(bootstrapper, bytes);
             }
+
+            // 提权执行前必须验签：确认这是微软签名的真引导器，而不是被中间人/重定向替换的
+            // 任意 EXE（HTTPS 只保通道，不保内容正版）。验签失败即删文件、拒绝执行。
+            VerifyMicrosoftSignature(bootstrapper);
 
             using var p = Process.Start(new ProcessStartInfo(bootstrapper, "/silent /install")
             {
@@ -453,8 +502,49 @@ internal static class WebView2Runtime
         }
         finally
         {
-            // 用完即清，不在 %TEMP% 留 2MB 的引导器残骸；进程未退等场景删不掉就算了。
+            // 用完即清，不在安装目录留 2MB 的引导器残骸；进程未退等场景删不掉就算了。
             try { File.Delete(bootstrapper); } catch { }
+        }
+    }
+
+    /// 校验 EXE 具备有效的 Authenticode 签名且签名者为 Microsoft。
+    /// 只用 X509 链校验 + 签名者主题名判定：WinVerifyTrust 更权威但需大段 P/Invoke，
+    /// 这里的目标是挡掉「下载被替换成任意 EXE」，链有效 + 签名者是微软已足够。
+    private static void VerifyMicrosoftSignature(string filePath)
+    {
+        System.Security.Cryptography.X509Certificates.X509Certificate2 signer;
+        try
+        {
+            // 从已签名文件取出签名者证书。文件未签名时会抛异常。
+            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(filePath);
+            signer = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
+        }
+        catch (Exception ex)
+        {
+            try { File.Delete(filePath); } catch { }
+            throw new InvalidOperationException(
+                "WebView2 引导器缺少有效数字签名，已拒绝执行（可能是下载被篡改）。请从 " +
+                "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。内部信息：" + ex.Message);
+        }
+
+        var subject = signer.Subject;
+        if (subject.IndexOf("Microsoft Corporation", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            try { File.Delete(filePath); } catch { }
+            throw new InvalidOperationException(
+                "WebView2 引导器签名者不是 Microsoft（实为：" + subject + "），已拒绝执行。请从 " +
+                "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。");
+        }
+
+        // 校验证书链有效（吊销状态联网检查失败时不致命，避免离线环境误伤，但链本身必须可建）。
+        using var chain = new System.Security.Cryptography.X509Certificates.X509Chain();
+        chain.ChainPolicy.RevocationMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck;
+        if (!chain.Build(signer))
+        {
+            try { File.Delete(filePath); } catch { }
+            throw new InvalidOperationException(
+                "WebView2 引导器证书链校验失败，已拒绝执行。请从 " +
+                "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。");
         }
     }
 }

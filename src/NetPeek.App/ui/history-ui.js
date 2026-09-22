@@ -533,7 +533,7 @@
       // 在榜上显示「20 MB」，看不出它凭什么排在前面。
       row.innerHTML = `
         ${icon
-          ? `<img class="rank-icon" src="${icon}" alt="" />`
+          ? `<img class="rank-icon" src="${escapeHtml(icon)}" alt="" />`
           : `<span class="rank-icon is-placeholder">${escapeHtml(initial(app.name))}</span>`}
         <span class="rank-name" title="${escapeHtml(app.name)}">${escapeHtml(app.name)}</span>
         <span class="rank-value is-down" title="下载 ${escapeHtml(fmt(app.down))}">${valueHtml(app.down)}</span>
