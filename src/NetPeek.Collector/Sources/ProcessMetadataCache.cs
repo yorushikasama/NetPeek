@@ -143,10 +143,28 @@ public sealed class ProcessMetadataCache
         name = path.Length > 0 ? NameFromImage(path) : NameFromImage(imageFileName);
         if (startTime == 0)
         {
-            // 句柄没开出来（或 GetProcessTimes 罕见失败）：用事件时间当启动时间。
-            // 这是本次要消灭的 start_ts=0 的替代 —— 值可能与真实创建时间差几毫秒，
-            // 但只要它对这个实例恒定就不会裂行；且它非零，能匹配上历史键。
-            startTime = ToFileTimeUtc(eventTimeUtc);
+            // 句柄没开出来。**先读全系统快照**（受保护但仍存活的进程能在这里拿到真实
+            // 启动时间，与旧路径、历史库同源，键不会漂）；快照里也没有——真·短命进程
+            // 已退出——才退回事件时间。
+            //
+            // 为什么优先快照而不是直接用事件时间：ProcessStart 的事件时间≈创建时刻（够用），
+            // 但 ProcessDCStart（会话启动时对已在跑进程的枚举）的事件时间是**会话启动时刻**，
+            // 不是进程创建时刻。受保护的长命进程若走 DCStart + 句柄失败，直接用事件时间
+            // 会拿到会话启动时间，与它在历史库里的真实启动时间对不上 → 那一行「近24小时」
+            // 变破折号、还会多冒一条幽灵行。
+            //
+            // 这里只**只读**当前已缓存的快照、不触发重建：RebuildSnapshot 是整体替换引用
+            // （非就地修改），并发读一个可能被替换的引用是安全的（读到的要么是完整旧表、
+            // 要么是完整新表）。刻意不在 ETW 回调线程上重建快照，避免把重活挪到热路径。
+            var snapshot = _snapshot;
+            if (snapshot.TryGetValue(pid, out var snap) && snap.StartTimeUtcFileTime > 0)
+            {
+                startTime = snap.StartTimeUtcFileTime;
+            }
+            else
+            {
+                startTime = ToFileTimeUtc(eventTimeUtc);
+            }
         }
 
         _identities[pid] = new IdentityEntry(name, path, startTime, 0);
