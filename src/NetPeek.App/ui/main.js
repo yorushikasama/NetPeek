@@ -854,6 +854,17 @@ function updateRow(tr, p, peakTotal) {
 
 // 分隔行：实时行与幽灵行之间的一条整宽分组标签。没有 data-key，
 // 所以行点击/键盘处理（都靠 closest('tr[data-key]')）天然跳过它。
+// 方向键导航时跳过没有 data-key 的分隔行（row-group-sep）：它 tabIndex=-1 可被
+// .focus() 命中，但 keydown 里的 closest('tr[data-key]') 取不到它 —— 焦点一旦落上去，
+// 上下键都成空操作，键盘用户被卡在实时行与幽灵行之间。幽灵行本身带 data-key，
+// 只需越过分隔行即可。dir 传 'nextElementSibling' / 'previousElementSibling'。
+function focusableRowFrom(node, dir) {
+  while (node && !(node.matches && node.matches('tr[data-key]'))) {
+    node = node[dir];
+  }
+  return node;
+}
+
 function buildGhostSep() {
   const tr = document.createElement('tr');
   tr.className = 'row-group-sep';
@@ -1488,8 +1499,14 @@ function bindTable() {
     const tr = e.target.closest('tr[data-key]');
     if (!tr) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tr.click(); }
-    else if (e.key === 'ArrowDown' && tr.nextElementSibling) { e.preventDefault(); tr.nextElementSibling.focus(); }
-    else if (e.key === 'ArrowUp' && tr.previousElementSibling) { e.preventDefault(); tr.previousElementSibling.focus(); }
+    else if (e.key === 'ArrowDown') {
+      const next = focusableRowFrom(tr.nextElementSibling, 'nextElementSibling');
+      if (next) { e.preventDefault(); next.focus(); }
+    }
+    else if (e.key === 'ArrowUp') {
+      const prev = focusableRowFrom(tr.previousElementSibling, 'previousElementSibling');
+      if (prev) { e.preventDefault(); prev.focus(); }
+    }
   });
 }
 

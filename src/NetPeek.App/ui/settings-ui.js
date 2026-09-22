@@ -100,11 +100,10 @@
     ? window.NetPeekCommon.debounce(save, 400)
     : { schedule: save, flush: save, pending: false };
 
+  // 复用 common.js 的 fmtBytes（同为 SI 档位，且带 999 上限钳制）：本地版少了钳制，
+  // 999_999_999 字节会打出 "1000.0 MB"——数字跨出了自己的单位，读起来像计算错误。
   function fmtSize(bytes) {
-    if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + ' GB';
-    if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
-    if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + ' KB';
-    return bytes + ' B';
+    return window.NetPeekCommon.fmtBytes(bytes, 'auto');
   }
 
   function fmtTs(tsSecs) {

@@ -245,7 +245,7 @@ pub fn load_settings(app: AppHandle) -> Result<String, String> {
     // 窗口页面可能在 setup 完成前就 invoke（如 visible 的窗口提前加载），
     // 此时 state 尚未 manage：回退到文件/默认值，不 panic。
     let inner = match app.try_state::<SettingsState>() {
-        Some(state) => state.inner.lock().unwrap().clone(),
+        Some(state) => state.inner.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         None => {
             let path = data_dir(&app)?.join(SETTINGS_FILE);
             merged_with_defaults(read_settings_file(&path))
@@ -273,11 +273,12 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
         .map(|s| country_db_path(&s))
         .unwrap_or_default();
     if let Some(state) = app.try_state::<SettingsState>() {
-        *state.inner.lock().unwrap() = value.clone();
+        *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();
     }
     let path = data_dir(&app)?.join(SETTINGS_FILE);
-    std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
-        .map_err(|e| format!("保存设置失败: {e}"))?;
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("设置序列化失败: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("保存设置失败: {e}"))?;
 
     // 国家库只在路径真的变了才重载：MMDB 有 8 MB，每次改滑块都读一遍没有意义。
     let new_db = value
@@ -311,7 +312,7 @@ pub fn set_country_db(app: AppHandle, path: String) -> Result<String, String> {
         crate::geo::probe(std::path::Path::new(trimmed))?;
     }
     let mut value = match app.try_state::<SettingsState>() {
-        Some(state) => state.inner.lock().unwrap().clone(),
+        Some(state) => state.inner.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         None => merged_with_defaults(read_settings_file(&data_dir(&app)?.join(SETTINGS_FILE))),
     };
     value["countryDbPath"] = serde_json::Value::String(trimmed.to_string());
@@ -407,6 +408,11 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 fn set_autostart_impl(enabled: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位程序路径失败: {e}"))?;
     if enabled {
+        // 路径必须带引号存进 Run 键：安装目录常含空格（C:\Program Files\...），
+        // Windows 用 CreateProcess 启动未加引号的 Run 项时会按空格逐段试探
+        //（先试 C:\Program.exe 再试完整路径），轻则启动失败，重则被同目录下
+        // 抢跑的 Program.exe 劫持。存成带引号的 REG_SZ 消除歧义。
+        let quoted = format!("\"{}\"", exe.to_string_lossy());
         let out = std::process::Command::new("reg")
             .args([
                 "add",
@@ -416,7 +422,7 @@ fn set_autostart_impl(enabled: bool) -> Result<(), String> {
                 "/t",
                 "REG_SZ",
                 "/d",
-                &exe.to_string_lossy(),
+                &quoted,
                 "/f",
             ])
             .output()

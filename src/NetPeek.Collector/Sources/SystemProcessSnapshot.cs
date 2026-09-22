@@ -92,7 +92,8 @@ internal static class SystemProcessSnapshot
                 {
                     // 快照有效时长以「调用返回」为准：这中间进程可能已经变了，
                     // 但元数据本来就有 TTL，晚一拍读到旧值是可接受的（同 NameIndexTtlMs 的口径）。
-                    Parse(buffer, result);
+                    // 传入分配的 size 供 Parse 做边界校验（内核输出可信，仍防御畸形/截断）。
+                    Parse(buffer, size, result);
                     return result;
                 }
 
@@ -113,9 +114,10 @@ internal static class SystemProcessSnapshot
         }
         catch
         {
-            // 原生内存读写对畸形数据不设防：越界读会直接 AV 掉整个服务进程，
-            // 而这只是一个显示用的补充信息源，不值得拿服务的命去换。
-            // 出任何意外就当作「这一轮没有快照」，下一轮（TTL 到期后）会再试。
+            // 兜底：Marshal 分配失败、非预期 NTSTATUS 等一般异常在此归零成「这一轮没有快照」。
+            // 注意：普通 catch **接不住** AccessViolationException（.NET Core 默认不把
+            // 损坏状态异常投递给托管 catch），所以真正防越界读的是 Parse / ReadImageName
+            // 里对 offset、字段范围、Buffer 指针的显式边界校验，而不是这个 catch。
             return new Dictionary<uint, (string, long)>();
         }
         finally
@@ -132,12 +134,23 @@ internal static class SystemProcessSnapshot
     /// <c>NextEntryOffset</c> + <c>ImageName</c>(UNICODE_STRING) + <c>CreateTime</c> + <c>UniqueProcessId</c> …
     /// 名字直接从条目内的 UNICODE_STRING 读，不走托管字符串表，避免为此分配整个 Process[]。
     /// </summary>
-    private static void Parse(IntPtr buffer, Dictionary<uint, (string Name, long StartTimeUtcFileTime)> into)
+    private static void Parse(IntPtr buffer, int size, Dictionary<uint, (string Name, long StartTimeUtcFileTime)> into)
     {
+        // 单个条目里我们要读到的最远字段是 UniqueProcessId（0x50，4 字节 → 0x54）。
+        // 读任何字段前先确认整条 0x54 字节都落在已分配缓冲之内 —— 截断/畸形输入下越界读
+        // 会触发无法被托管 catch 接住的 AccessViolation，直接崩服务。
+        const int MinEntryExtent = OffsetUniqueProcessId + 4;
+
         var offset = 0;
 
         while (true)
         {
+            // 边界：offset 非负，且本条要读的字段范围不越界。越界即停（当作快照到此为止）。
+            if (offset < 0 || offset > size - MinEntryExtent)
+            {
+                return;
+            }
+
             var next = Marshal.ReadInt32(buffer, offset + OffsetNextEntry);
             var pid = (uint)Marshal.ReadInt32(buffer, offset + OffsetUniqueProcessId);
 
@@ -146,13 +159,14 @@ internal static class SystemProcessSnapshot
             if (pid > 4)
             {
                 var createTime = Marshal.ReadInt64(buffer, offset + OffsetCreateTime);
-                var name = ReadImageName(buffer, offset, pid);
+                var name = ReadImageName(buffer, size, offset, pid);
                 into[pid] = (name, createTime);
             }
 
-            // NextEntryOffset == 0 是链表终点。这是唯一的结束条件 ——
-            // 条目是按字节紧凑排布的，没有「固定数量」可取。
-            if (next == 0)
+            // NextEntryOffset == 0 是链表终点。这是唯一的正常结束条件 ——
+            // 条目按字节紧凑排布，没有「固定数量」可取。next 非正（0/负/畸形）都收尾，
+            // 保证 offset 严格递增、循环必然终止。
+            if (next <= 0)
             {
                 return;
             }
@@ -169,7 +183,7 @@ internal static class SystemProcessSnapshot
     /// 且不含结尾的 NUL。两者任一异常就返回空串 —— 名字缺失只影响显示，
     /// 而启动时间（真正决定身份键的那个字段）不受影响。
     /// </summary>
-    private static string ReadImageName(IntPtr buffer, int entryOffset, uint pid)
+    private static string ReadImageName(IntPtr buffer, int size, int entryOffset, uint pid)
     {
         // UNICODE_STRING 的布局（x64）：+0 Length(2) / +2 MaximumLength(2) / +4 对齐填充 /
         // +8 Buffer 指针。所以名字指针在起点 +8，长度在起点 +0。
@@ -177,6 +191,12 @@ internal static class SystemProcessSnapshot
 
         try
         {
+            // 先确认 UNICODE_STRING 的 Length(2) 与 Buffer 指针(+8, 8 字节) 都在缓冲内。
+            if (entryOffset < 0 || entryOffset > size - (offsetUnicodeString + 8 + 8))
+            {
+                return string.Empty;
+            }
+
             var length = (ushort)Marshal.ReadInt16(buffer, entryOffset + offsetUnicodeString);
             if (length == 0 || length > 512 * 2)
             {
@@ -187,6 +207,15 @@ internal static class SystemProcessSnapshot
             // Buffer 在 UNICODE_STRING 起点的 +8 处（Length/MaximumLength 各 4 字节）。
             var namePtr = Marshal.ReadIntPtr(buffer, entryOffset + offsetUnicodeString + 8);
             if (namePtr == IntPtr.Zero)
+            {
+                return string.Empty;
+            }
+
+            // Buffer 指针指向本快照缓冲之内的字符串。校验 [namePtr, namePtr+length) 落在
+            // [buffer, buffer+size) 内再读 —— 畸形指针上 PtrToStringUni 会 AV，托管 catch 接不住。
+            var start = buffer.ToInt64();
+            var p = namePtr.ToInt64();
+            if (p < start || p + length > start + size)
             {
                 return string.Empty;
             }

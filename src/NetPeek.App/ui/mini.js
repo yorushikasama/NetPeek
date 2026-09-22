@@ -269,14 +269,16 @@
       }));
       return;
     }
-    const peak = apps.reduce((m, a) => Math.max(m, a.DownBytes), 0);
+    // 占比按「下载+上传」总量，与上面的排序口径一致（§49）：只按下载算峰值/分子时，
+    // 上传型应用（云同步、做种）会排在前面却是空条 —— 排序与占比条对不上。
+    const peak = apps.reduce((m, a) => Math.max(m, a.DownBytes + a.UpBytes), 0);
     const frag = document.createDocumentFragment();
     for (const a of apps) {
       const row = document.createElement('div');
       row.className = 'pitem';
       // 占比不占列宽：整行背景一条从左起的极淡渐变，和主界面进程表同一条（§2.5）。
       // 渐变写在 mini.css 的 .pitem 里，这里只写百分比 —— 颜色要跟着主题的下载色走。
-      const share = peak > 0 ? Math.min(100, Math.round((a.DownBytes / peak) * 100)) : 0;
+      const share = peak > 0 ? Math.min(100, Math.round(((a.DownBytes + a.UpBytes) / peak) * 100)) : 0;
       row.style.setProperty('--share', `${share}%`);
       const d = splitRate(a.DownBytes);
       const u = splitRate(a.UpBytes);

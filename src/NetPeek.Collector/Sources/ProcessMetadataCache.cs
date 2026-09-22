@@ -9,7 +9,13 @@ namespace NetPeek.Collector.Sources;
 /// 进程元数据缓存：按 PID 提供进程名、完整路径与启动时间。
 /// 启动时间用于构造进程身份键（PID + 启动时间），在 PID 被复用时识别出新进程。
 /// 带 TTL 缓存，避免每秒对每个 PID 做进程查询；解析失败（进程已退出或无权访问）时标记为不存活。
-/// 只在快照线程调用，绝不放进 ETW 回调。
+///
+/// 线程模型（2026-09-22 起）：<see cref="Get"/> 在快照线程调用；身份表的写入
+/// （<see cref="RecordStart"/> / <see cref="RecordStop"/>）由**独立的后台解析线程**执行。
+/// ETW 回调线程只通过 <see cref="EnqueueStart"/> / <see cref="EnqueueStop"/> 入队（廉价），
+/// 不再在派发线程上同步开句柄 —— 否则会话启动的 ProcessDCStart rundown 会有几百次
+/// OpenProcess 排在网络事件前面，挤占单一 ETW 派发线程导致 EventsLost。
+/// Start/Stop 走同一条有序队列、单线程顺序消费，保持 per-PID 事件顺序。
 ///
 /// **为什么不再用 <c>Process.GetProcessById</c> + <c>MainModule.FileName</c>**（原实现，
 /// 是启动卡顿的主因：实测单 PID 11.2ms，首帧几十上百个 PID 就是好几秒的同步阻塞）：
@@ -50,7 +56,7 @@ namespace NetPeek.Collector.Sources;
 /// 旧的句柄/快照两条路降为「Process 事件没覆盖到的 PID」（会话启动 rundown 前的窗口、或事件丢失）的兜底，
 /// 所以原有测试（直接构造缓存、不喂 Process 事件）行为不变。
 /// </summary>
-public sealed class ProcessMetadataCache
+public sealed class ProcessMetadataCache : IDisposable
 {
     private sealed record Entry(
         string Name,
@@ -93,9 +99,22 @@ public sealed class ProcessMetadataCache
 
     private sealed record IdentityEntry(string Name, string Path, long StartTimeUtcFileTime, long StoppedAtMs);
 
-    // PID → (名字, 启动时间)。只在快照线程访问（Get 由 GetSnapshot 串行调用），无需锁：
-    // 它不承担跨线程可见性，纯粹是「一帧内多个 PID 共享一次系统快照」的缓存。
-    // 两者同源是刻意的：名字和启动时间必须来自**同一次**快照，否则会拼出一个
+    /// <summary>一条待解析的进程生命周期事件（入队自 ETW 回调，消费在后台解析线程）。</summary>
+    private readonly record struct ProcEvent(bool IsStart, uint Pid, string Image, DateTime EventTimeUtc);
+
+    /// <summary>
+    /// 进程事件队列：ETW 回调线程入队、单个后台解析线程消费。用 BlockingCollection 让消费者
+    /// 空队列时阻塞等待、有事件时立即取。有序（底层 ConcurrentQueue），保持 per-PID 事件顺序。
+    /// </summary>
+    private readonly BlockingCollection<ProcEvent> _procEvents = new(new ConcurrentQueue<ProcEvent>());
+    private readonly Thread _resolverThread;
+    private bool _disposed;
+
+    // PID → (名字, 启动时间)。**重建**（RebuildSnapshot 整体替换引用）只发生在快照线程
+    // （EnsureSnapshot 经 NameOf/StartTimeFromSnapshot/Get 串行调用），故写入单线程、无需锁。
+    // 解析线程的 RecordStart 只**只读**它（拿受保护进程的真实启动时间）；整表替换而非就地
+    // 改写，保证并发读到的要么是完整旧表、要么是完整新表，跨线程读安全。
+    // 名字与启动时间同源是刻意的：必须来自**同一次**快照，否则会拼出一个
     // 「A 进程的名字 + B 进程的启动时间」的身份键（PID 复用窗口内）。原来的实现正是
     // 名字走快照、启动时间走句柄，两条路不一致时就会产生 start_ts=0 的孤儿行。
     private Dictionary<uint, (string Name, long StartTimeUtcFileTime)> _snapshot = new();
@@ -104,11 +123,83 @@ public sealed class ProcessMetadataCache
     public ProcessMetadataCache(TimeSpan? ttl = null)
     {
         _ttlMs = (long)(ttl ?? TimeSpan.FromSeconds(5)).TotalMilliseconds;
+
+        // 后台解析线程：把 OpenProcess / GetProcessTimes 这些同步内核调用从 ETW 派发线程
+        // 挪出来。稳态下队列基本为空，新 Start 在微秒~毫秒级被取走，进程通常还活着，
+        // 句柄照样开得出，短命进程「创建那一刻抓身份」的特性基本保留。
+        _resolverThread = new Thread(ResolveLoop)
+        {
+            IsBackground = true,
+            Name = "NetPeek.ProcResolver",
+        };
+        _resolverThread.Start();
+    }
+
+    /// <summary>ETW 回调线程入队一条 ProcessStart/DCStart 事件（廉价，不做任何内核调用）。</summary>
+    public void EnqueueStart(uint pid, string imageFileName, DateTime eventTimeUtc)
+    {
+        try
+        {
+            _procEvents.Add(new ProcEvent(true, pid, imageFileName ?? string.Empty, eventTimeUtc));
+        }
+        catch (InvalidOperationException)
+        {
+            // 已 CompleteAdding（关停中），丢弃即可。
+        }
+    }
+
+    /// <summary>ETW 回调线程入队一条 ProcessStop 事件。</summary>
+    public void EnqueueStop(uint pid)
+    {
+        try
+        {
+            _procEvents.Add(new ProcEvent(false, pid, string.Empty, default));
+        }
+        catch (InvalidOperationException)
+        {
+            // 已 CompleteAdding（关停中），丢弃即可。
+        }
+    }
+
+    /// <summary>后台解析线程主循环：顺序消费队列，把身份写进 <see cref="_identities"/>。</summary>
+    private void ResolveLoop()
+    {
+        try
+        {
+            foreach (var ev in _procEvents.GetConsumingEnumerable())
+            {
+                try
+                {
+                    if (ev.IsStart)
+                    {
+                        RecordStart(ev.Pid, ev.Image, ev.EventTimeUtc);
+                    }
+                    else
+                    {
+                        RecordStop(ev.Pid);
+                    }
+                }
+                catch
+                {
+                    // 单条事件解析失败（句柄异常、竞态）不拖垮 worker：缺一条身份
+                    // 只影响这一个进程，其余照常。
+                }
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // 关停竞态：集合已释放，正常退出。
+        }
+        catch (InvalidOperationException)
+        {
+            // 同上。
+        }
     }
 
     /// <summary>
-    /// 由 ETW 内核 Process 事件（ProcessStart / ProcessDCStart）在进程创建/枚举时调用，
-    /// 把身份抓进 <see cref="_identities"/> 表。此刻进程还活着，句柄几乎必开成功 ——
+    /// 把一条 ProcessStart / ProcessDCStart 的身份抓进 <see cref="_identities"/> 表。
+    /// 生产路径由后台解析线程经队列调用（见 <see cref="EnqueueStart"/>），单测直接同步调用。
+    /// 队列稳态基本为空、几乎立即消费，此刻进程通常还活着，句柄几乎必开成功 ——
     /// 拿到权威启动时间（GetProcessTimes，与旧路径同源，历史键不会漂）与完整路径；
     /// 万一句柄失败（那一瞬就退了 / 受保护进程），退回事件时间戳 + 事件里的镜像名。
     /// PID 复用时后一次 RecordStart 覆盖前一条（新身份、新启动时间），EtwSnapshotSource
@@ -510,6 +601,26 @@ public sealed class ProcessMetadataCache
                 _identities.TryRemove(pid, out _);
             }
         }
+    }
+
+    /// <summary>
+    /// 关停后台解析线程。DI 以 singleton 注册本类，宿主停止时释放。
+    /// CompleteAdding 让 GetConsumingEnumerable 排空剩余事件后自然结束循环，再 join 收工。
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+
+        _procEvents.CompleteAdding();
+        if (_resolverThread.IsAlive && _resolverThread != Thread.CurrentThread)
+        {
+            _resolverThread.Join(TimeSpan.FromSeconds(2));
+        }
+        _procEvents.Dispose();
     }
 
     private static class NativeMethods

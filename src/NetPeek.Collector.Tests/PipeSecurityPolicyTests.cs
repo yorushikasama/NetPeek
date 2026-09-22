@@ -13,11 +13,13 @@ namespace NetPeek.Collector.Tests;
 ///   能编译、测试工程报 CS0246，疑与空的 targeting pack 8.0.424 有关，
 ///   详见仓库根 Directory.Build.props），反射 + SDDL 从根上绕开该问题。
 ///
-/// 掩码依据（本机对 GENERIC_READ/WRITE 打开行为的逐位实测）：
+/// 掩码依据：
 /// - 快照管道客户端 = GENERIC_READ 展开集
 ///   ReadData(0x1)|ReadEA(0x8)|ReadAttributes(0x80)|READ_CONTROL(0x20000)|Synchronize(0x100000) = 0x120089；
-/// - 控制管道客户端 = FullControl(0x1F019F) 扣除 CreateNewInstance(0x4) = 0x1F019B
-///   （实测 GENERIC_WRITE 打开还须携带 Delete/READ_CONTROL/WRITE_DAC/TakeOwnership 位）。
+/// - 控制管道客户端 = 与 Rust 客户端 access_mode 逐位对齐的最小写集
+///   WriteData(0x2)|ReadAttributes(0x80)|Synchronize(0x100000) = 0x100082。
+///   （客户端改用 access_mode 精确请求这三位后，服务端不再需要授 FullControl，
+///   收回了 WRITE_DAC/WRITE_OWNER/DELETE 等危险位。）
 /// </summary>
 public class PipeSecurityPolicyTests
 {
@@ -72,13 +74,22 @@ public class PipeSecurityPolicyTests
     }
 
     [Fact]
-    public void Control_dacl_excludes_create_new_instance()
+    public void Control_dacl_grants_minimal_write_set()
     {
         var sddl = SddlOf(PipeSecurityPolicy.CreateForInboundControl());
         var client = AceMask(sddl, "AU");
 
-        Assert.Equal(FullControl & ~CreateNewInstance, client);
+        // 与 Rust 客户端（pipe.rs::send_control）access_mode 精确请求的三位逐位对齐。
+        const int expected = 0x2        // WriteData
+                           | 0x80       // ReadAttributes
+                           | 0x100000;  // Synchronize
+        Assert.Equal(expected, client);
+
+        // 不得授予会被滥用的位：创建新实例 / 改 DACL / 夺所有权 / 删除。
         Assert.Equal(0, client & CreateNewInstance);
+        Assert.Equal(0, client & 0x40000 /* WRITE_DAC (ChangePermissions) */);
+        Assert.Equal(0, client & 0x80000 /* WRITE_OWNER (TakeOwnership) */);
+        Assert.Equal(0, client & 0x10000 /* DELETE */);
         AssertSystemAndAdminsFullControl(sddl);
     }
 }

@@ -35,19 +35,22 @@ public static class PipeSecurityPolicy
                   | PipeAccessRights.Synchronize);
 
     /// <summary>
-    /// 入站控制管道：客户端需要写权限，但不承载任何回读数据。
+    /// 入站控制管道：客户端只需写权限，不承载任何回读数据。
     ///
-    /// 实测结论（本机 bisect 验证，2026-09-05）：GENERIC_WRITE 的标准展开
-    /// （WriteData|WriteAttributes|WriteEA|READ_CONTROL|Synchronize）不足以通过
-    /// .NET/Rust 客户端的打开检查，还须携带 Delete/ChangePermissions/TakeOwnership 位；
-    /// 唯一可以扣下的是 CreateNewInstance（0x4）——它允许他人创建本管道的额外服务实例。
-    /// 这些位只作用于控制管道对象本身，而 WriteData 本来就已授予已认证用户
-    /// （pause/resume 单行文本命令），不构成超出业务意图的能力。
-    /// 快照管道（敏感对象）另用最小读位集，见 <see cref="CreateForOutboundSnapshot"/>。
+    /// 授予与客户端实际请求**逐位对齐**的最小集：WriteData | ReadAttributes | Synchronize。
+    /// 这正是 Rust 客户端（pipe.rs::send_control）用 access_mode 精确请求的三位
+    /// （FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE）—— 客户端不再走 GENERIC_WRITE
+    /// 的宽展开，服务端也就不必再授 Delete/ChangePermissions/TakeOwnership。
+    ///
+    /// 早先这里授 FullControl&amp;~CreateNewInstance，是在客户端仍用 GENERIC_WRITE 时期
+    /// bisect 出来的宽集；客户端改用 access_mode 精确请求后，那几位（WRITE_DAC/WRITE_OWNER/
+    /// DELETE）就成了多余且危险的授权——任意已认证用户可改写本管道 DACL 或夺取所有权。
+    /// 现按最小集授权，与 <see cref="CreateForOutboundSnapshot"/>（最小读位集）同一原则。
     /// </summary>
     public static PipeSecurity CreateForInboundControl()
-        => Create((PipeAccessRights)
-            ((int)PipeAccessRights.FullControl & ~(int)PipeAccessRights.CreateNewInstance));
+        => Create(PipeAccessRights.WriteData
+                  | PipeAccessRights.ReadAttributes
+                  | PipeAccessRights.Synchronize);
 
     private static PipeSecurity Create(PipeAccessRights clientRights)
     {

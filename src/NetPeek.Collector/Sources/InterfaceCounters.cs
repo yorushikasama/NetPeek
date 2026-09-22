@@ -59,6 +59,10 @@ internal static class InterfaceCounters
                 if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
                 if (ni.OperationalStatus != OperationalStatus.Up) continue;
                 if (ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                // 虚拟交换机/桥接网卡（Hyper-V vEthernet、WSL、VMware、VirtualBox、Docker、
+                // Npcap Loopback）会把物理网卡的同一份字节再计一遍，抬高「系统/未归因」。
+                // 见 IsVirtualBridge 的取舍说明。
+                if (IsVirtualBridge(ni)) continue;
 
                 IPInterfaceStatistics stats;
                 try
@@ -88,5 +92,40 @@ internal static class InterfaceCounters
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// 是否为虚拟交换机/桥接网卡。这类网卡（Hyper-V 的 vEthernet、WSL、VMware、VirtualBox
+    /// Host-Only、Docker、Npcap Loopback 适配器）在主机侧桥接物理网卡，<c>GetIPStatistics</c>
+    /// 会把同一份流量在物理网卡与虚拟网卡上各计一次，接口总量因此虚高、连带把
+    /// 「系统/未归因」抬高。排除它们让差额更接近真实。
+    ///
+    /// 取舍（刻意保守）：按名称/描述做启发式匹配，只挡住明确的「主机侧虚拟交换机」标识串，
+    /// 不碰普通物理网卡与 VPN（VPN 已由 Tunnel 类型排除）。极少数「主链路本身就走某虚拟
+    /// 网卡」的场景（如纯 WSL2 组网）下会漏计那部分——但「系统/未归因」本就是量级参考、
+    /// 非精确账，宁可少算也不要把物理网卡的量重复计进去误导用户。匹配集若需扩充，
+    /// 只加同类「主机侧桥接」标识，不要把可能承载真实出网流量的网卡也纳入。
+    /// </summary>
+    private static bool IsVirtualBridge(NetworkInterface ni)
+    {
+        var text = $"{ni.Description} {ni.Name}";
+        // 大小写不敏感的子串匹配。这些标识串都来自主机侧虚拟交换机的固定命名。
+        string[] markers =
+        {
+            "vethernet",          // Hyper-V 虚拟交换机（含 vEthernet (WSL)、vEthernet (Default Switch)）
+            "hyper-v virtual",    // Hyper-V Virtual Ethernet Adapter
+            "vmware virtual",     // VMware 虚拟网卡
+            "virtualbox host-only", // VirtualBox Host-Only
+            "npcap loopback",     // Npcap 环回适配器
+            "docker",             // Docker 虚拟网卡
+        };
+        foreach (var m in markers)
+        {
+            if (text.Contains(m, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }

@@ -61,20 +61,51 @@ public sealed class SnapshotControlServer : BackgroundService
         _logger.LogInformation("控制管道服务停止");
     }
 
+    /// <summary>
+    /// 入站命令的字节上限。命令只有 pause/resume/toggle，几个字节足矣；设一个小上限，
+    /// 挡住「已认证客户端灌入无换行的超长字节流把读缓冲无界撑大」的内存耗尽。
+    /// </summary>
+    private const int MaxCommandBytes = 64;
+
     private async Task HandleClientAsync(NamedPipeServerStream server, CancellationToken ct)
     {
-        using var reader = new StreamReader(server, Encoding.UTF8, leaveOpen: true);
+        // UI 每次连接只发一行命令随即断开（见 pipe.rs::send_control），故读一行即够。
+        // 不用 StreamReader.ReadLineAsync：它对无换行输入无长度上限，会把内部缓冲无界放大。
+        var buffer = new byte[MaxCommandBytes];
         try
         {
-            // 一次连接可携带多条命令（UI 当前一次连接只发一条，读到空行为止）。
-            while (server.IsConnected && !ct.IsCancellationRequested)
+            var total = 0;
+            var newlineAt = -1;
+            while (total < buffer.Length)
             {
-                var line = await reader.ReadLineAsync(ct);
-                if (line == null)
+                var n = await server.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct);
+                if (n == 0)
                 {
                     break; // 客户端断开
                 }
-                HandleCommand(line.Trim());
+                newlineAt = Array.IndexOf(buffer, (byte)'\n', total, n);
+                total += n;
+                if (newlineAt >= 0)
+                {
+                    break;
+                }
+            }
+
+            // 读满上限仍无换行：超长命令，判为异常输入，断开不处理。
+            if (newlineAt < 0 && total >= buffer.Length)
+            {
+                _logger.LogWarning("控制命令超过 {Max} 字节上限，断开连接", MaxCommandBytes);
+                return;
+            }
+
+            var lineLen = newlineAt >= 0 ? newlineAt : total;
+            if (lineLen > 0)
+            {
+                var line = Encoding.UTF8.GetString(buffer, 0, lineLen).Trim();
+                if (line.Length > 0)
+                {
+                    HandleCommand(line);
+                }
             }
         }
         catch (IOException)

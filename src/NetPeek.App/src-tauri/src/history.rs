@@ -31,6 +31,13 @@ const DB_FILE: &str = "history.db";
 const LOG_FILE: &str = "netpeek.log";
 const DEFAULT_RETENTION_DAYS: i64 = 30;
 
+/// 保留期上限（天）。与 settings.rs 的同名常量一致（10 年之后没有真实意义）。
+/// 上限必须钳死：prune 用 `now - days*86_400`，release 档 `panic=abort` 且未开
+/// overflow-checks，一个越界的 days 会静默溢出回绕成未来 cutoff，把整库删空。
+/// set_retention 是公开命令，前端可直接 invoke 传任意 i64，故这里必须自带钳位，
+/// 不能只依赖 settings 侧的 sanitize（那条链走 save_settings，绕不到 set_retention）。
+const RETENTION_MAX_DAYS: i64 = 3650;
+
 /// 库未就绪时最多攒多少分钟的数据。正常情况下 init 在几十毫秒内完成，
 /// 这里攒的是那一小段时间的帧；但 init 也可能真的失败（磁盘满、目录不可写），
 /// 那时候不能无限攒下去把内存吃光 —— 超出就丢最老的分钟并留一条日志。
@@ -701,7 +708,9 @@ pub fn clear_history(app: AppHandle) -> Result<(), String> {
 /// 用户选了「永久保留」也会被删掉超过 30 天的历史，而且不可恢复。
 /// 语义与 set_retention 一致：负数按 0（永久保留）处理。
 pub fn apply_retention(state: &Arc<HistoryState>, days: i64) {
-    state.retention_days.store(days.max(0), Ordering::SeqCst);
+    state
+        .retention_days
+        .store(days.clamp(0, RETENTION_MAX_DAYS), Ordering::SeqCst);
 }
 
 /// 调整保留天数（0 = 永久保留），并立即清理一次。
@@ -709,7 +718,10 @@ pub fn apply_retention(state: &Arc<HistoryState>, days: i64) {
 pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
     // 用 try_state：窗口页面可能在 setup 完成前就 invoke，state 未就绪时仅落文件。
     if let Some(state) = app.try_state::<Arc<HistoryState>>() {
-        state.retention_days.store(days.max(0), Ordering::SeqCst);
+        // 钳到 [0, RETENTION_MAX_DAYS]：0 = 永久保留，上限挡住越界值算出未来 cutoff 清空全库。
+        state
+            .retention_days
+            .store(days.clamp(0, RETENTION_MAX_DAYS), Ordering::SeqCst);
         prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
     }
     Ok(())
@@ -1054,6 +1066,34 @@ mod tests {
 
         apply_retention(&state, -5); // 负数会让 prune 算出未来的 cutoff
         assert_eq!(state.retention_days.load(Ordering::SeqCst), 0);
+
+        // 上限钳制：越界的大 days 会让 `now - days*86_400` 在 release（panic=abort、
+        // 无 overflow-checks）下溢出回绕成未来 cutoff，把整库删空。必须被夹到上限。
+        apply_retention(&state, i64::MAX);
+        assert_eq!(
+            state.retention_days.load(Ordering::SeqCst),
+            RETENTION_MAX_DAYS
+        );
+    }
+
+    /// 越界的大保留期不能清库：钳到上限后 cutoff 必然落在过去（远早于任何真实数据），
+    /// prune 一行都不删。这道回归钉死「set_retention 传 i64::MAX 清空全库」那条路。
+    #[test]
+    fn prune_does_not_wipe_when_retention_is_absurdly_large() {
+        let state = HistoryState::new();
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            // 一行「现在」的数据：cutoff 若因溢出跑到未来，这行会被删。
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up)
+                 VALUES (?1, 1, 0, 'a.exe', 1, 0)",
+                params![now_secs()],
+            )
+            .unwrap();
+        }
+        apply_retention(&state, i64::MAX);
+        assert_eq!(prune(&state).unwrap(), 0, "钳到上限后不应删任何行");
     }
 
     /// 永久保留（0）时 prune 一行都不能删。

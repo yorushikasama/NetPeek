@@ -279,7 +279,16 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         catch (Exception ex)
         {
             _state = SessionState.Failed;
-            _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止");
+            _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止，{Seconds} 秒后重试。", RetryIntervalMs / 1000);
+
+            // 武装自愈定时器：分发线程一旦抛异常（一个畸形事件、会话被外部停掉等）就
+            // 整个退出，若不在这里重排程，采集会永久停到进程重启为止 —— 而重试此前
+            // 只在 StartSession 启动失败时武装。与启动失败同一条自愈路径：新建会话、
+            // 重开事件线程。已 Dispose 或已有排程时不重复武装。
+            if (!_disposed && _retryTimer == null)
+            {
+                _retryTimer = new Timer(_ => RetryStartSession(), null, RetryIntervalMs, Timeout.Infinite);
+            }
         }
     }
 
@@ -305,7 +314,9 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     {
         if (data.ProcessID > 0)
         {
-            _metadata.RecordStart((uint)data.ProcessID, data.ImageFileName, data.TimeStamp);
+            // 只入队，不在 ETW 派发线程上开句柄：rundown 时几百个 Start 若同步解析，
+            // 会把 TcpIp* 网络事件挤在后面，丢事件。解析在后台线程做（见 ProcessMetadataCache）。
+            _metadata.EnqueueStart((uint)data.ProcessID, data.ImageFileName, data.TimeStamp);
         }
     }
 
@@ -313,7 +324,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     {
         if (data.ProcessID > 0)
         {
-            _metadata.RecordStop((uint)data.ProcessID);
+            _metadata.EnqueueStop((uint)data.ProcessID);
         }
     }
 
@@ -690,8 +701,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         _lastInterfaceSample = now;
 
-        // 接口重连/计数器回绕会让 now < prev。此时的差值是垃圾数，
-        // 这一帧不给读数并留一条日志（正常不该频繁出现，频繁出现说明有接口在抖）。
+        // 接口重连/计数器回绕会让 now < prev。此时的差值是垃圾数，这一帧直接不给读数
+        //（UnattributedKnown=false，UI 显示破折号），下一帧以新基准重新计算。
         if (now.Received < prev.Received || now.Sent < prev.Sent)
         {
             snapshot.UnattributedKnown = false;
