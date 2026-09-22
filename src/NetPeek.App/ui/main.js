@@ -279,18 +279,22 @@ function buildDay24(rows) {
   // 把所有的行都塞进来只会让「按 PID 匹配」命中一堆同名不同实例的记录。
   const byPidOrphan = new Map();
   const unattr = UNATTR.toLowerCase();
-  const add = (map, key, down, up) => {
+  // name 一并存下来：幽灵行（已退出进程，见 ghostProcesses）没有实时快照可依，
+  // 名字只能从历史行里取。同键多行时留先到的非空名，空名归一成「(系统/未归因)」。
+  const add = (map, key, down, up, name) => {
     const hit = map.get(key);
-    if (hit) { hit.down += down; hit.up += up; } else map.set(key, { down, up });
+    if (hit) { hit.down += down; hit.up += up; if (!hit.name && name) hit.name = name; }
+    else map.set(key, { down, up, name: name || '' });
   };
   for (const r of rows || []) {
     const down = Number(r.down) || 0;
     const up = Number(r.up) || 0;
     const startTs = Number(r.startTs) || 0;
-    add(byKey, `${r.pid}:${startTs}`, down, up);
-    add(byName, String(r.name || '').trim().toLowerCase() || unattr, down, up);
+    const name = String(r.name || '').trim() || UNATTR;
+    add(byKey, `${r.pid}:${startTs}`, down, up, name);
+    add(byName, String(r.name || '').trim().toLowerCase() || unattr, down, up, name);
     // 名字为空的老行也收：它们只能靠 PID 认领（本来就没有别的线索）。
-    if (startTs === 0) add(byPidOrphan, String(r.pid), down, up);
+    if (startTs === 0) add(byPidOrphan, String(r.pid), down, up, name);
   }
   return { byKey, byName, byPidOrphan, ready: true };
 }
@@ -339,6 +343,88 @@ function day24Cell(hit) {
     blank: false,
     title: `近 24 小时：下载 ${fmtBytes(hit.down)} · 上传 ${fmtBytes(hit.up)}`,
   };
+}
+
+// 单批幽灵行的上限：超出的折成一行"其它已退出进程"。库里一天可能有上千个
+// 短命实例，全渲染既压垮表格也没意义 —— 大头单列、长尾归一，整列求和照样守恒。
+const GHOST_LIMIT = 40;
+
+/**
+ * "幽灵行"：近 24 小时里活跃过、但当前快照里已不在的进程实例 / 应用。
+ *
+ * 为什么要它：监控列表的"近24小时"这一列是挂在实时进程行上的（day24Of 按实时行的
+ * 身份去历史库反查）。可一天的用量大头往往来自短命进程 —— AI 代理、构建、node/java、
+ * 浏览器子进程 —— 它们早退出了，实时列表里没有它们的行，那几个 G 的历史量就无处显示，
+ * 于是"把列表里的近24小时加起来"会明显小于真实用量（实测本机某天已退出进程占 64%）。
+ * 这里把历史表里"没被任何实时行认领"的条目捞出来，渲染成实时行下方的一段历史行。
+ *
+ * covered 用来排除已被实时行显示的身份，避免重复计数：
+ * - 进程视图：实时行的精确身份键 day24Key(p)；实时行没有启动时间时，它会走 byPidOrphan
+ *   按 `pid:0` 认领老行（见 day24Of），所以这里也把 `pid:0` 记进 covered。
+ * - 应用视图：实时行的小写名。有实时行的应用，其"近24小时"经 byName 本就已含全部实例，
+ *   不需要补；只有整个应用都退出了才需要一行幽灵。
+ */
+function ghostProcesses(tables, liveProcs, mode) {
+  if (!tables || !tables.ready) return [];
+  const covered = new Set();
+  for (const p of liveProcs || []) {
+    if (mode === 'app') {
+      covered.add((p.Name || '').trim().toLowerCase() || UNATTR.toLowerCase());
+    } else {
+      covered.add(day24Key(p));
+      if (!(p.StartTimeUnixMs > 0)) covered.add(`${p.Pid}:0`);
+    }
+  }
+  const src = mode === 'app' ? tables.byName : tables.byKey;
+  const out = [];
+  for (const [key, v] of src) {
+    if (covered.has(key)) continue;
+    out.push({ key, name: v.name || '', down: v.down || 0, up: v.up || 0 });
+  }
+  return out;
+}
+
+/**
+ * 幽灵行排序：实时速率恒为 0，按当前排序键落到历史量上 —— 下载/上传各取对应方向，
+ * 其余键（含默认的合计档、PID 列）一律按历史合计。名字列按名字。
+ */
+function sortGhosts(list, effKey, effDir) {
+  const acc = effKey === 'name'
+    ? (g) => (g.name || '').toLowerCase()
+    : effKey === 'download' ? (g) => g.down
+      : effKey === 'upload' ? (g) => g.up
+        : (g) => g.down + g.up;
+  return list.slice().sort((a, b) => {
+    const av = acc(a);
+    const bv = acc(b);
+    if (av < bv) return -effDir;
+    if (av > bv) return effDir;
+    return 0;
+  });
+}
+
+/**
+ * 截断成最多 GHOST_LIMIT 个独立行 + 一行折叠尾。
+ *
+ * 截断按**历史合计**取头部（不管用户此刻按哪列排序）：留下的永远是量最大的那些，
+ * 折叠的是长尾。折叠行携带长尾的合计并恒排在末尾，这样无论怎么排，
+ * 这一列的求和都仍等于库内真实 24h 总量 —— 这正是这个功能要保证的那件事。
+ */
+function capGhosts(list, effKey, effDir) {
+  let kept = list;
+  let tailRow = null;
+  if (list.length > GHOST_LIMIT) {
+    const byTotal = list.slice().sort((a, b) => (b.down + b.up) - (a.down + a.up));
+    kept = byTotal.slice(0, GHOST_LIMIT);
+    const tail = byTotal.slice(GHOST_LIMIT);
+    let d = 0;
+    let u = 0;
+    for (const g of tail) { d += g.down; u += g.up; }
+    tailRow = { key: '__tail__', name: `其它已退出进程（${tail.length} 个）`, down: d, up: u, tail: true };
+  }
+  const sorted = sortGhosts(kept, effKey, effDir);
+  if (tailRow) sorted.push(tailRow); // 折叠行恒在末尾，不参与排序
+  return sorted;
 }
 
 async function loadDay24() {
@@ -766,21 +852,110 @@ function updateRow(tr, p, peakTotal) {
   tr.classList.toggle('is-selected', !!selected && selected.keyStr === tr.dataset.key);
 }
 
+// 分隔行：实时行与幽灵行之间的一条整宽分组标签。没有 data-key，
+// 所以行点击/键盘处理（都靠 closest('tr[data-key]')）天然跳过它。
+function buildGhostSep() {
+  const tr = document.createElement('tr');
+  tr.className = 'row-group-sep';
+  tr.tabIndex = -1;
+  tr.innerHTML = '<td colspan="6">近 24 小时内活跃、现已退出</td>';
+  return tr;
+}
+
+/**
+ * 幽灵行渲染：复用实时行的 DOM 结构（buildRow），但语义全然不同 ——
+ * 它已退出，没有实时速率 / 对端 / 存活 PID。三处显示破折号，只有"近24小时"给真值。
+ * is-ghost 类让样式表把整行降到弱字阶；tabIndex=-1 + 点击处理里的 is-ghost 判断
+ * 一起把它挡在选中之外（inspector 只认实时字段，选中一行历史量无处可展）。
+ */
+function updateGhostRow(tr, g) {
+  const r = tr.refs;
+  const name = g.name || UNATTR;
+  // 图标：进程已退出、拿不到 Path，只能按名字查本会话记下的图标（iconByName）。
+  const icon = iconByName.get(name.toLowerCase()) || '';
+  if (icon) {
+    if (r.img.getAttribute('src') !== icon) r.img.src = icon;
+    r.img.hidden = false;
+    r.ph.hidden = true;
+    r.ph.textContent = '';
+  } else {
+    r.img.hidden = true;
+    r.ph.hidden = false;
+    r.ph.textContent = initialOf(name, 1);
+  }
+  if (r.name.textContent !== name) r.name.textContent = name;
+  r.suffix.textContent = '';
+  if (r.nameCell.dataset.copy !== name) r.nameCell.dataset.copy = name;
+  // 已退出：无实时对端 / PID / 速率，一律破折号（口径同顶栏断连，见 blankRates）。
+  updatePeerCell(r.peer, {});
+  r.pid.textContent = '—';
+  setRateCell(r.down, '—');
+  r.down.classList.add('is-blank');
+  setRateCell(r.up, '—');
+  r.up.classList.add('is-blank');
+  const day = day24Cell({ down: g.down || 0, up: g.up || 0 });
+  setRateCell(r.day, day.text);
+  r.day.classList.toggle('is-blank', day.blank);
+  if (r.day.title !== day.title) r.day.title = day.title;
+  // 幽灵行没有实时占比，条清零。
+  if (tr.style.getPropertyValue('--share') !== '0%') tr.style.setProperty('--share', '0%');
+  tr.tabIndex = -1;
+  tr.classList.add('is-ghost');
+  tr.classList.remove('is-selected');
+}
+
+// renderTable 上一轮的幽灵行数量：renderAll 判空态要用它 —— 实时行为空但仍有
+// 幽灵行时不能落到「无网络活动」的空态（那会连表格一起藏掉，幽灵行也就看不见了）。
+let lastGhostCount = 0;
+
 function renderTable(snap) {
   const procs = visibleProcesses(snap);
   // 占比条的分母是**合计**峰值（见 shareOf）—— 与条的分子同源，也与默认排序
   // 的取值器同源：满格的那一行就是排在第一位的那一行。
   const peakTotal = procs.reduce(
     (m, p) => Math.max(m, (p.DownloadBytes || 0) + (p.UploadBytes || 0)), 0);
-  const alive = new Set();
 
-  procs.forEach((p, i) => {
-    const key = rowKey(p);
+  // 幽灵行：近 24 小时活跃、现已退出的实例（见 ghostProcesses）。covered 用**全部**
+  // 实时进程（未经搜索过滤）算，免得被搜索藏起来的实时行反被当成已退出；结果再单独
+  // 过一遍同一套搜索。
+  let ghosts = ghostProcesses(day24Tables, snap.Processes || [], viewMode);
+  const q = parseQuery(query);
+  if (q) ghosts = ghosts.filter((g) => matchesQuery({ Name: g.name, Pid: '' }, q));
+  if (ghosts.length) {
+    const effKey = sortKey || DEFAULT_SORT.key;
+    const effDir = sortKey ? sortDir : DEFAULT_SORT.dir;
+    ghosts = capGhosts(ghosts, effKey, effDir);
+  }
+  lastGhostCount = ghosts.length;
+
+  // 渲染顺序：实时行 → 分隔行 → 幽灵行。同一条 insertBefore 复用逻辑串起三段。
+  const seq = procs.map((p) => ({ kind: 'live', p }));
+  if (ghosts.length) {
+    seq.push({ kind: 'sep' });
+    for (const g of ghosts) seq.push({ kind: 'ghost', g });
+  }
+
+  const alive = new Set();
+  seq.forEach((item, i) => {
+    let key;
+    let tr;
+    if (item.kind === 'sep') {
+      key = '__ghostsep__';
+      tr = rowNodes.get(key);
+      if (!tr) { tr = buildGhostSep(); rowNodes.set(key, tr); }
+    } else if (item.kind === 'ghost') {
+      key = `ghost:${viewMode}:${item.g.key}`;
+      tr = rowNodes.get(key);
+      if (!tr) { tr = buildRow(key); rowNodes.set(key, tr); }
+      updateGhostRow(tr, item.g);
+    } else {
+      key = rowKey(item.p);
+      tr = rowNodes.get(key);
+      if (!tr) { tr = buildRow(key); rowNodes.set(key, tr); }
+      tr.procData = item.p;
+      updateRow(tr, item.p, peakTotal);
+    }
     alive.add(key);
-    let tr = rowNodes.get(key);
-    if (!tr) { tr = buildRow(key); rowNodes.set(key, tr); }
-    tr.procData = p;
-    updateRow(tr, p, peakTotal);
     // 排序变化时顺序会整体重排；只在位置不对时才动 DOM
     if (els.rows.children[i] !== tr) els.rows.insertBefore(tr, els.rows.children[i] || null);
   });
@@ -1145,7 +1320,8 @@ function renderAll(snap) {
 
   if (snap.Status === 'starting') setProcState('starting');
   else if (snap.Status !== 'ok' && snap.Status !== 'paused') setProcState('error');
-  else if (procs.length === 0) setProcState(parseQuery(query) ? 'empty' : 'idle');
+  // 实时行为空、但有幽灵行时不落空态：空态会连表格一起藏掉，幽灵行也就看不见了。
+  else if (procs.length === 0 && lastGhostCount === 0) setProcState(parseQuery(query) ? 'empty' : 'idle');
   else setProcState(null);
 
   renderInspector(snap, procs);
@@ -1303,7 +1479,8 @@ function bindTable() {
     // 在可选中的单元格文本上拖选，mouseup 会补一个 click —— 那一下不该翻动行选中
     if (hasTextSelection()) return;
     const tr = e.target.closest('tr[data-key]');
-    if (!tr) return;
+    // 幽灵行（已退出）不可选中：inspector 只认实时字段，选中它无从展开
+    if (!tr || tr.classList.contains('is-ghost')) return;
     selected = selected && selected.keyStr === tr.dataset.key ? null : { keyStr: tr.dataset.key };
     if (lastSnapshot) renderAll(lastSnapshot);
   });

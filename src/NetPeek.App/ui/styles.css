@@ -641,6 +641,26 @@ body.has-bg .sidebar {
 }
 .proc-table tbody tr.is-selected td:first-child { box-shadow: inset 2px 0 0 var(--sel-bar); }
 
+/* 幽灵行：近 24 小时活跃、现已退出的进程（见 main.js ghostProcesses）。整行降弱，
+   不给占比条、不给手型、不参与选中；但「近 24 小时」这一格（.td-day）保持常规字色，
+   因为它正是这行存在的理由 —— 用户来这段就是为了把它加进总量里。 */
+.proc-table tbody tr.is-ghost { cursor: default; background-image: none; }
+.proc-table tbody tr.is-ghost:hover { background-color: transparent; }
+.proc-table tbody tr.is-ghost .row-name { color: var(--text-3); }
+.proc-table tbody tr.is-ghost .proc-icon { opacity: 0.55; }
+
+/* 实时行与幽灵行之间的分组标签行：一条整宽的弱字说明，上下细线分隔。不可点。 */
+.proc-table tbody tr.row-group-sep { cursor: default; background-image: none; }
+.proc-table tbody tr.row-group-sep:hover { background-color: transparent; }
+.proc-table tbody tr.row-group-sep td {
+  padding: 9px 14px 5px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
 .cell-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .proc-icon {
   width: 22px;
@@ -677,6 +697,9 @@ span.proc-icon {
 .td-rate .u { font-size: 11px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
 .td-rate.down { color: var(--down); }
 .td-rate.up { color: var(--up); }
+/* 破折号不继承下载/上传的语义色 —— 它不是读数，是「没有数据」（幽灵行的速率列）。
+   降到弱字阶，口径同顶栏断连的 blankRates。 */
+.td-rate.is-blank { color: var(--text-3); }
 
 /* 近 24 小时：累计量而不是速率，所以刻意低一档 —— 常规字重 + --text-2，
    把「这一秒谁在说话」两列留在视觉重心上。口径靠单位区分：这里没有 /s。

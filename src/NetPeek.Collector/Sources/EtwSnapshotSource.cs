@@ -16,6 +16,8 @@ namespace NetPeek.Collector.Sources;
 /// 2. 忽略 "Protocol copied data on behalf of user"（Event ID 18，TcpIpTCPCopy / TcpIpTCPCopyIPV6），
 ///    它与 Data received 是同一批数据的两次观察，累加会导致下载量翻倍。
 /// 3. 重传事件单独累计，不混入应用上传量。
+/// 4. 回环流量（127.0.0.0/8、::1）不计入按进程归因，与 InterfaceCounters 的
+///    「非回环接口」口径对齐，见 <c>IsLoopback</c>。
 ///
 /// 进程身份键 = PID + 进程启动时间：PID 被复用时清零重计，避免历史流量算到新进程头上。
 /// 回调内只做累加；进程名/启动时间解析与字典清理都在快照线程完成。
@@ -184,9 +186,18 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             }
 
             session = new TraceEventSession(SessionName);
-            session.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
+            // NetworkTCPIP：收发字节的来源。Process：进程创建/退出事件，用来在「进程创建那一刻」
+            // 就抓下身份（名字/路径/启动时间），覆盖那些几百毫秒就退出、事后再也查不到的短命进程
+            // （见 ProcessMetadataCache 的身份表）。Process 事件量远小于网络事件，开销可忽略。
+            session.EnableKernelProvider(
+                KernelTraceEventParser.Keywords.NetworkTCPIP | KernelTraceEventParser.Keywords.Process);
 
             var parser = new KernelTraceEventParser(session.Source);
+            // 进程生命周期：ProcessStart 是新建、ProcessDCStart 是会话启动时对「已在跑的进程」
+            // 做的一次性全量枚举（rundown）—— 两者都喂进身份表；ProcessStop 标记退出、进入宽限期。
+            parser.ProcessStart += OnProcessStart;
+            parser.ProcessDCStart += OnProcessStart;
+            parser.ProcessStop += OnProcessStop;
             parser.TcpIpSend += OnTcpSend;
             parser.TcpIpRecv += OnTcpRecv;
             parser.UdpIpSend += OnUdpSend;
@@ -283,12 +294,40 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private void OnUdpRecvV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
     private void OnTcpSendV6(TcpIpV6SendTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
     private void OnTcpRecvV6(TcpIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
-    private void OnRetransmit(TcpIpTraceData data) => AddRetransmit(data.ProcessID, data.size);
-    private void OnRetransmitV6(TcpIpV6TraceData data) => AddRetransmit(data.ProcessID, data.size);
+    private void OnRetransmit(TcpIpTraceData data) => AddRetransmit(data.ProcessID, data.size, data.daddr);
+    private void OnRetransmitV6(TcpIpV6TraceData data) => AddRetransmit(data.ProcessID, data.size, data.daddr);
+
+    // 进程创建（含 rundown）：把身份抓进元数据缓存的身份表。data.TimeStamp 对 ProcessStart
+    // 就是创建时刻；对 DCStart 是会话启动时刻，但那类进程此刻还活着，RecordStart 会开句柄取到
+    // 权威启动时间，事件时间只在句柄失败时兜底。data.ImageFileName 可能是裸名或 NT 路径，
+    // RecordStart 内部统一收敛成去扩展名的显示名。
+    private void OnProcessStart(ProcessTraceData data)
+    {
+        if (data.ProcessID > 0)
+        {
+            _metadata.RecordStart((uint)data.ProcessID, data.ImageFileName, data.TimeStamp);
+        }
+    }
+
+    private void OnProcessStop(ProcessTraceData data)
+    {
+        if (data.ProcessID > 0)
+        {
+            _metadata.RecordStop((uint)data.ProcessID);
+        }
+    }
 
     private void Add(int pid, int size, bool isUpload, IPAddress remoteAddr, int remotePort)
     {
         if (_paused || pid <= 0 || size <= 0)
+        {
+            return;
+        }
+
+        // 回环流量不计入按进程归因（见 IsLoopback）。放在这里短路，是因为 TrackEndpoint
+        // 也会把对端记成 127.0.0.1 —— 过滤若只挡字节计数，界面那一行仍会显示
+        // 「正在与 127.0.0.1 通信」，等于没修。
+        if (IsLoopback(remoteAddr))
         {
             return;
         }
@@ -342,15 +381,79 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         }
     }
 
-    private void AddRetransmit(int pid, int size)
+    private void AddRetransmit(int pid, int size, IPAddress remoteAddr)
     {
         if (_paused || pid <= 0 || size <= 0)
         {
             return;
         }
 
+        // 与 Add 同一口径：重传也是这条连接上的字节，回环的不算（否则编译期的
+        // 本地重传会被计成「网络重传」，污染重传率这个可靠性指标）。
+        if (IsLoopback(remoteAddr))
+        {
+            return;
+        }
+
         var counter = _counters.GetOrAdd((uint)pid, static _ => new ProcessCounter());
         Interlocked.Add(ref counter.RetransmitTotal, size);
+    }
+
+    /// <summary>
+    /// 是否回环地址（IPv4 127.0.0.0/8、IPv6 ::1、IPv4-mapped ::ffff:127.0.0.1）。
+    ///
+    /// internal 而非 private：这条判定是「java 假流量」那个 bug 的修复点，必须有回归
+    /// 覆盖（见 EtwLoopbackTests）。它不依赖 ETW 会话，纯函数，可以直接测。
+    ///
+    /// 为什么要过滤：ETW 内核网络事件**不区分**流量走的是物理网卡还是本机回环，
+    /// 只要经过 TCP/IP 栈就报。于是 IDE↔编译守护进程、Maven↔IDE、本地代理↔上游
+    /// 这些纯本机通信全都会被归因到进程头上，在界面上表现成「java 一直在传数据」
+    /// —— 而它一个字节都没出网卡。实测本机：两个 JDK 进程（JPS 编译守护 + Maven）
+    /// 名下**全部** socket 都是 127.0.0.1，却因为编译期 IPC 而在列表里显示流量。
+    ///
+    /// 与 <see cref="InterfaceCounters"/> 必须同口径：那边只统计「已连接且非回环」
+    /// 的接口（见其注释），因为回环在接口计数里不计。若只在归因侧算回环，会得到
+    /// 「进程合计 &gt; 接口增量」的恒定负差额 —— 被 ComputeUnattributed 钳到 0 之后，
+    /// 「系统/未归因」就永远显示不出来，正好把这一栏废掉。两侧都排除，口径才自洽。
+    ///
+    /// 代价是「本地代理↔上游」这类流量不再出现（文档 §9 已列明此统计边界）。
+    /// 但本地代理与外部通信时，出口那一段走的是物理网卡、归因到代理进程，
+    /// 所以「谁在用网」这个核心问题上并不丢信息 —— 丢的只是本机自己跟自己的对话。
+    /// </summary>
+    internal static bool IsLoopback(IPAddress? addr)
+    {
+        if (addr == null)
+        {
+            return false;
+        }
+
+        // 不用 IPAddress.IsLoopbackAddress：TraceEvent 3.2.6 是 netstandard2.0 程序集，
+        // 编译时 System.Net.IPAddress 会绑到那一版上，而 IsLoopbackAddress 是 .NET Core 3.0
+        // 才加的，编译不过（实测 CS1061）。这里直接比字节，任何目标框架下都成立。
+        if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            // ::1 全是 0 只有末位 1；IPv4-mapped（::ffff:127.x）也在此族，交给下面统一判定。
+            if (addr.Equals(IPAddress.IPv6Loopback))
+            {
+                return true;
+            }
+
+            if (addr.IsIPv4MappedToIPv6)
+            {
+                return IsLoopbackV4(addr.MapToIPv4());
+            }
+
+            return false;
+        }
+
+        return IsLoopbackV4(addr);
+    }
+
+    /// <summary>IPv4 回环：127.0.0.0/8 整个网段，不只是 127.0.0.1。</summary>
+    private static bool IsLoopbackV4(IPAddress addr)
+    {
+        var bytes = addr.GetAddressBytes();
+        return bytes.Length == 4 && bytes[0] == 127;
     }
 
     public TrafficSnapshot GetSnapshot()

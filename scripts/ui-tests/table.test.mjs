@@ -367,7 +367,8 @@ function makeRenderTable(state) {
     'main.js',
     [
       'parseQuery', 'searchFields', 'matchesQuery', 'histKey',
-      'day24Key', 'buildDay24', 'day24Of', 'visibleProcesses', 'rowKey', 'renderTable',
+      'day24Key', 'buildDay24', 'day24Of', 'visibleProcesses', 'rowKey',
+      'ghostProcesses', 'renderTable',
     ],
     {
       window: ctx,

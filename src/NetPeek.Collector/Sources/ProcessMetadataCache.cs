@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -37,6 +38,17 @@ namespace NetPeek.Collector.Sources;
 /// 1. 缓存按「最后访问时间」淘汰——进程退出后 ETW 源会在 30 帧左右剪枝，条目随即不再被访问，
 ///    超过 <see cref="EvictAfterMs"/> 未访问即视为死数据移除，避免常驻服务字典无界增长。
 /// 2. 同一进程实例的路径不会变，故仅当「无缓存 / 启动时间变化（PID 复用）」时才重取路径。
+///
+/// **事件溯源的身份表（2026-09-22）**：上面两条路都是「事后」补元数据 —— 在每秒的快照线程上
+/// 才去查一个 PID。可只活几百毫秒的进程（curl / git-remote-http / node 一次性脚本）到那时早退了，
+/// 句柄开不出来、全系统快照里也没有它，于是名字空、start_ts 退回 0（历史库里半数实例都这样）。
+/// 治本的办法是「进程创建那一刻」就把身份记下来：<see cref="RecordStart"/> 由 ETW 内核 Process
+/// 事件（ProcessStart / ProcessDCStart 见 EtwSnapshotSource）驱动，此刻进程还活着，句柄几乎必开成功，
+/// 拿到的启动时间与旧路径同源（GetProcessTimes FILETIME），名字同口径（去扩展名）。
+/// 这张 <see cref="_identities"/> 表在 <see cref="Get"/> 里**优先命中**；进程退出（RecordStop）后
+/// 保留一段宽限期（<see cref="IdentityGraceMs"/>）再清，让迟到的网络帧仍能查到身份。
+/// 旧的句柄/快照两条路降为「Process 事件没覆盖到的 PID」（会话启动 rundown 前的窗口、或事件丢失）的兜底，
+/// 所以原有测试（直接构造缓存、不喂 Process 事件）行为不变。
 /// </summary>
 public sealed class ProcessMetadataCache
 {
@@ -60,10 +72,26 @@ public sealed class ProcessMetadataCache
     /// </summary>
     private const long NameIndexTtlMs = 2_000;
 
+    /// <summary>进程退出后身份在表里保留多久（毫秒），让迟到的网络帧仍能查到。</summary>
+    private const long IdentityGraceMs = 60_000;
+
+    /// <summary>身份表两次清理的最小间隔（毫秒）。</summary>
+    private const long IdentitySweepIntervalMs = 30_000;
+
     private readonly Dictionary<uint, Entry> _cache = new();
     private readonly object _gate = new();
     private readonly long _ttlMs;
     private long _lastSweepMs;
+
+    /// <summary>
+    /// 事件溯源的进程身份表：PID → 在进程创建那一刻抓下的身份（见 <see cref="RecordStart"/>）。
+    /// ETW 回调线程写（RecordStart/RecordStop）、快照线程读（Get），用并发字典免锁。
+    /// StoppedAtMs=0 表示还在跑；非 0 是退出时刻，超过 <see cref="IdentityGraceMs"/> 后清理。
+    /// </summary>
+    private readonly ConcurrentDictionary<uint, IdentityEntry> _identities = new();
+    private long _lastIdentitySweepMs;
+
+    private sealed record IdentityEntry(string Name, string Path, long StartTimeUtcFileTime, long StoppedAtMs);
 
     // PID → (名字, 启动时间)。只在快照线程访问（Get 由 GetSnapshot 串行调用），无需锁：
     // 它不承担跨线程可见性，纯粹是「一帧内多个 PID 共享一次系统快照」的缓存。
@@ -78,9 +106,77 @@ public sealed class ProcessMetadataCache
         _ttlMs = (long)(ttl ?? TimeSpan.FromSeconds(5)).TotalMilliseconds;
     }
 
+    /// <summary>
+    /// 由 ETW 内核 Process 事件（ProcessStart / ProcessDCStart）在进程创建/枚举时调用，
+    /// 把身份抓进 <see cref="_identities"/> 表。此刻进程还活着，句柄几乎必开成功 ——
+    /// 拿到权威启动时间（GetProcessTimes，与旧路径同源，历史键不会漂）与完整路径；
+    /// 万一句柄失败（那一瞬就退了 / 受保护进程），退回事件时间戳 + 事件里的镜像名。
+    /// PID 复用时后一次 RecordStart 覆盖前一条（新身份、新启动时间），EtwSnapshotSource
+    /// 侧的复用检测据此重置计数。
+    /// </summary>
+    public void RecordStart(uint pid, string imageFileName, DateTime eventTimeUtc)
+    {
+        // PID 0/4 是 Idle/System 伪进程，不产生网络事件，不必记。
+        if (pid <= 4)
+        {
+            return;
+        }
+
+        string name;
+        var path = string.Empty;
+        long startTime = 0;
+
+        var handle = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle != IntPtr.Zero)
+        {
+            try
+            {
+                startTime = QueryStartTime(handle);
+                path = QueryImagePath(handle);
+            }
+            finally
+            {
+                NativeMethods.CloseHandle(handle);
+            }
+        }
+
+        name = path.Length > 0 ? NameFromImage(path) : NameFromImage(imageFileName);
+        if (startTime == 0)
+        {
+            // 句柄没开出来（或 GetProcessTimes 罕见失败）：用事件时间当启动时间。
+            // 这是本次要消灭的 start_ts=0 的替代 —— 值可能与真实创建时间差几毫秒，
+            // 但只要它对这个实例恒定就不会裂行；且它非零，能匹配上历史键。
+            startTime = ToFileTimeUtc(eventTimeUtc);
+        }
+
+        _identities[pid] = new IdentityEntry(name, path, startTime, 0);
+        SweepIdentities(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    /// <summary>
+    /// 由 ETW ProcessStop 事件调用：标记退出时刻，进入宽限期。不立即删除 ——
+    /// 采集端还会再画这个进程约 30 帧（等它连续无流量才剪枝），期间仍要能查到身份。
+    /// </summary>
+    public void RecordStop(uint pid)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (_identities.TryGetValue(pid, out var e) && e.StoppedAtMs == 0)
+        {
+            _identities[pid] = e with { StoppedAtMs = now };
+        }
+    }
+
     public ProcessMeta Get(uint pid)
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // 事件溯源的身份表优先：它在进程「创建那一刻」就抓下了名字/路径/启动时间，
+        // 覆盖短命进程（句柄事后开不出来、快照里也没有的那些）。见 RecordStart。
+        if (_identities.TryGetValue(pid, out var id))
+        {
+            // StoppedAtMs 非 0 = 已收到退出事件，按不存活报（采集端据此剪枝）。
+            return new ProcessMeta(id.Name, id.Path, id.StartTimeUtcFileTime, id.StoppedAtMs == 0);
+        }
 
         lock (_gate)
         {
@@ -149,6 +245,15 @@ public sealed class ProcessMetadataCache
                 name = System.IO.Path.GetFileNameWithoutExtension(path);
             }
 
+            // 内核伪进程（PID 4 = System）：句柄能开出启动时间、但 QueryFullProcessImageName
+            // 返回空、全系统快照又刻意跳过 pid<=4，于是名字空 —— UI 会把它显示成「(系统/未归因)」。
+            // 它其实是 System 进程的真实内核态流量（SMB/文件共享/驱动/内核发起或延迟归属的连接），
+            // 给它固定名字才是正确归因。见 WellKnownName。
+            if (name.Length == 0)
+            {
+                name = WellKnownName(pid);
+            }
+
             return new ProcessMeta(name, path, startTime, true);
         }
         finally
@@ -179,12 +284,35 @@ public sealed class ProcessMetadataCache
     private ProcessMeta ResolveWithoutHandle(uint pid, long now)
     {
         var name = NameOf(pid, now);
+        if (name.Length == 0)
+        {
+            // 内核伪进程兜底名（PID 4 = System / PID 0 = System Idle Process）：
+            // 它们不在全系统快照里（快照跳过 pid<=4），句柄也可能开不出来。见 WellKnownName。
+            name = WellKnownName(pid);
+        }
+
         return new ProcessMeta(
             name,
             "",
             StartTimeFromSnapshot(pid, now),
             false);
     }
+
+    /// <summary>
+    /// Windows 固定的内核伪进程名。这些 PID 恒定、不由普通进程枚举/句柄命名，
+    /// 却会承担真实的内核态网络 I/O（尤其 System=4：SMB、http.sys、驱动、内核发起或
+    /// 延迟归属的连接）。不给名字就会掉进 UI 的「(系统/未归因)」——那是「归因失败」的语义，
+    /// 与事实（明确归属于 System 内核）相反。netstat / TCPView / 任务管理器同样把 PID 4 记作 System。
+    ///
+    /// 只列这两个固定 PID：Registry / Memory Compression / Secure System 这些「最小进程」
+    /// 的 PID 是动态的、且都在全系统快照里带名字，正常路径就能拿到，不需要在这里特判。
+    /// </summary>
+    private static string WellKnownName(uint pid) => pid switch
+    {
+        4 => "System",
+        0 => "System Idle Process",
+        _ => string.Empty,
+    };
 
     /// <summary>从全系统进程快照取名字，快照过期时重建。</summary>
     private string NameOf(uint pid, long now)
@@ -302,6 +430,67 @@ public sealed class ProcessMetadataCache
         foreach (var pid in victims)
         {
             _cache.Remove(pid);
+        }
+    }
+
+    /// <summary>
+    /// 从镜像名/路径取显示名：去目录、去扩展名。与旧路径的名字口径一致
+    /// （历史库里 99 个名字无一带 .exe），保证同一应用不会因为「node」vs「node.exe」裂成两行。
+    /// ETW 事件里的镜像名可能是裸名（curl.exe）、NT 设备路径或普通路径，GetFileNameWithoutExtension 都能收敛。
+    /// </summary>
+    private static string NameFromImage(string image)
+    {
+        if (string.IsNullOrEmpty(image))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var n = System.IO.Path.GetFileNameWithoutExtension(image);
+            return string.IsNullOrEmpty(n) ? image : n;
+        }
+        catch
+        {
+            // 非法路径字符：退回原串，总比空名强。
+            return image;
+        }
+    }
+
+    /// <summary>
+    /// 事件时间戳 → UTC FILETIME，与句柄路径的启动时间同口径。ETW 事件的 DateTime.Kind
+    /// 通常是 Local，统一按 UTC 转。转换失败（越界时间）时退回「现在」—— 决不能返回 0，
+    /// 那正是本次要消灭的坑（0 在历史库里谁也匹配不上）。
+    /// </summary>
+    private static long ToFileTimeUtc(DateTime dt)
+    {
+        try
+        {
+            var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+            var ft = utc.ToFileTimeUtc();
+            return ft > 0 ? ft : DateTime.UtcNow.ToFileTimeUtc();
+        }
+        catch
+        {
+            return DateTime.UtcNow.ToFileTimeUtc();
+        }
+    }
+
+    /// <summary>清理已退出且超过宽限期的身份条目。只从 RecordStart 调用（ETW 回调线程），按间隔限流。</summary>
+    private void SweepIdentities(long now)
+    {
+        if (now - _lastIdentitySweepMs < IdentitySweepIntervalMs)
+        {
+            return;
+        }
+        _lastIdentitySweepMs = now;
+
+        foreach (var (pid, e) in _identities)
+        {
+            if (e.StoppedAtMs != 0 && now - e.StoppedAtMs > IdentityGraceMs)
+            {
+                _identities.TryRemove(pid, out _);
+            }
         }
     }
 
