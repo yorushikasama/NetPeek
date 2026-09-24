@@ -655,7 +655,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         // 「系统/未归因」= 接口增量 − 进程合计增量。**必须在 TotalDownload/UploadBytes
         // 赋值之后**：它要读这两个合计做减法（先调就会拿上一帧的合计，差一位）。
-        ComputeUnattributed(snapshot);
+        // 传 baseline/paused：这条路径也要遵守基线与暂停语义，否则重连首帧会把断开
+        // 期间的接口存量当成一帧未归因流量报出去（假尖峰），暂停时真实接口流量会以
+        // 「系统/未归因」的名义冒出来 —— 与每进程速率路径同源的两个坑。
+        ComputeUnattributed(snapshot, baseline, paused);
 
         return snapshot;
     }
@@ -676,8 +679,16 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     /// 而接口计数在不同栈层采样，两者本就不严格包含；再加上接口在帧间隙里断开重连
     /// 会让增量偏小。负的「未归因流量」是个没有意义的读数，显示出来只会让人以为坏了。
     /// 钳位而不是丢弃：正的差额（正常情形）照常给出。
+    ///
+    /// <paramref name="baseline"/>/<paramref name="paused"/> 让这条路径与每进程速率
+    /// 路径遵守同样的语义：
+    ///   · 基线帧（会话首帧 / UI 重连首帧）只把接口基准拉到当前值、不给读数 ——
+    ///     否则重连时的「上一帧」是断开期间几分钟前的采样，其增量横跨整段断开间隙
+    ///     （可能几个 GB），而此帧进程合计为 0，会算出一个巨大的假「未归因流量」。
+    ///   · 暂停帧接口基准继续推进（否则恢复监控首帧又会攒出尖峰），但未归因流量
+    ///     冻结为 0，与每进程速率报 0 一致 —— 暂停期间的真实流量不该以未归因冒出来。
     /// </summary>
-    private void ComputeUnattributed(TrafficSnapshot snapshot)
+    private void ComputeUnattributed(TrafficSnapshot snapshot, bool baseline, bool paused)
     {
         var sample = InterfaceCounters.Read();
         if (sample is not { } now)
@@ -687,6 +698,25 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             // 变成一个虚高的差额。
             _lastInterfaceSample = null;
             snapshot.UnattributedKnown = false;
+            return;
+        }
+
+        if (baseline)
+        {
+            // 基线帧：只把接口基准拉到当前值，本帧不给读数（报 0 会被读成
+            // 「全部归因成功」）。见上方 summary 的重连假尖峰说明。
+            _lastInterfaceSample = now;
+            snapshot.UnattributedKnown = false;
+            return;
+        }
+
+        if (paused)
+        {
+            // 暂停帧：基准继续推进以免恢复时攒出尖峰，但未归因流量按暂停语义冻结为 0。
+            _lastInterfaceSample = now;
+            snapshot.UnattributedKnown = true;
+            snapshot.UnattributedDownloadBytes = 0;
+            snapshot.UnattributedUploadBytes = 0;
             return;
         }
 
