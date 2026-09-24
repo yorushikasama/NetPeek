@@ -319,8 +319,18 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
         let Some(pid) = p.get("Pid").and_then(Value::as_i64) else {
             continue;
         };
-        let down = p.get("DownloadBytes").and_then(Value::as_i64).unwrap_or(0);
-        let up = p.get("UploadBytes").and_then(Value::as_i64).unwrap_or(0);
+        // 增量来自不可信的管道快照：钳到非负，负值没有物理意义，放进去会污染
+        // 每进程/每日的 SUM 聚合（列上没有 CHECK 约束拦得住）。
+        let down = p
+            .get("DownloadBytes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let up = p
+            .get("UploadBytes")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
         if down <= 0 && up <= 0 {
             // 无流量进程不占行，控制历史库体积。这一条同时挡掉了重连后的基线帧：
             // 采集端在 UI 断开重连后会先发一帧「只把基线拉到当前值、速率报 0」的快照

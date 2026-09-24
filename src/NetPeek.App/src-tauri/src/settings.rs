@@ -265,21 +265,17 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
     // 直接 invoke 传越界值的路径（save_settings 是公开命令）。
     let value = merged_with_defaults(Some(value));
 
-    // 先落 settings.json，后写注册表：文件写失败时注册表保持原样，不会出现
-    // 「注册表已改、文件还是旧值」的半失败状态。autostart 的真实状态以注册表为准
-    // （get_autostart 每次重读），文件里那份只是缓存，两者短暂不一致能自愈。
+    // 顺序是「先验证生效、再落盘、最后更新内存」：任一步失败都不留下半成品。
+    //   1. 国家库先 apply：geo::apply 验证+切换是原子的，坏路径在这里就回 Err，
+    //      不会先把坏 countryDbPath 写进文件/内存再失败（那会留下一个下次启动仍报错的配置）。
+    //   2. 再写 settings.json：文件写失败时内存保持原样，不会出现「内存已改、磁盘还是旧值、
+    //      重启静默回退」的分叉。
+    //   3. 最后才更新内存：以磁盘落成为准。
+    // autostart 的真实状态以注册表为准（get_autostart 每次重读），文件里那份只是缓存。
     let old_db = app
         .try_state::<SettingsState>()
         .map(|s| country_db_path(&s))
         .unwrap_or_default();
-    if let Some(state) = app.try_state::<SettingsState>() {
-        *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();
-    }
-    let path = data_dir(&app)?.join(SETTINGS_FILE);
-    let pretty = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("设置序列化失败: {e}"))?;
-    std::fs::write(&path, pretty).map_err(|e| format!("保存设置失败: {e}"))?;
-
     // 国家库只在路径真的变了才重载：MMDB 有 8 MB，每次改滑块都读一遍没有意义。
     let new_db = value
         .get("countryDbPath")
@@ -287,6 +283,15 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
         .unwrap_or("");
     if new_db != old_db {
         apply_country_db(&value)?;
+    }
+
+    let path = data_dir(&app)?.join(SETTINGS_FILE);
+    let pretty = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("设置序列化失败: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("保存设置失败: {e}"))?;
+
+    if let Some(state) = app.try_state::<SettingsState>() {
+        *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();
     }
 
     if let Some(autostart) = value.get("autostart").and_then(|v| v.as_bool()) {
