@@ -127,7 +127,11 @@ fn minute_of(ts_secs: i64) -> i64 {
 /// 把一条错误追加写入 netpeek.log（best-effort，日志写入失败也不影响主流程）。
 pub(crate) fn log_error(state: &HistoryState, msg: &str) {
     use std::io::Write;
-    let path = state.log_path.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let path = state
+        .log_path
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if path.as_os_str().is_empty() {
         return;
     }
@@ -343,7 +347,11 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
         // 这里只挡超额的那一项，另一项（通常是正常量级）照记 ——
         // 把整行丢掉会连正常的那一半一起损失。
         let (down, up) = (
-            if down > MAX_FRAME_DELTA_BYTES { 0 } else { down },
+            if down > MAX_FRAME_DELTA_BYTES {
+                0
+            } else {
+                down
+            },
             if up > MAX_FRAME_DELTA_BYTES { 0 } else { up },
         );
         if down <= 0 && up <= 0 {
@@ -1191,7 +1199,11 @@ mod range_tests {
 
         let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR, 0).unwrap();
         assert!(!rows.is_empty());
-        assert_eq!(rows.iter().map(|r| r.down).sum::<i64>(), 70, "分桶后总量守恒");
+        assert_eq!(
+            rows.iter().map(|r| r.down).sum::<i64>(),
+            70,
+            "分桶后总量守恒"
+        );
         for r in &rows {
             let hms: String = conn
                 .query_row(
@@ -1247,7 +1259,10 @@ mod range_tests {
             )
             .unwrap();
         assert_eq!(hms, "00:00", "桶键落在本地整点");
-        assert!(rows[0].ts <= base && base - rows[0].ts < HOUR, "base 落在它的桶内");
+        assert!(
+            rows[0].ts <= base && base - rows[0].ts < HOUR,
+            "base 落在它的桶内"
+        );
     }
 
     #[test]

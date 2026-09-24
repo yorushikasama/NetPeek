@@ -170,8 +170,7 @@ pub fn read_background_image(app: AppHandle, path: String) -> Result<String, Str
     let bg_dir = data_dir(&app)?.join(BG_DIR);
     // canonicalize 解析 .. 与符号链接，杜绝用 ..\..\ 逃逸出背景目录。
     let canon_dir = fs::canonicalize(&bg_dir).map_err(|e| format!("定位背景目录失败: {e}"))?;
-    let canon_path =
-        fs::canonicalize(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
+    let canon_path = fs::canonicalize(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
     if !canon_path.starts_with(&canon_dir) {
         return Err("背景图路径越界，拒绝读取".into());
     }

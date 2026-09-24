@@ -41,7 +41,9 @@ pub(crate) fn notify_visibility(app: &tauri::AppHandle, label: &str, visible: bo
 /// SQLite 历史库自带事务，不走这里；这条只给 settings.json / theme-config.json / 背景图用。
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
-    let dir = path.parent().ok_or_else(|| "目标路径无父目录".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "目标路径无父目录".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
     let tmp = path.with_file_name(format!(
         "{}.{}.tmp",
@@ -152,7 +154,12 @@ fn spawn_tray_sync(app: tauri::AppHandle) {
 /// 回执永远不会来 —— 直接自锁，界面冻死。同步线程、pipe 线程都是安全的。
 fn sync_tray(app: &tauri::AppHandle) {
     let state = app.state::<TrayState>();
-    let Some(items) = state.items.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+    let Some(items) = state
+        .items
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
         return; // 菜单项还没注册（setup 早期）
     };
 
@@ -384,7 +391,10 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &mini, &pause, &quit])?;
 
             // 菜单项交给共享状态，后台同步线程才改得到文案。
-            *app.state::<TrayState>().items.lock().unwrap_or_else(|e| e.into_inner()) = Some(TrayItems {
+            *app.state::<TrayState>()
+                .items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(TrayItems {
                 main: show.clone(),
                 mini: mini.clone(),
                 pause: pause.clone(),

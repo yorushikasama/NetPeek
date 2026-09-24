@@ -245,7 +245,11 @@ pub fn load_settings(app: AppHandle) -> Result<String, String> {
     // 窗口页面可能在 setup 完成前就 invoke（如 visible 的窗口提前加载），
     // 此时 state 尚未 manage：回退到文件/默认值，不 panic。
     let inner = match app.try_state::<SettingsState>() {
-        Some(state) => state.inner.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        Some(state) => state
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
         None => {
             let path = data_dir(&app)?.join(SETTINGS_FILE);
             merged_with_defaults(read_settings_file(&path))
@@ -286,8 +290,8 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
     }
 
     let path = data_dir(&app)?.join(SETTINGS_FILE);
-    let pretty = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("设置序列化失败: {e}"))?;
+    let pretty =
+        serde_json::to_string_pretty(&value).map_err(|e| format!("设置序列化失败: {e}"))?;
     // 原子落盘：写一半崩溃会让 settings.json 变半截 JSON，下次加载解析失败即静默回退默认值。
     crate::write_atomic(&path, pretty.as_bytes()).map_err(|e| format!("保存设置失败: {e}"))?;
 
@@ -318,7 +322,11 @@ pub fn set_country_db(app: AppHandle, path: String) -> Result<String, String> {
         crate::geo::probe(std::path::Path::new(trimmed))?;
     }
     let mut value = match app.try_state::<SettingsState>() {
-        Some(state) => state.inner.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        Some(state) => state
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
         None => merged_with_defaults(read_settings_file(&data_dir(&app)?.join(SETTINGS_FILE))),
     };
     value["countryDbPath"] = serde_json::Value::String(trimmed.to_string());
