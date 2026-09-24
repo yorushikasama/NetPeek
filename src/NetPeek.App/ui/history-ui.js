@@ -678,7 +678,14 @@
     // 表头跟着粒度走：按小时档第一列是「2026-09-16T08」，仍写「日期」会让人
     // 以为一天一行、把 24 行读成 24 天。
     const header = unit === 'hour' ? '小时,应用,下载字节,上传字节' : '日期,应用,下载字节,上传字节';
-    const lines = exportRows.map((r) => `${r.slot},"${String(r.name).replace(/"/g, '""')}",${r.down},${r.up}`);
+    // 进程名不可信：以 = + - @ 或制表/回车开头的单元格会被 Excel/Sheets 当公式执行
+    // （CSV 公式注入）。前置单引号让它当纯文本，再做标准的双引号转义。
+    const csvCell = (v) => {
+      let s = String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const lines = exportRows.map((r) => `${r.slot},${csvCell(r.name)},${r.down},${r.up}`);
     const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
     // 文件名说清导出的到底是哪一段：单格给槽位，多格给起止，预设档给天数。
     // 小时槽位里的 T 换成下划线 —— 「…-08T00_…-12T00」读起来像两个文件名。
@@ -991,9 +998,14 @@
       }
       const keys = dayKeys(n);
       const perDay = new Map(keys.map((k) => [k, 0]));
+      // 未归因流量在库里 name 是空串，而选中它时传入的是 unattrName()（如「(系统/未归因)」）。
+      // 两侧都把空串归一到 unattrName()，否则精确比对永不相等，未归因选中项的 30 天图会全 0
+      //（与近 24 小时列 buildDay24 的口径对齐）。
+      const unattr = unattrName().toLowerCase();
       const key = name ? String(name).toLowerCase() : null;
       for (const r of source) {
-        if (key && String(r.name).toLowerCase() !== key) continue;
+        const rn = r.name ? String(r.name).toLowerCase() : unattr;
+        if (key && rn !== key) continue;
         if (perDay.has(r.slot)) perDay.set(r.slot, perDay.get(r.slot) + r.down);
       }
       return keys.map((k) => ({ key: k, label: labelOf(k), value: perDay.get(k) }));

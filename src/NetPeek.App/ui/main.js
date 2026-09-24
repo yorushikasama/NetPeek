@@ -987,7 +987,10 @@ function renderSortMarks() {
   for (const th of document.querySelectorAll('.proc-table th[data-sort]')) {
     const on = th.dataset.sort === sortKey;
     th.classList.toggle('is-sorted', on);
-    th.querySelector('.sort-mark').innerHTML = on ? icon(sortDir === -1 ? 'caret-down' : 'caret-up') : '';
+    // 防御性判空：reportMissingIds 只校验元素 id，不保证每个可排序表头都带 .sort-mark 子节点；
+    // 缺了就跳过而不是让整次排序渲染抛 TypeError。
+    const mark = th.querySelector('.sort-mark');
+    if (mark) mark.innerHTML = on ? icon(sortDir === -1 ? 'caret-down' : 'caret-up') : '';
     // 读屏用户靠 aria-sort 知道当前按哪列、什么方向排序，光标图形它读不到
     th.setAttribute('aria-sort', on ? (sortDir === -1 ? 'descending' : 'ascending') : 'none');
   }

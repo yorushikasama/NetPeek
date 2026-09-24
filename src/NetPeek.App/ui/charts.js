@@ -349,7 +349,10 @@
   function splitData(values, pad, slots, df, dashedHalf) {
     const out = new Array(slots).fill(null);
     for (let i = 0; i < values.length; i++) {
-      if ((i >= df) === dashedHalf) out[pad + i] = values[i];
+      // 边界点 df 同时落进实线(i<=df)和虚线(i>=df)两个 series：两段共享这个点，
+      // 虚线段的头才压得住实线段的尾，消除接缝处 connectNulls:false 造成的 1px 断裂。
+      const keep = dashedHalf ? i >= df : i <= df;
+      if (keep) out[pad + i] = values[i];
     }
     return out;
   }
