@@ -490,5 +490,18 @@
     return window.NetPeekCommon ? window.NetPeekCommon.escapeHtml(s) : String(s);
   }
 
-  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate };
+  // 释放所有实例：ECharts 实例与其 ResizeObserver 按固定的容器元素集常驻，
+  // 页面卸载（Tauri 窗口关闭 / 重载）时显式拆掉，避免观察者与 canvas 悬挂到下个生命周期。
+  function disposeAll() {
+    for (const entry of registry.values()) {
+      try { if (entry.ro) entry.ro.disconnect(); } catch {}
+      try { if (entry.chart) entry.chart.dispose(); } catch {}
+    }
+    registry.clear();
+  }
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', disposeAll, { once: true });
+  }
+
+  window.NetPeekCharts = { line, bars, rgba, cssVar, axisBytes, axisRate, disposeAll };
 })();

@@ -519,26 +519,50 @@ internal static class WebView2Runtime
     }
 
     /// 校验 EXE 具备有效的 Authenticode 签名且签名者为 Microsoft。
-    /// 只用 X509 链校验 + 签名者主题名判定：WinVerifyTrust 更权威但需大段 P/Invoke，
-    /// 这里的目标是挡掉「下载被替换成任意 EXE」，链有效 + 签名者是微软已足够。
+    /// 用系统权威的 WinVerifyTrust（WINTRUST_ACTION_GENERIC_VERIFY_V2）做完整信任校验 ——
+    /// 链、时间戳、以及吊销状态都按系统策略走，比旧实现（X509Chain + RevocationMode.NoCheck +
+    /// 主题子串匹配，吊销但仍能建链的证书会误放）严格得多。WinVerifyTrust 通过后再取签名者
+    /// 证书确认主题含「Microsoft Corporation」，挡掉「签名有效但签发者不是微软」的替换件。
     private static void VerifyMicrosoftSignature(string filePath)
     {
-        System.Security.Cryptography.X509Certificates.X509Certificate2 signer;
+        // 1) 先走 WinVerifyTrust，吊销检查覆盖整条链。
+        var status = NativeTrust.VerifyFile(filePath, checkRevocation: true);
+
+        // 吊销状态联网拿不到（离线环境 / OCSP 不可达）时不致命：链与签名本身已校验，
+        // 退回「不查吊销」再校一次，避免离线安装被误伤。但**明确吊销**（CERT_E_REVOKED）
+        // 绝不放行 —— 那正是旧实现漏掉、本次要堵上的口子。
+        if (status == NativeTrust.CERT_E_REVOCATION_FAILURE
+            || status == NativeTrust.CRYPT_E_REVOCATION_OFFLINE)
+        {
+            status = NativeTrust.VerifyFile(filePath, checkRevocation: false);
+        }
+
+        if (status != 0)
+        {
+            try { File.Delete(filePath); } catch { }
+            throw new InvalidOperationException(
+                "WebView2 引导器数字签名校验失败（可能是下载被篡改或证书被吊销，错误码 0x" +
+                status.ToString("X8") + "），已拒绝执行。请从 " +
+                "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。");
+        }
+
+        // 2) 签名可信，再确认签名者确为 Microsoft（WinVerifyTrust 只保证「某个受信证书签的」，
+        //    不保证是谁；不查这一步，任意受信 CA 签的 EXE 都能过）。
+        string subject;
         try
         {
-            // 从已签名文件取出签名者证书。文件未签名时会抛异常。
             var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(filePath);
-            signer = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
+            using var signer = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
+            subject = signer.Subject;
         }
         catch (Exception ex)
         {
             try { File.Delete(filePath); } catch { }
             throw new InvalidOperationException(
-                "WebView2 引导器缺少有效数字签名，已拒绝执行（可能是下载被篡改）。请从 " +
+                "WebView2 引导器无法读取签名者证书，已拒绝执行。请从 " +
                 "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。内部信息：" + ex.Message);
         }
 
-        var subject = signer.Subject;
         if (subject.IndexOf("Microsoft Corporation", StringComparison.OrdinalIgnoreCase) < 0)
         {
             try { File.Delete(filePath); } catch { }
@@ -546,16 +570,101 @@ internal static class WebView2Runtime
                 "WebView2 引导器签名者不是 Microsoft（实为：" + subject + "），已拒绝执行。请从 " +
                 "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。");
         }
+    }
 
-        // 校验证书链有效（吊销状态联网检查失败时不致命，避免离线环境误伤，但链本身必须可建）。
-        using var chain = new System.Security.Cryptography.X509Certificates.X509Chain();
-        chain.ChainPolicy.RevocationMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck;
-        if (!chain.Build(signer))
+    /// WinVerifyTrust 的最小 P/Invoke 封装：只做「文件 Authenticode 是否可信」这一件事。
+    private static class NativeTrust
+    {
+        // WinVerifyTrust 可能返回的部分状态码（HRESULT）。
+        internal const uint CERT_E_REVOCATION_FAILURE = 0x800B010E;
+        internal const uint CRYPT_E_REVOCATION_OFFLINE = 0x80092013;
+
+        private static readonly Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 =
+            new("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+
+        private const uint WTD_UI_NONE = 2;
+        private const uint WTD_REVOKE_NONE = 0;
+        private const uint WTD_REVOKE_WHOLECHAIN = 1;
+        private const uint WTD_CHOICE_FILE = 1;
+        private const uint WTD_STATEACTION_VERIFY = 1;
+        private const uint WTD_STATEACTION_CLOSE = 2;
+        private const uint WTD_REVOCATION_CHECK_CHAIN = 0x00000040;
+
+        internal static uint VerifyFile(string path, bool checkRevocation)
         {
-            try { File.Delete(filePath); } catch { }
-            throw new InvalidOperationException(
-                "WebView2 引导器证书链校验失败，已拒绝执行。请从 " +
-                "https://developer.microsoft.com/microsoft-edge/webview2 手动安装 Evergreen Runtime。");
+            var fileInfo = new WINTRUST_FILE_INFO
+            {
+                cbStruct = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(),
+                pcwszFilePath = path,
+                hFile = IntPtr.Zero,
+                pgKnownSubject = IntPtr.Zero,
+            };
+
+            var pFile = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
+            try
+            {
+                Marshal.StructureToPtr(fileInfo, pFile, false);
+                var data = new WINTRUST_DATA
+                {
+                    cbStruct = (uint)Marshal.SizeOf<WINTRUST_DATA>(),
+                    pPolicyCallbackData = IntPtr.Zero,
+                    pSIPClientData = IntPtr.Zero,
+                    dwUIChoice = WTD_UI_NONE,
+                    fdwRevocationChecks = checkRevocation ? WTD_REVOKE_WHOLECHAIN : WTD_REVOKE_NONE,
+                    dwUnionChoice = WTD_CHOICE_FILE,
+                    pFile = pFile,
+                    dwStateAction = WTD_STATEACTION_VERIFY,
+                    hWVTStateData = IntPtr.Zero,
+                    pwszURLReference = IntPtr.Zero,
+                    dwProvFlags = checkRevocation ? WTD_REVOCATION_CHECK_CHAIN : 0,
+                    dwUIContext = 0,
+                    pSignatureSettings = IntPtr.Zero,
+                };
+
+                var action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+                var result = WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+
+                // 无论结果如何都要以 CLOSE 收尾，释放 WinVerifyTrust 分配的状态数据。
+                data.dwStateAction = WTD_STATEACTION_CLOSE;
+                WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+
+                return unchecked((uint)result);
+            }
+            finally
+            {
+                Marshal.DestroyStructure<WINTRUST_FILE_INFO>(pFile);
+                Marshal.FreeHGlobal(pFile);
+            }
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = false)]
+        private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WINTRUST_DATA pWVTData);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WINTRUST_FILE_INFO
+        {
+            public uint cbStruct;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WINTRUST_DATA
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+            public IntPtr pSignatureSettings;
         }
     }
 }

@@ -27,6 +27,14 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     /// <summary>连续多少帧（约每秒一帧）无流量且进程已退出后，从字典移除该 PID。</summary>
     private const int PruneAfterSnapshots = 30;
 
+    /// <summary>
+    /// 无 UI 连接时的字典维护周期（毫秒）。剪枝只发生在 <see cref="GetSnapshot"/>（仅在有
+    /// 客户端连着时被管道线程调用）；服务常驻而 UI 长时间不连时，ETW 回调仍不断为新 PID
+    /// 建计数项而无人清理，字典会随「曾经收发过的 PID 总数」单调增长。这个低频定时器补上
+    /// 那段真空：直接按进程存活性剪掉已退出的 PID（口径与 GetSnapshot 的 !Alive 剪枝一致）。
+    /// </summary>
+    private const int MaintenanceIntervalMs = 60_000;
+
     private const string SessionName = "NetPeek.Collector";
 
     private readonly ILogger<EtwSnapshotSource> _logger;
@@ -115,6 +123,15 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     private readonly object _retryTimerGate = new();
     private Timer? _retryTimer;
 
+    // 会话生命周期锁：让 StartSession「查 _disposed + 认领 _session/事件线程」与 Dispose
+    // 「置 _disposed + 读走并清空 _session」这两小段互斥。不加锁时二者能在「查到未 Dispose」
+    // 与「赋值 _session」之间交错 —— Dispose 读到旧值走人，重试线程随后认领的会话与事件线程
+    // 就成了没人停的孤儿（内核会话残留到下次启动清理）。建会话是慢操作，刻意留在锁外。
+    private readonly object _sessionGate = new();
+
+    // 无 UI 连接期间清理已退出 PID 的低频维护定时器（见 MaintenanceIntervalMs / PruneDeadCounters）。
+    private Timer? _maintenanceTimer;
+
     // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
     private int _cachedEventsLost;
     private long _lastEventsLostReadMs;
@@ -173,6 +190,42 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             Name = "NetPeek.ETW.Start",
         };
         _startThread.Start();
+
+        // 无 UI 连接时也要给 _counters 剪枝（GetSnapshot 只在有客户端时才跑），否则常驻
+        // 服务的字典会随曾收发过的 PID 数无界增长。低频、按存活性剪，见 MaintenanceIntervalMs。
+        _maintenanceTimer = new Timer(_ => PruneDeadCounters(), null, MaintenanceIntervalMs, MaintenanceIntervalMs);
+    }
+
+    /// <summary>
+    /// 剪掉已退出进程的计数项。GetSnapshot 的每帧剪枝依赖「有客户端连着、每秒一帧」，
+    /// UI 长时间不连时那条路径根本不跑；这里由维护定时器兜底，口径与之一致（只删已退出的
+    /// PID）。存活性用一次 PROCESS_QUERY_LIMITED_INFORMATION 句柄判定（服务以 LocalSystem
+    /// 运行，几乎能打开任何存活进程），不触碰 ProcessMetadataCache 的加锁状态，线程安全。
+    /// PID 复用：句柄能开 = 该 PID 现在活着（可能是新进程），保留计数，交给 GetSnapshot 的
+    /// 复用检测在下次连接时按启动时间重置。PID 0/4（Idle/System）不动。
+    /// </summary>
+    private void PruneDeadCounters()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var pid in _counters.Keys)
+            {
+                if (pid > 4 && !ProcessMetadataCache.IsProcessAlive(pid))
+                {
+                    _counters.TryRemove(pid, out _);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 维护是尽力而为，绝不能让定时器回调里的意外异常升级成进程级崩溃。
+            _logger.LogWarning(ex, "计数字典维护剪枝异常");
+        }
     }
 
     private void StartSession()
@@ -215,26 +268,39 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             parser.TcpIpRetransmitIPV6 += OnRetransmitV6;
             // 刻意不订阅 TcpIpTCPCopy / TcpIpTCPCopyIPV6（Event ID 18），避免下载量翻倍。
 
-            // 建会话期间可能已经 Dispose 了（服务启动到立刻停止、或启动超过 Dispose
-            // 的 3s join 上限）。此时 Dispose 早已把 _session 读空走人，这个会话没人
-            // 会再去停 —— ETW 会话是内核对象，进程退出也不消失，会以残留会话留到
-            // 下次启动。所以在赋值前自查一次，是自己建的就自己拆掉，别赋值也别起线程。
-            if (_disposed)
+            // 认领会话必须与 Dispose 的「置 _disposed + 读走 _session」互斥（见 _sessionGate）。
+            // 建会话是慢操作（含残留清理，实测 0.3–2.4s），刻意放在锁外；只有这一小段进锁。
+            bool adopted;
+            lock (_sessionGate)
             {
+                if (_disposed)
+                {
+                    adopted = false;
+                }
+                else
+                {
+                    _session = session;
+                    _processThread = new Thread(() => ProcessEvents(session))
+                    {
+                        IsBackground = true,
+                        Name = "NetPeek.ETW",
+                    };
+                    _processThread.Start();
+                    _state = SessionState.Running;
+                    adopted = true;
+                }
+            }
+
+            if (!adopted)
+            {
+                // 建会话期间已 Dispose：这个会话没人会再去停 —— ETW 会话是内核对象，进程退出
+                // 也不消失，会以残留会话留到下次启动（StartSession 开头那段清理正是为它准备的）。
+                // 自己建的自己拆掉，别赋值也别起线程。
                 session.Stop();
                 session.Dispose();
                 return;
             }
 
-            _session = session;
-            _processThread = new Thread(() => ProcessEvents(session))
-            {
-                IsBackground = true,
-                Name = "NetPeek.ETW",
-            };
-            _processThread.Start();
-
-            _state = SessionState.Running;
             ClearRetryTimer();
             _logger.LogInformation("ETW 会话已启动：{Session}", SessionName);
         }
@@ -302,6 +368,15 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         {
             _state = SessionState.Failed;
             _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止，{Seconds} 秒后重试。", RetryIntervalMs / 1000);
+
+            // 这个会话的分发线程已经死了，会话对象不可能再产出事件：显式停掉并释放。
+            // 不这么做的话，下面的自愈重试会在 StartSession 里把 _session 覆写成新会话，
+            // 崩掉的这个托管会话对象就再没人释放（内核会话靠残留清理兜底，托管句柄泄漏）。
+            try { session.Stop(); } catch { /* 会话可能已被外部停掉 */ }
+            try { session.Dispose(); } catch { /* 忽略释放失败 */ }
+            // 仅当 _session 仍指向这个崩掉的会话时才清空：重试线程或 Dispose 可能已把
+            // _session 换成新会话，CompareExchange 保证不误清别人的引用。
+            Interlocked.CompareExchange(ref _session, null, session);
 
             // 武装自愈定时器：分发线程一旦抛异常（一个畸形事件、会话被外部停掉等）就
             // 整个退出，若不在这里重排程，采集会永久停到进程重启为止 —— 而重试此前
@@ -859,14 +934,27 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             return;
         }
 
-        _disposed = true;
+        // 置位 + 读走会话/事件线程必须与 StartSession 的认领互斥（见 _sessionGate）：否则建会话
+        // 期间的重试可能在本方法读空 _session 之后才认领，留下没人停的孤儿会话与事件线程。
+        // 只有这一小段进锁；下面的 join / Stop / Dispose 是慢操作，放锁外用快照做。
+        TraceEventSession? session;
+        Thread? thread;
+        lock (_sessionGate)
+        {
+            _disposed = true;
+            session = _session;
+            _session = null;
+            thread = _processThread;
+            _processThread = null;
+        }
         _state = SessionState.Failed;
 
-        // 必须先等启动线程收工，再去停会话。会话现在是后台建的，如果这里先把
-        // _session 读空、启动线程随后才 new TraceEventSession 并赋值，那个会话就
-        // 没人停了 —— ETW 会话是内核对象，进程退出也不会自动消失，只会以「残留
-        // 会话」的形式留到下次启动（StartSession 开头那段清理正是为它准备的）。
-        // _disposed 已置位，启动线程建完会自查并自行拆掉，这里只需等它走完。
+        // 维护定时器先停：无参 Dispose 不阻塞在途回调，但 _disposed 已置位使 PruneDeadCounters 立即返回。
+        _maintenanceTimer?.Dispose();
+        _maintenanceTimer = null;
+
+        // 等启动线程收工。_disposed 已置位，它建完会在 _sessionGate 内自查（adopted=false）
+        // 自行拆掉刚建的会话 —— 本方法读空 _session 与它认领已由锁串行化，不会漏拆。
         var starter = _startThread;
         _startThread = null;
         if (starter != null && starter.IsAlive && starter != Thread.CurrentThread)
@@ -874,13 +962,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             starter.Join(TimeSpan.FromSeconds(3));
         }
 
-        // 经锁清空：此刻 _processThread（ETW 事件线程）尚未 Join（在本方法末尾才收），
-        // 它异常退出时仍可能走 ArmRetryTimer；_disposed 已置位使其不再新建，ClearRetryTimer
-        // 与之串行化，保证不会有「刚清空又被武装」的漏网定时器。
+        // _processThread（ETW 事件线程）异常退出时仍可能走 ArmRetryTimer；_disposed 已置位
+        // 使其不再新建，ClearRetryTimer 与之串行化，保证不会有「刚清空又被武装」的漏网定时器。
         ClearRetryTimer();
 
-        var session = _session;
-        _session = null;
         if (session != null)
         {
             try
@@ -902,8 +987,6 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             }
         }
 
-        var thread = _processThread;
-        _processThread = null;
         if (thread != null && thread.IsAlive && thread != Thread.CurrentThread)
         {
             thread.Join(TimeSpan.FromSeconds(2));

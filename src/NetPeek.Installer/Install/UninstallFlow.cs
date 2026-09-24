@@ -88,14 +88,14 @@ internal sealed class UninstallFlow
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Defs.AppDataDirName);
             if (Directory.Exists(appData))
             {
-                Directory.Delete(appData, recursive: true);
+                SafeDeleteDir(appData);
                 notes.Add("已清除全部数据（历史/设置/缓存）");
             }
             var localData = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Defs.AppDataDirName);
             if (Directory.Exists(localData))
             {
-                Directory.Delete(localData, recursive: true);
+                SafeDeleteDir(localData);
                 notes.Add("已清除 WebView2 缓存");
             }
 
@@ -146,6 +146,22 @@ internal sealed class UninstallFlow
             CreateNoWindow = true,
             UseShellExecute = false,
         });
+    }
+
+    /// 在提权上下文里递归删除用户可写目录前，先挡掉重定向攻击：标准用户能预先把
+    /// %AppData%\NetPeek 造成一个指向 C:\Windows 之类的 junction，天真的递归删除若
+    /// 跟进链接就会删到链接目标。现代 .NET 的递归删除对顶层重解析点本就不跟进（只摘
+    /// 链接），这里再显式兜一层：是重解析点就只非递归摘除链接、绝不进入目标。
+    private static void SafeDeleteDir(string path)
+    {
+        var attr = File.GetAttributes(path);
+        if ((attr & FileAttributes.ReparsePoint) != 0)
+        {
+            Directory.Delete(path, recursive: false);
+            SetupLog.Write("检测到重解析点，仅移除链接不删目标：" + path);
+            return;
+        }
+        Directory.Delete(path, recursive: true);
     }
 
     private static string? ReadInstallLocation()

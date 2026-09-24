@@ -34,6 +34,37 @@ pub(crate) fn notify_visibility(app: &tauri::AppHandle, label: &str, visible: bo
     );
 }
 
+/// 原子落盘：先写到同目录下的临时文件（名字带进程号，避免并发写互相覆盖），flush + sync
+/// 后再 rename 覆盖目标。rename 在同一卷上是原子替换（Windows 的 MoveFileEx 带
+/// REPLACE_EXISTING），杜绝「写到一半崩溃/断电」把配置截断成半截 JSON —— 那会让下次
+/// 加载解析失败后静默回退默认值（settings）或改名 .corrupt-* 重置（theme），用户配置无声丢失。
+/// SQLite 历史库自带事务，不走这里；这条只给 settings.json / theme-config.json / 背景图用。
+pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let dir = path.parent().ok_or_else(|| "目标路径无父目录".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("cfg"),
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败: {e}"))?;
+        f.write_all(bytes)
+            .map_err(|e| format!("写入临时文件失败: {e}"))?;
+        f.flush().map_err(|e| format!("刷新临时文件失败: {e}"))?;
+        // sync 失败不致命（部分文件系统不支持），但尽力保证 rename 前数据已落盘。
+        let _ = f.sync_all();
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("替换目标文件失败: {e}"))
+        }
+    }
+}
+
 /// 托盘的状态镜像。
 ///
 /// 菜单文案要说真话：窗口开着就该显示「隐藏主界面」，迷你窗开着就该显示
@@ -394,14 +425,18 @@ pub fn run() {
                         // 离线时这一项是置灰的，正常点不到。
                         let new_paused = !app.state::<TrayState>().paused.load(Ordering::SeqCst);
                         let cmd = if new_paused { "pause" } else { "resume" };
-                        // 命令真的送出去了才认这次翻转。送不出去（服务刚退出、
-                        // 管道不可用）就什么都不做 —— 文案保持与真实状态一致，
-                        // 而不是留一个等不到下一帧快照来校正的假状态。
-                        if pipe::send_control(cmd).is_ok() {
-                            app.state::<TrayState>()
-                                .paused
-                                .store(new_paused, Ordering::SeqCst);
-                        }
+                        // send_control 是阻塞的命名管道打开/写/flush（见 pipe.rs）。托盘菜单回调
+                        // 跑在主线程，采集端万一卡住会顶着事件循环；把这段同步 I/O 挪到后台线程。
+                        // 命令真的送出去了才认这次翻转 —— 送不出去（服务刚退出、管道不可用）就
+                        // 什么都不做，文案保持与真实状态一致，而不是留一个等不到下一帧校正的假状态。
+                        let app = (*app).clone();
+                        std::thread::spawn(move || {
+                            if pipe::send_control(cmd).is_ok() {
+                                app.state::<TrayState>()
+                                    .paused
+                                    .store(new_paused, Ordering::SeqCst);
+                            }
+                        });
                     }
                     "quit" => app.exit(0),
                     _ => {}

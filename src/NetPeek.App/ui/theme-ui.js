@@ -399,20 +399,27 @@
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        const max = 512; // 缩到 ≤512px 保证取色速度
-        const scale = Math.min(1, max / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0, w, h);
-        // 顺带留一句已加载的元素引用：ColorThief 从可绘制元素取样，
-        // ImageData 喂不进它的 canvas 路径。取色失败时 tokensFromImage
-        // 自己会走平均色回落，这里不需要为它做额外兜底。
-        stdImgEl = img;
-        resolve(ctx.getImageData(0, 0, w, h));
+        try {
+          const max = 512; // 缩到 ≤512px 保证取色速度
+          const scale = Math.min(1, max / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, w, h);
+          // 顺带留一句已加载的元素引用：ColorThief 从可绘制元素取样，
+          // ImageData 喂不进它的 canvas 路径。取色失败时 tokensFromImage
+          // 自己会走平均色回落，这里不需要为它做额外兜底。
+          stdImgEl = img;
+          resolve(ctx.getImageData(0, 0, w, h));
+        } catch {
+          // getContext 返回 null、drawImage / getImageData 抛错（画布被污染、解码边缘
+          // 情况）时必须 resolve，否则上游 await 永久挂起（ensureImageDraft /
+          // useWallpaper / useBackgroundImage），整条主题初始化卡死无从恢复。
+          resolve(null);
+        }
       };
       img.onerror = () => resolve(null);
       img.src = dataUrl;

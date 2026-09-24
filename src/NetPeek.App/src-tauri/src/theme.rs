@@ -3,7 +3,6 @@
 // 背景图：app_data_dir/backgrounds/<hash>.png（前端传 base64 原图）。
 
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager};
@@ -66,7 +65,8 @@ fn write_config_file(path: &std::path::Path, json: &str) -> Result<(), String> {
     if !value.is_object() {
         return Err("主题配置根节点必须是对象".into());
     }
-    fs::write(path, json).map_err(|e| format!("保存主题配置失败: {e}"))
+    // 原子落盘：写一半崩溃会让配置截断，下次加载解析失败即被改名 .corrupt-* 后重置。
+    crate::write_atomic(path, json.as_bytes()).map_err(|e| format!("保存主题配置失败: {e}"))
 }
 
 /// 配置字节解码：UTF-8（可选 BOM）/ UTF-16LE / UTF-16BE。
@@ -151,9 +151,9 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
     fs::create_dir_all(&bg_dir).map_err(|e| format!("创建背景目录失败: {e}"))?;
     let path = bg_dir.join(&name);
     if !path.exists() {
-        let mut f = fs::File::create(&path).map_err(|e| format!("创建背景文件失败: {e}"))?;
-        f.write_all(&bytes)
-            .map_err(|e| format!("写入背景文件失败: {e}"))?;
+        // 原子落盘：文件名是内容哈希，若写一半崩溃会留下一个「名字合法但内容截断」的文件，
+        // 之后 path.exists() 命中就再也不会重写它 —— 背景图永久损坏。temp+rename 杜绝半截文件。
+        crate::write_atomic(&path, &bytes).map_err(|e| format!("写入背景文件失败: {e}"))?;
     }
     Ok(path.to_string_lossy().into_owned())
 }

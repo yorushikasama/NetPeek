@@ -84,6 +84,15 @@ public sealed class ProcessMetadataCache : IDisposable
     /// <summary>身份表两次清理的最小间隔（毫秒）。</summary>
     private const long IdentitySweepIntervalMs = 30_000;
 
+    /// <summary>
+    /// 一条「还没收到退出事件」（StoppedAtMs=0）的身份，最多保留多久就要复核一次存活性（毫秒）。
+    /// ProcessStop 事件可能因 ETW 丢事件而丢失，那样 StoppedAtMs 永远是 0，只靠宽限期清理的
+    /// 逻辑（只清 StoppedAtMs!=0）永远清不到它 —— 进程早退了条目却滞留到 PID 被复用为止。
+    /// 超过这个时长仍未收到退出事件的条目，在清理时开一次句柄核实：确已退出就直接移除。
+    /// 取值远大于宽限期，短命进程「创建即抓、留一段供迟到帧查」的语义完全不受影响。
+    /// </summary>
+    private const long IdentityRecheckAfterMs = 300_000;
+
     private readonly Dictionary<uint, Entry> _cache = new();
     private readonly object _gate = new();
     private readonly long _ttlMs;
@@ -97,7 +106,7 @@ public sealed class ProcessMetadataCache : IDisposable
     private readonly ConcurrentDictionary<uint, IdentityEntry> _identities = new();
     private long _lastIdentitySweepMs;
 
-    private sealed record IdentityEntry(string Name, string Path, long StartTimeUtcFileTime, long StoppedAtMs);
+    private sealed record IdentityEntry(string Name, string Path, long StartTimeUtcFileTime, long StoppedAtMs, long RecordedAtMs);
 
     /// <summary>一条待解析的进程生命周期事件（入队自 ETW 回调，消费在后台解析线程）。</summary>
     private readonly record struct ProcEvent(bool IsStart, uint Pid, string Image, DateTime EventTimeUtc);
@@ -258,8 +267,9 @@ public sealed class ProcessMetadataCache : IDisposable
             }
         }
 
-        _identities[pid] = new IdentityEntry(name, path, startTime, 0);
-        SweepIdentities(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _identities[pid] = new IdentityEntry(name, path, startTime, 0, nowMs);
+        SweepIdentities(nowMs);
     }
 
     /// <summary>
@@ -585,7 +595,7 @@ public sealed class ProcessMetadataCache : IDisposable
         }
     }
 
-    /// <summary>清理已退出且超过宽限期的身份条目。只从 RecordStart 调用（ETW 回调线程），按间隔限流。</summary>
+    /// <summary>清理已退出且超过宽限期的身份条目。只从 RecordStart 调用（后台解析线程），按间隔限流。</summary>
     private void SweepIdentities(long now)
     {
         if (now - _lastIdentitySweepMs < IdentitySweepIntervalMs)
@@ -596,11 +606,39 @@ public sealed class ProcessMetadataCache : IDisposable
 
         foreach (var (pid, e) in _identities)
         {
-            if (e.StoppedAtMs != 0 && now - e.StoppedAtMs > IdentityGraceMs)
+            if (e.StoppedAtMs != 0)
             {
+                // 正常路径：收到过退出事件，宽限期一过即清。
+                if (now - e.StoppedAtMs > IdentityGraceMs)
+                {
+                    _identities.TryRemove(pid, out _);
+                }
+            }
+            else if (now - e.RecordedAtMs > IdentityRecheckAfterMs && !IsProcessAlive(pid))
+            {
+                // 丢失退出事件的兜底：长时间没收到 Stop 且句柄核实进程确已退出，直接清。
+                // 复核放在「超过复核时长」之后，短命进程刚记下的条目（age≈0）不会被误伤，
+                // 长命存活进程句柄能开、判活保留，只有真·漏了 Stop 的死条目会被收走。
                 _identities.TryRemove(pid, out _);
             }
         }
+    }
+
+    /// <summary>
+    /// 进程是否存活：开一次 PROCESS_QUERY_LIMITED_INFORMATION 句柄即判定，不读虚拟内存、
+    /// 无重试、无共享状态，线程安全。服务以 LocalSystem 运行，该最小权限几乎能打开任何
+    /// 存活进程（含受保护进程），误判为「已退出」的概率极低。PID 被复用时句柄开的是新进程，
+    /// 同样返回存活 —— 调用方据此保留条目，交由各自的复用检测处理。
+    /// </summary>
+    public static bool IsProcessAlive(uint pid)
+    {
+        var handle = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero)
+        {
+            return false;
+        }
+        NativeMethods.CloseHandle(handle);
+        return true;
     }
 
     /// <summary>

@@ -288,7 +288,8 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
     let path = data_dir(&app)?.join(SETTINGS_FILE);
     let pretty = serde_json::to_string_pretty(&value)
         .map_err(|e| format!("设置序列化失败: {e}"))?;
-    std::fs::write(&path, pretty).map_err(|e| format!("保存设置失败: {e}"))?;
+    // 原子落盘：写一半崩溃会让 settings.json 变半截 JSON，下次加载解析失败即静默回退默认值。
+    crate::write_atomic(&path, pretty.as_bytes()).map_err(|e| format!("保存设置失败: {e}"))?;
 
     if let Some(state) = app.try_state::<SettingsState>() {
         *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();

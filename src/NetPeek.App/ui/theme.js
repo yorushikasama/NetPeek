@@ -1707,6 +1707,9 @@ async function aiGenerate(provider, imgDataUrl) {
     throw new Error('未配置 AI 提供方（endpoint / API key / model）');
   }
   const url = provider.endpoint.replace(/\/$/, '');
+  // AI 端点由用户自配，卡住的连接会让「AI 生成中…」永久转圈且无从取消：加 60s 超时中止。
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 60_000);
   const res = await fetch(`${url}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
@@ -1727,7 +1730,8 @@ async function aiGenerate(provider, imgDataUrl) {
         ],
       }],
     }),
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(abortTimer));
   if (!res.ok) throw new Error(`AI 请求失败 HTTP ${res.status}`);
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || '';
