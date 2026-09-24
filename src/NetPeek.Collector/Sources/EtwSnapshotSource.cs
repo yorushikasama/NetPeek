@@ -108,6 +108,11 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     // ETW 启动失败的自动重试：系统启动早期抢跑、其他分析工具占用内核会话等
     // 瞬时失败只需低频重试即可自愈，不必重启整个服务。
     private const int RetryIntervalMs = 30_000;
+    // _retryTimer 由多个线程触碰：启动线程（StartSession 成功清 / 失败武装）、ETW 事件线程
+    // （ProcessEvents 异常武装）、定时器回调线程（RetryStartSession 清）、Dispose 线程。
+    // 全部经 _retryTimerGate 串行化 —— check-then-act 的武装若不加锁，两条路径竞争会各
+    // new 一个 Timer、其中一个引用被覆盖，泄漏一个永不释放的内核定时器。
+    private readonly object _retryTimerGate = new();
     private Timer? _retryTimer;
 
     // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
@@ -230,8 +235,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             _processThread.Start();
 
             _state = SessionState.Running;
-            _retryTimer?.Dispose();
-            _retryTimer = null;
+            ClearRetryTimer();
             _logger.LogInformation("ETW 会话已启动：{Session}", SessionName);
         }
         catch (Exception ex)
@@ -244,17 +248,13 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             _session = null;
 
             // 一次性定时器：每次失败重新排程，成功后清掉。
-            if (!_disposed && _retryTimer == null)
-            {
-                _retryTimer = new Timer(_ => RetryStartSession(), null, RetryIntervalMs, Timeout.Infinite);
-            }
+            ArmRetryTimer();
         }
     }
 
     private void RetryStartSession()
     {
-        _retryTimer?.Dispose();
-        _retryTimer = null;
+        ClearRetryTimer();
 
         if (_disposed || _state == SessionState.Running)
         {
@@ -263,6 +263,28 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
         _logger.LogInformation("重试启动 ETW 会话…");
         StartSession();
+    }
+
+    /// <summary>武装一次性自愈定时器。已 Dispose 或已有排程时不重复武装（check-then-act 须在锁内原子完成）。</summary>
+    private void ArmRetryTimer()
+    {
+        lock (_retryTimerGate)
+        {
+            if (!_disposed && _retryTimer == null)
+            {
+                _retryTimer = new Timer(_ => RetryStartSession(), null, RetryIntervalMs, Timeout.Infinite);
+            }
+        }
+    }
+
+    /// <summary>停掉并清空自愈定时器。Timer 的无参 Dispose 不阻塞，可安全地在其自身回调（RetryStartSession）里调用。</summary>
+    private void ClearRetryTimer()
+    {
+        lock (_retryTimerGate)
+        {
+            _retryTimer?.Dispose();
+            _retryTimer = null;
+        }
     }
 
     /// <summary>
@@ -285,10 +307,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             // 整个退出，若不在这里重排程，采集会永久停到进程重启为止 —— 而重试此前
             // 只在 StartSession 启动失败时武装。与启动失败同一条自愈路径：新建会话、
             // 重开事件线程。已 Dispose 或已有排程时不重复武装。
-            if (!_disposed && _retryTimer == null)
-            {
-                _retryTimer = new Timer(_ => RetryStartSession(), null, RetryIntervalMs, Timeout.Infinite);
-            }
+            ArmRetryTimer();
         }
     }
 
@@ -527,9 +546,13 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                     && meta.StartTimeUtcFileTime != counter.StartTimeUtcFileTime)
                 {
                     _logger.LogInformation("PID {Pid} 被新进程复用，重置计数", pid);
-                    Interlocked.Exchange(ref counter.DownloadTotal, 0);
-                    Interlocked.Exchange(ref counter.UploadTotal, 0);
-                    Interlocked.Exchange(ref counter.RetransmitTotal, 0);
+                    // 减「刚才读到的量」而不是 Exchange 到 0：Read（上面 down/up）与这里之间若有
+                    // ETW 回调 Add 进来，Exchange(0) 会连它一起抹掉（丢字节）。Interlocked.Add(-已读值)
+                    // 只回退已计入旧进程的部分，之后到达的增量留作新进程的起始计数，下一帧成为正增量。
+                    Interlocked.Add(ref counter.DownloadTotal, -down);
+                    Interlocked.Add(ref counter.UploadTotal, -up);
+                    Interlocked.Add(ref counter.RetransmitTotal,
+                        -Interlocked.Read(ref counter.RetransmitTotal));
                     down = 0;
                     up = 0;
                 }
@@ -851,8 +874,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             starter.Join(TimeSpan.FromSeconds(3));
         }
 
-        _retryTimer?.Dispose();
-        _retryTimer = null;
+        // 经锁清空：此刻 _processThread（ETW 事件线程）尚未 Join（在本方法末尾才收），
+        // 它异常退出时仍可能走 ArmRetryTimer；_disposed 已置位使其不再新建，ClearRetryTimer
+        // 与之串行化，保证不会有「刚清空又被武装」的漏网定时器。
+        ClearRetryTimer();
 
         var session = _session;
         _session = null;

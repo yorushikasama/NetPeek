@@ -1,4 +1,6 @@
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -56,7 +58,18 @@ public partial class App : Application
         }
 
         // 到这里的必然是真正干活的提权进程，才轮到它拿互斥锁。
-        _singleInstance = new Mutex(true, @"Global\NetPeek.Setup.Installing", out var createdNew);
+        // 显式 DACL：只授管理员与 SYSTEM 完全控制。防止低权限进程预创建同名 Global 互斥体、
+        // 令提权后的安装器误判「已在运行」而退出（安装/卸载被 DoS）。Global 命名空间本已需
+        // SeCreateGlobalPrivilege，此处再收 DACL 作纵深防御，也把「谁可拥有这把锁」写清楚。
+        var mutexSec = new MutexSecurity();
+        mutexSec.AddAccessRule(new MutexAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            MutexRights.FullControl, AccessControlType.Allow));
+        mutexSec.AddAccessRule(new MutexAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            MutexRights.FullControl, AccessControlType.Allow));
+        _singleInstance = MutexAcl.Create(
+            initiallyOwned: true, @"Global\NetPeek.Setup.Installing", out var createdNew, mutexSec);
         if (!createdNew)
         {
             if (!silent)
