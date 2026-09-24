@@ -15,8 +15,20 @@ internal sealed class UninstallFlow
     {
         try
         {
-            var installDir = ReadInstallLocation() ?? Defs.DefaultInstallDir;
-            installDir = Path.GetFullPath(installDir).TrimEnd('\\');
+            var rawInstallDir = ReadInstallLocation() ?? Defs.DefaultInstallDir;
+            // 下面要对该目录及其子目录（collector、开始菜单组）递归删除。InstallLocation 来自
+            // HKLM，可能被篡改（如改成 C:\），套用安装时同一套校验挡掉盘根/系统目录/shell 元字符；
+            // 校验不过说明这个值不该被递归删除，退回默认安装目录，绝不照它删。
+            string installDir;
+            try
+            {
+                installDir = InstallFlow.ValidateDir(rawInstallDir);
+            }
+            catch
+            {
+                installDir = Path.GetFullPath(Defs.DefaultInstallDir).TrimEnd('\\');
+                SetupLog.Write("InstallLocation 校验未通过，退回默认目录，原值=" + rawInstallDir);
+            }
             var notes = new List<string>();
             SetupLog.Write("卸载开始，安装目录=" + installDir);
 

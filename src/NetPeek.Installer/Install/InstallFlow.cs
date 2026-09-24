@@ -109,7 +109,13 @@ internal sealed class InstallFlow
         // 或在旁边放劫持 DLL，从而提权到 SYSTEM。这里断掉继承、显式收权（SYSTEM/管理员完全控制，
         // Users 只读+执行），使 EXE 即便装在宽松父目录下也不可被普通用户写入。
         HardenDirAcl(InstallDir);
-        Directory.CreateDirectory(Path.Combine(InstallDir, Defs.CollectorRelDir));
+        // 采集器 EXE 以 LocalSystem 运行，其所在目录里任何残留 DLL 都可能被旁路加载提权。
+        // HardenDirAcl 只收紧权限、不会移除已存在的文件，所以这里把采集器子目录清空重建，
+        // 杜绝「安装前预植入恶意 DLL、加固后反被锁在原地一起放行给 SYSTEM 加载」。
+        var collectorDir = Path.Combine(InstallDir, Defs.CollectorRelDir);
+        if (Directory.Exists(collectorDir))
+            Directory.Delete(collectorDir, recursive: true);
+        Directory.CreateDirectory(collectorDir);
         File.WriteAllBytes(Path.Combine(InstallDir, Defs.AppExeName), Payload.Read(Payload.AppResource));
         File.WriteAllBytes(Path.Combine(InstallDir, Defs.CollectorExeRelPath), Payload.Read(Payload.CollectorResource));
 
@@ -328,7 +334,12 @@ internal sealed class InstallFlow
             new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
             FileSystemRights.ReadAndExecute, inherit, PropagationFlags.None, AccessControlType.Allow));
 
-        // Owner/Group 交给 SYSTEM，避免安装者账户对目录保留隐式所有者权限。
+        // Owner 显式设成 SYSTEM：否则若目标目录是被普通用户预先创建/占有的（非默认安装位置），
+        // 原所有者会保留隐式的 READ_CONTROL/WRITE_DAC，加固后仍能改回 DACL 给自己授写、
+        // 替换以 SYSTEM 运行的 collector EXE —— 本地提权。只加 AccessRule 不设 Owner 堵不住这条路。
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        sec.SetOwner(system);
+        sec.SetGroup(system);
         info.SetAccessControl(sec);
     }
 
