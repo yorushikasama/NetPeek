@@ -56,6 +56,17 @@ public sealed class SnapshotControlServer : BackgroundService
                 _logger.LogWarning(ex, "控制管道通信异常，重新监听");
                 await Task.Delay(200, stoppingToken);
             }
+            catch (Exception ex)
+            {
+                // 兜住一切非 IO 的意外（如管道名被抢占时 NamedPipeServerStreamAcl.Create /
+                // WaitForConnectionAsync 抛 UnauthorizedAccessException）。逃出 ExecuteAsync
+                // 会命中默认 BackgroundServiceExceptionBehavior.StopHost，把整个 Host 连同**采集**
+                // 一起拖停 —— 控制通道故障绝不该牵连采集。与 CollectorService 对称处理：记录后
+                // 退避重试；stoppingToken 已取消时 Task.Delay 抛 OCE，被上面的分支或循环条件收口。
+                _logger.LogError(ex, "控制管道意外异常，500ms 后重新监听");
+                try { await Task.Delay(500, stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
         }
 
         _logger.LogInformation("控制管道服务停止");

@@ -141,7 +141,9 @@ internal sealed class UninstallFlow
         {
             args += $" & rd /s /q \"{dir}\"";
         }
-        Process.Start(new ProcessStartInfo("cmd.exe", args)
+        // 绝对路径启动 cmd.exe：UseShellExecute=false 下用裸名会按标准搜索顺序解析（含卸载器
+        // 自身目录与 CWD 优先于 System32），提权进程会被同名 cmd.exe 植入劫持。
+        Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), args)
         {
             CreateNoWindow = true,
             UseShellExecute = false,

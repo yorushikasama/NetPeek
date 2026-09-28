@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 
 namespace NetPeek.Installer;
 
@@ -73,7 +74,7 @@ internal static class Svc
     /// 原始执行：返回真实退出码与合并输出，供需要区分「失败原因」的调用方（WaitStopped）。
     private static (int Code, string Output) RunRaw(string file, string arguments)
     {
-        var psi = new ProcessStartInfo(file, arguments)
+        var psi = new ProcessStartInfo(ResolveSystemExe(file), arguments)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -96,5 +97,16 @@ internal static class Svc
         }
         var output = outTask.GetAwaiter().GetResult() + errTask.GetAwaiter().GetResult();
         return (p.ExitCode, output.Trim());
+    }
+
+    /// 裸名（sc / net）一律解析到 System32 绝对路径再启动。UseShellExecute=false 下用裸名，
+    /// Windows 会按标准搜索顺序解析，而这个顺序把 setup.exe 自身所在目录与当前工作目录排在
+    /// System32 之前——本进程持管理员令牌，攻击者只要在这两处放一个同名 sc.exe/net.exe 就能
+    /// 提权执行（经典安装器二进制植入）。含路径分隔符的入参视为已限定，原样返回。
+    private static string ResolveSystemExe(string file)
+    {
+        if (file.IndexOfAny(new[] { '\\', '/', ':' }) >= 0) return file;
+        var name = file.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? file : file + ".exe";
+        return Path.Combine(Environment.SystemDirectory, name);
     }
 }

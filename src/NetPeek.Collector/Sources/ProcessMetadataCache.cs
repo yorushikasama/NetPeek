@@ -279,6 +279,11 @@ public sealed class ProcessMetadataCache : IDisposable
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+        // 身份清理也从这里驱动（快照线程每帧调用，节奏固定），不再只依赖 RecordStart：
+        // 一批进程起完后若再无新进程启动，仅靠 RecordStart 触发的话已退出条目永不清理。
+        // SweepIdentities 自身按间隔限流 + CAS 抢占，重复调用与跨线程都安全。
+        SweepIdentities(now);
+
         // 事件溯源的身份表优先：它在进程「创建那一刻」就抓下了名字/路径/启动时间，
         // 覆盖短命进程（句柄事后开不出来、快照里也没有的那些）。见 RecordStart。
         if (_identities.TryGetValue(pid, out var id))
@@ -585,14 +590,21 @@ public sealed class ProcessMetadataCache : IDisposable
         }
     }
 
-    /// <summary>清理已退出且超过宽限期的身份条目。只从 RecordStart 调用（ETW 回调线程），按间隔限流。</summary>
+    /// <summary>清理已退出且超过宽限期的身份条目。由 RecordStart（ETW 回调线程）与 Get
+    /// （快照线程，每帧固定节奏）驱动，按间隔限流。两个线程都可能进来，故用 CAS 抢占本轮：
+    /// 只让一个线程真正执行清理，另一个直接返回，避免对 _lastIdentitySweepMs 的非原子读改写
+    /// 竞争。_identities 是 ConcurrentDictionary，枚举期间的并发增删是安全的（弱一致）。</summary>
     private void SweepIdentities(long now)
     {
-        if (now - _lastIdentitySweepMs < IdentitySweepIntervalMs)
+        var last = Interlocked.Read(ref _lastIdentitySweepMs);
+        if (now - last < IdentitySweepIntervalMs)
         {
             return;
         }
-        _lastIdentitySweepMs = now;
+        if (Interlocked.CompareExchange(ref _lastIdentitySweepMs, now, last) != last)
+        {
+            return;
+        }
 
         foreach (var (pid, e) in _identities)
         {

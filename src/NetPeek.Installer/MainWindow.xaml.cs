@@ -126,9 +126,11 @@ public partial class MainWindow : Window
         if (RunNowBox.IsChecked == true && _preview == false)
         {
             // 提权进程直接 Start 子进程会继承管理员令牌；主应用不需要也不该要管理员。
-            // 经 explorer 拉起即以普通用户身份运行。
+            // 经 explorer 拉起即以普通用户身份运行。explorer.exe 在 Windows 目录（非 System32），
+            // 用绝对路径避免裸名按搜索顺序被植入劫持。
             var exe = Path.Combine(_flow!.InstallDir, Defs.AppExeName);
-            Process.Start(new ProcessStartInfo("explorer.exe", "\"" + exe + "\"")
+            var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+            Process.Start(new ProcessStartInfo(explorer, "\"" + exe + "\"")
             {
                 UseShellExecute = true,
             });

@@ -93,8 +93,12 @@ fn describe(mode: &'static str, path: String, meta: &Metadata) -> DbInfo {
 /// Unix 秒 → YYYY-MM-DD（UTC）。为这一个格式化引入 chrono 不值当。
 fn iso_date(epoch: u64) -> String {
     // build_epoch 是 u64 秒。用 try_from 而不是 `as`：`as` 在 2^63 之后会翻成负数，
-    // 直接印出一个公元前的年份，比饱和到上限更难查。
-    let days = i64::try_from(epoch / 86_400).unwrap_or(i64::MAX);
+    // 直接印出一个公元前的年份，比饱和到上限更难查。再 clamp 到合理天数区间：坏/构造过的
+    // 自定义 MMDB 可能给出天文数字的 build_epoch，civil_from_days 里 `days + 719_468`
+    // 在 release(overflow-checks off) 会回绕、debug 会 panic。上限 4_000_000 天≈公元 12920 年。
+    let days = i64::try_from(epoch / 86_400)
+        .unwrap_or(i64::MAX)
+        .clamp(0, 4_000_000);
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }

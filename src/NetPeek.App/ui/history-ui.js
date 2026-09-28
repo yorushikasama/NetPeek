@@ -898,7 +898,7 @@
 
   // 点柱选中某天，点空白处取消（§2.6）
   els.canvas.addEventListener('click', (e) => {
-    if (!hit) return;
+    if (!hit || !buckets.length) return;
     const idx = hit.indexAt(e.clientX);
     selected = idx >= 0 && idx === selected ? -1 : idx;
     drawChart();

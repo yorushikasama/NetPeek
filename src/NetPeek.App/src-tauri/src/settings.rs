@@ -160,9 +160,53 @@ fn apply_country_db(value: &serde_json::Value) -> Result<crate::geo::DbInfo, Str
 }
 
 /// 读 settings.json（不存在或解析失败都返回 None，交给上层补默认值）。
+///
+/// 文件存在但解码/解析失败（截断、二进制损坏、手工改坏、非法编码）时，先把现场
+/// 备份到 `settings.json.corrupt-<时间戳>` 再返回 None —— 否则整份设置会静默回退成
+/// 默认值，其中 retentionDays 从用户选的「永久保留」(0) 变回 30，随后 history 收尾
+/// prune 会永久删掉超过 30 天的历史。备份后用户可找回，且下次 save 写的是全新有效文件。
 fn read_settings_file(path: &std::path::Path) -> Option<serde_json::Value> {
     let bytes = std::fs::read(path).ok()?;
-    parse_settings(&decode_settings_bytes(&bytes)?)
+    match decode_settings_bytes(&bytes).and_then(|text| parse_settings(&text)) {
+        Some(v) => Some(v),
+        None => {
+            backup_corrupt_settings(path);
+            None
+        }
+    }
+}
+
+/// 原子落盘：先写同目录临时文件，再 rename 覆盖目标。Windows 的 `fs::rename` 走
+/// MoveFileEx(REPLACE_EXISTING)，是原子替换；写一半崩溃/断电时目标文件要么是旧内容、
+/// 要么是新内容，绝不会留下半截 JSON。半截文件下次启动会解析失败 → 静默回退默认
+/// (retentionDays 0→30) → prune 永久删史，正是这里要避免的。
+fn atomic_write(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_file_name(format!("{SETTINGS_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).map_err(|e| format!("保存设置失败(写临时文件): {e}"))?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("保存设置失败(替换目标): {e}"))
+        }
+    }
+}
+
+/// 把损坏的设置文件挪走，保留现场供人工找回（与 theme.rs 同套策略）。
+fn backup_corrupt_settings(path: &std::path::Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!("{SETTINGS_FILE}.corrupt-{stamp}"));
+    if let Err(e) = std::fs::rename(path, &backup) {
+        eprintln!("[NetPeek] 设置文件损坏，备份失败（保留原文件）: {e}");
+    } else {
+        eprintln!(
+            "[NetPeek] 设置文件无法解析，已备份到 {}，回退默认值",
+            backup.display()
+        );
+    }
 }
 
 /// 设置文件解码。Windows 上「手工编辑 JSON」自带一串编码坑：
@@ -288,7 +332,7 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
     let path = data_dir(&app)?.join(SETTINGS_FILE);
     let pretty = serde_json::to_string_pretty(&value)
         .map_err(|e| format!("设置序列化失败: {e}"))?;
-    std::fs::write(&path, pretty).map_err(|e| format!("保存设置失败: {e}"))?;
+    atomic_write(&path, &pretty)?;
 
     if let Some(state) = app.try_state::<SettingsState>() {
         *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();

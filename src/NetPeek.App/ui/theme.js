@@ -1429,23 +1429,32 @@ function applyTokens(tokens, opts = {}) {
   const root = document.documentElement;
   const t = tokens;
   const set = (k, v) => root.style.setProperty(k, v);
-  set('--bg', t.bg);
-  set('--panel', t.panel);
-  set('--panel-hi', t.panelHi);
-  set('--panel-2', t.panel2);
-  set('--line', t.line);
-  set('--line-soft', t.lineSoft);
-  set('--text', t.text);
-  set('--text-2', t.text2);
-  set('--text-3', t.text3);
-  set('--down', t.down);
-  set('--up', t.up);
-  set('--ok', t.ok);
-  set('--warn', t.warn);
-  set('--error', t.error);
-  set('--accent', t.accent);
-  set('--accent-ink', t.accentInk);
-  set('--sel-bar', t.selBar);
+  // 颜色令牌逐个校验为 #rrggbb 再落到 CSS 变量：这 17 个变量多处被 styles.css 的
+  // `background:` 简写消费，而 background 简写接受 <image>/url()。加固/自定义/图片皮肤
+  // 的令牌可能来自被手工改坏或投毒的落盘配置，一个 `url(https://…)` 之类的值能通过
+  // setProperty（它只挡 ; 和不配对的花括号），却会在渲染时被塞进 background 触发外连。
+  // 此处是令牌上屏的最后一道 DOM 落点，必须和 guardTokens/fillSwatches 一样卡 hex；
+  // 非法值直接跳过，回退到 tokens.css :root 上的默认色。
+  const setColor = (k, v) => {
+    if (/^#[0-9a-f]{6}$/i.test(String(v || '').trim())) set(k, v);
+  };
+  setColor('--bg', t.bg);
+  setColor('--panel', t.panel);
+  setColor('--panel-hi', t.panelHi);
+  setColor('--panel-2', t.panel2);
+  setColor('--line', t.line);
+  setColor('--line-soft', t.lineSoft);
+  setColor('--text', t.text);
+  setColor('--text-2', t.text2);
+  setColor('--text-3', t.text3);
+  setColor('--down', t.down);
+  setColor('--up', t.up);
+  setColor('--ok', t.ok);
+  setColor('--warn', t.warn);
+  setColor('--error', t.error);
+  setColor('--accent', t.accent);
+  setColor('--accent-ink', t.accentInk);
+  setColor('--sel-bar', t.selBar);
   // 透明窗上的漆层地板（uiPaintFloor）：与令牌同源、同一次上屏写入 —— 它只依赖
   // 这张表（字色 × 面板色 × 皮肤方向），不依赖滑杆位置，所以拖滑杆不必重算，
   // 换肤则必须重算。opts.solo 区分层结构：主窗两层漆、小窗/能量球一层漆

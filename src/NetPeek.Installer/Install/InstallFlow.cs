@@ -252,7 +252,9 @@ internal sealed class InstallFlow
 
     private static void RunMsiexec(string args)
     {
-        using var p = Process.Start(new ProcessStartInfo("msiexec", args)
+        // 绝对路径启动：UseShellExecute=false 下用裸名 "msiexec" 会按标准搜索顺序解析（含
+        // setup.exe 自身目录与 CWD 优先于 System32），提权进程会被同名 EXE 植入劫持。
+        using var p = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "msiexec.exe"), args)
         {
             UseShellExecute = false,
             CreateNoWindow = true,

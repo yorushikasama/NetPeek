@@ -1244,8 +1244,18 @@ function chartOpts(extra) {
   }, extra);
 }
 
-// 暂停时曲线尾巴转虚线，从暂停那一刻的下标开始（§2.8）
-let pausedIndex = -1;
+// 暂停时曲线尾巴转虚线，从暂停那一刻起（§2.8）。存暂停的**时间戳**而非下标：
+// samples 是每秒左移的环形缓冲，定下标会随缓冲滑动而漂移，接缝越跑越偏。
+let pausedT = 0;
+
+// 暂停接缝在某条右对齐（末元素=「现在」）定长曲线上的下标。N = 最新采样时刻 − 暂停时刻
+// （秒），接缝下标 = len-1-N，随缓冲左移自动跟着走。未暂停 / 无采样时返回 -1（全实线）。
+function pauseSeam(len) {
+  if (pausedT <= 0 || !samples.length || len <= 0) return -1;
+  const tLast = samples[samples.length - 1].t;
+  const idx = len - 1 - Math.round(tLast - pausedT);
+  return Math.max(0, Math.min(len - 1, idx));
+}
 
 function drawBandwidth() {
   if (!els.bandwidthChart) return;
@@ -1258,7 +1268,7 @@ function drawBandwidth() {
       { values: samples.map((s) => s.down), color: C.cssVar('--down'), label: '下载' },
       { values: samples.map((s) => s.up), color: C.cssVar('--up'), label: '上传' },
     ],
-    dashFrom: pausedIndex,
+    dashFrom: pauseSeam(samples.length),
   }));
 }
 
@@ -1296,7 +1306,7 @@ function drawProcChart(p) {
       { values: s.down, color: C.cssVar('--down'), label: '下载' },
       { values: s.up, color: C.cssVar('--up'), label: '上传' },
     ],
-    dashFrom: pausedIndex,
+    dashFrom: pauseSeam(s.down.length),
   }));
 }
 
@@ -1362,10 +1372,11 @@ function onSnapshot(snap) {
   rememberIcons(snap);
   pushSamples(snap);
   accumulateToday(snap);
-  // 暂停是从当前这一帧起虚线；恢复后回到全实线
-  pausedIndex = snap.Status === 'paused'
-    ? (pausedIndex >= 0 ? pausedIndex : samples.length - 1)
-    : -1;
+  // 暂停是从当前这一帧起虚线；恢复后回到全实线。记暂停时刻的时间戳（与 samples 的 t 同源），
+  // 而非环形缓冲里的下标 —— 下标会随缓冲每秒左移而漂移，时间戳配 pauseSeam 才钉得住接缝。
+  pausedT = snap.Status === 'paused'
+    ? (pausedT > 0 ? pausedT : ((snap.TimestampUnixMs || Date.now()) / 1000))
+    : 0;
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateService(snap);
   // 窗口隐藏到托盘后不做任何渲染：记账照跑（今日合计、采样缓冲），省掉每秒
   // 一轮的 DOM 更新和 canvas 重画。恢复可见时补一帧，不等下一秒。
