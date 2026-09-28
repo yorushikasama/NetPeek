@@ -1013,14 +1013,10 @@ span.app-badge {
   margin: 2px 0 4px;
 }
 /* 允许折行（原来挂 .truncate 单行截断）：这一行是「PID · 会话 · 重传 · 对端」四段，
-   940 宽时右栏只有 201px 可写，而这行要 469px —— 单行截断的结果是对端整段连同它的
-   国旗一起消失，而对端恰恰是这里最值得看的一项。分隔符 · 两侧本来就能断行，
-   IPv6 字面量断不开，所以补 anywhere。3 行封顶是防跑飞的护栏，不是常态：
-   1280 宽时这行仍然只占一行。 */
-/* 这一行是「PID · 会话 · 重传 · 对端」四段，右栏收到 252 宽（1060 档）时单行要
-   469px、装得下 201px —— 原来挂 .truncate 单行截断，最后一段「对端 …」连同它的
-   国旗整个看不见，而对端恰好是这行里唯一读者会去找的东西。所以改成换行 + 3 行
-   夹断：IPv6 地址没有可断处，overflow-wrap:anywhere 才断得开。 */
+   940 宽时右栏只有 201px 可写、1060 档也才 252px，而这行单行要 469px —— 单行截断
+   的结果是最后一段「对端 …」连同它的国旗整个消失，而对端恰恰是这里读者唯一会去找
+   的一项。分隔符 · 两侧本就能断，IPv6 字面量断不开，所以补 overflow-wrap:anywhere。
+   3 行封顶是防跑飞的护栏，不是常态：1280 宽时这行仍只占一行。 */
 .rc-meta {
   font-size: 12px;
   color: var(--text-2);
@@ -1586,31 +1582,6 @@ input[type="number"]:hover, input[type="date"]:hover {
 .sel-opt:hover, .sel-opt:focus-visible { background: color-mix(in srgb, var(--sel-bar) 12%, transparent); color: var(--text); outline: none; }
 .sel-opt.is-on { color: var(--text); }
 .sel-opt.is-on .ic { visibility: visible; }
-.choices__item--choice {
-  display: flex;
-  align-items: center;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: var(--r-s);
-  color: var(--text-2);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.choices__item--choice.is-highlighted,
-.choices__item--choice:hover {
-  background: color-mix(in srgb, var(--sel-bar) 12%, transparent);
-  color: var(--text);
-}
-.choices__item--choice.is-selected { color: var(--text); font-weight: 500; }
-.choices__item--choice.is-selected::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  flex: none;
-  margin-right: 7px;
-  border-radius: 50%;
-  background: var(--sel-bar);
-}
 
 /* 开关：开态用中性反白（--accent），不用品牌色 */
 .switch { position: relative; width: 36px; height: 20px; flex: none; display: inline-block; }
@@ -1939,14 +1910,6 @@ input[type="number"]:hover, input[type="date"]:hover {
 }
 .slider input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--text);
-  border: 0;
-  cursor: pointer;
-}
-.slider input[type="range"]::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
