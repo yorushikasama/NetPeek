@@ -640,14 +640,11 @@ section('backdropFloor：不耦合全局界面不透明度');
   // 正确分工：floor 只管「面板滑杆 vs 底图」，全局淡出作用于所有漆层。
   const toks = T.SKINS.plain.tokens;
   eq(T.backdropFloor.length, 3, 'backdropFloor 不再收 uiOpacity 参数');
-  eq(T.effectivePanel(toks, 0.5, 0.3, 0.9), T.effectivePanel(toks, 0.5, 0.3, 0.9),
-    'effectivePanel 是纯函数（同样的输入同样的漆）');
   // 贴膜模式没有面板级 backdrop-filter（膜就是表面），模型必须显式关掉透镜 ——
   // 忘了传 null 就会吃到默认透镜，判定比渲染乐观（wrapFloor 里就是传 null 的）。
   const withLens = T.effectivePanel(toks, 0.0, 0.3, 0.3);
   const noLens = T.effectivePanel(toks, 0.0, 0.3, 0.3, undefined, null);
   ok(withLens !== noLens, '贴膜（lens=null）与置底（带透镜）的合成面必须不同');
-  eq(noLens, T.effectivePanel(toks, 0.0, 0.3, 0.3, undefined, null), '关掉透镜后仍是纯函数');
 }
 
 section('旧配置归位：地板时代留下的近实心面板不透明度');

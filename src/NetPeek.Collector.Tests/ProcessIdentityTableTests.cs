@@ -44,8 +44,7 @@ public class ProcessIdentityTableTests
         var meta = cache.Get(pid);
 
         Assert.Equal("curl", meta.Name); // 从事件里的镜像路径收敛出去扩展名的名字
-        Assert.Equal(evt.ToFileTimeUtc(), meta.StartTimeUtcFileTime); // 句柄失败 → 退回事件时间
-        Assert.NotEqual(0, meta.StartTimeUtcFileTime); // 决不是 0（这正是本次要消灭的坑）
+        Assert.Equal(evt.ToFileTimeUtc(), meta.StartTimeUtcFileTime); // 句柄失败 → 退回事件时间（决不是 0，这正是本次要消灭的坑）
         Assert.True(meta.Alive);
     }
 

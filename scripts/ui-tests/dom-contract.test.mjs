@@ -163,13 +163,10 @@ section('格式化实现只有一份');
   // 这条断言防的是「下次改速率单位时又在某个文件里另写一份」。
   for (const js of ['main.js', 'mini.js', 'history-ui.js']) {
     const src = readUi(js);
-    const own = (src.match(/^\s*(?:function\s+)?(?:clampUnit|fmtBytes)\s*\(/gm) || [])
-      .filter((s) => !/=>/.test(s));
     // main.js 里 fmtBytes 是薄包装（一行 return _K.fmtBytes），允许；
     // 但不能出现 clampUnit 或多行档位表。
     ok(!/999\s*\?\s*999/.test(src), `${js} 里没有自己的 clampUnit 实现`);
     ok(!/toFixed\(1\)\}\s*KB/.test(src), `${js} 里没有自己的档位表`);
-    void own;
   }
 }
 

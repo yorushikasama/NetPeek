@@ -1190,8 +1190,7 @@ for (const vp of VIEWPORTS) {
       el.value = '1';
       el.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitForTimeout(250);
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(650);
   }
 
   // ---- 量化探针：溢出 / 越界 / 挤压 ----

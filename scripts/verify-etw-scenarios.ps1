@@ -105,8 +105,7 @@ try {
     Start-Sleep -Seconds 1
 
     $client = Connect-Pipe
-    $snapBefore = Read-Snapshot $client
-    $pidSetBefore = @{}; $snapBefore.Processes | ForEach-Object { $pidSetBefore[$_.Pid] = $true }
+    $snapBefore = Read-Snapshot $client  # 消费一帧做基线；赋值顺便吞掉 ConvertFrom-Json 的管道输出
 
     # 发 50 个 1KB UDP 报文到 127.0.0.1:19001
     $sender = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command',

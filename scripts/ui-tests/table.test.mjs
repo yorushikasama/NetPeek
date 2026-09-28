@@ -485,12 +485,10 @@ section('renderTable 排序变化时就地重排，不重建');
   t.renderTable(snap);
   eq(t.rows.children.map((n) => n.dataset.key.split(':')[1]).join(','), '2,1', '按下载降序：2 在前');
 
-  // 换成升序：同一批节点，顺序应当反过来
-  const nodes = new Map(t.rowNodes);
+  // 换成升序：新建一个升序实例渲染同一批数据，顺序应当反过来
   const t2 = makeRenderTable({ sortDir: 1 });
   t2.renderTable(snap);
   eq(t2.rows.children.map((n) => n.dataset.key.split(':')[1]).join(','), '1,2', '升序：1 在前');
-  ok(nodes.size === 2, '前一次的节点表仍完整（重排不牵动节点身份）');
 }
 
 section('renderTable 过滤清空后行全删');

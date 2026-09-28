@@ -86,6 +86,5 @@ public class ProtocolTests
         var json = JsonSerializer.Serialize(snapshot);
 
         Assert.DoesNotContain("null", json);
-        Assert.DoesNotContain("\"Processes\":null", json);
     }
 }
