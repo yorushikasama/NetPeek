@@ -1429,12 +1429,9 @@ function applyTokens(tokens, opts = {}) {
   const root = document.documentElement;
   const t = tokens;
   const set = (k, v) => root.style.setProperty(k, v);
-  // 颜色令牌逐个校验为 #rrggbb 再落到 CSS 变量：这 17 个变量多处被 styles.css 的
-  // `background:` 简写消费，而 background 简写接受 <image>/url()。加固/自定义/图片皮肤
-  // 的令牌可能来自被手工改坏或投毒的落盘配置，一个 `url(https://…)` 之类的值能通过
-  // setProperty（它只挡 ; 和不配对的花括号），却会在渲染时被塞进 background 触发外连。
-  // 此处是令牌上屏的最后一道 DOM 落点，必须和 guardTokens/fillSwatches 一样卡 hex；
-  // 非法值直接跳过，回退到 tokens.css :root 上的默认色。
+  // 颜色令牌逐个校验 #rrggbb 再落到 CSS 变量：这些变量多处被 styles.css 的 `background:`
+  // 简写消费，而简写接受 url()；落盘配置可能被改坏或投毒，一个 url(...) 值能过 setProperty
+  // 却在渲染时触发外连。和 guardTokens/fillSwatches 一样卡 hex，非法值跳过退回默认色。
   const setColor = (k, v) => {
     if (/^#[0-9a-f]{6}$/i.test(String(v || '').trim())) set(k, v);
   };

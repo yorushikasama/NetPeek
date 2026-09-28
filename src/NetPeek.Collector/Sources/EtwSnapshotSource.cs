@@ -220,14 +220,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
             // 会再去停 —— ETW 会话是内核对象，进程退出也不消失，会以残留会话留到
             // 下次启动。所以在赋值前自查一次，是自己建的就自己拆掉，别赋值也别起线程。
             //
-            // 「检查 _disposed → 赋值 _session」这段 check-then-act 必须与 Dispose 的会话清理
-            // 互斥：StartSession 可能跑在 _startThread，也可能跑在 Timer 线程
-            // （RetryStartSession→StartSession）；Dispose 只 Join _startThread，而 Timer.Dispose
-            // 不等在途回调，所以不加锁时会与 Dispose 竞争——Dispose 读空 _session 走人后，本方法
-            // 才赋值、起线程、置 Running，一个活的内核会话＋事件线程就此逃过 Dispose 残留下来。
-            // 整段收进 _retryTimerGate（与 Dispose 会话清理同锁，ClearRetryTimer 重入安全）：
-            // 无论谁先拿到锁，另一方都会看到一致状态——要么 Dispose 停掉已赋值的会话，
-            // 要么本方法进锁后见 _disposed 为真、自拆自建的会话。
+            // 这段「检查 _disposed → 赋值」要与 Dispose 的会话清理互斥：StartSession 也可能跑在
+            // Timer 线程（RetryStartSession），而 Dispose 只 Join _startThread、Timer.Dispose 不等
+            // 在途回调，不加锁就会漏出一个逃过 Dispose 的会话。收进 _retryTimerGate（同 Dispose，
+            // ClearRetryTimer 可重入）。
             lock (_retryTimerGate)
             {
                 if (_disposed)
@@ -889,10 +885,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 经锁清空：此刻 _processThread（ETW 事件线程）尚未 Join（在本方法末尾才收），
         // 它异常退出时仍可能走 ArmRetryTimer；_disposed 已置位使其不再新建，ClearRetryTimer
         // 与之串行化，保证不会有「刚清空又被武装」的漏网定时器。
-        // 会话的「快照 + 清空」也收进同一把锁：与 StartSession 的 check-then-assign 互斥，
-        // 杜绝「Dispose 读空 _session、StartSession 随后才赋值」的漏网会话（见 StartSession 注释）。
-        // 只在锁内快照，Stop/Dispose 与 _processThread 的 Join 都放锁外——ETW 事件线程退出时会
-        // 走 ArmRetryTimer 抢这把锁，在锁内 Join 它会死锁。
+        // 会话的快照+清空也收进这把锁，与 StartSession 的赋值互斥（见那里）。Stop/Dispose 和
+        // _processThread 的 Join 留在锁外——ETW 线程退出会走 ArmRetryTimer 抢这把锁，锁内 Join 会死锁。
         TraceEventSession? session;
         lock (_retryTimerGate)
         {

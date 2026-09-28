@@ -159,12 +159,11 @@ fn apply_country_db(value: &serde_json::Value) -> Result<crate::geo::DbInfo, Str
     crate::geo::apply(value.get("countryDbPath").and_then(|v| v.as_str()))
 }
 
-/// 读 settings.json（不存在或解析失败都返回 None，交给上层补默认值）。
+/// 读 settings.json（不存在返回 None，交给上层补默认值）。
 ///
-/// 文件存在但解码/解析失败（截断、二进制损坏、手工改坏、非法编码）时，先把现场
-/// 备份到 `settings.json.corrupt-<时间戳>` 再返回 None —— 否则整份设置会静默回退成
-/// 默认值，其中 retentionDays 从用户选的「永久保留」(0) 变回 30，随后 history 收尾
-/// prune 会永久删掉超过 30 天的历史。备份后用户可找回，且下次 save 写的是全新有效文件。
+/// 文件存在但解析失败时，先备份到 `settings.json.corrupt-<时间戳>` 再返回 None：否则
+/// 整份设置静默退默认，retentionDays 从「永久保留」(0) 变回 30，接着 prune 删掉超 30 天
+/// 的历史。备份留了现场，下次 save 写的是全新文件。
 fn read_settings_file(path: &std::path::Path) -> Option<serde_json::Value> {
     let bytes = std::fs::read(path).ok()?;
     match decode_settings_bytes(&bytes).and_then(|text| parse_settings(&text)) {
@@ -176,10 +175,9 @@ fn read_settings_file(path: &std::path::Path) -> Option<serde_json::Value> {
     }
 }
 
-/// 原子落盘：先写同目录临时文件，再 rename 覆盖目标。Windows 的 `fs::rename` 走
-/// MoveFileEx(REPLACE_EXISTING)，是原子替换；写一半崩溃/断电时目标文件要么是旧内容、
-/// 要么是新内容，绝不会留下半截 JSON。半截文件下次启动会解析失败 → 静默回退默认
-/// (retentionDays 0→30) → prune 永久删史，正是这里要避免的。
+/// 原子落盘：写同目录临时文件再 rename 覆盖。Windows 的 `fs::rename` 走
+/// MoveFileEx(REPLACE_EXISTING)，崩溃/断电时目标要么旧内容要么新内容，不会留下
+/// 半截 JSON（半截文件的后果见 read_settings_file）。
 fn atomic_write(path: &std::path::Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_file_name(format!("{SETTINGS_FILE}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, contents).map_err(|e| format!("保存设置失败(写临时文件): {e}"))?;

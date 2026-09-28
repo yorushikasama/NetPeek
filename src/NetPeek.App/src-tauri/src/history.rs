@@ -438,11 +438,10 @@ fn open_db(app: &AppHandle) -> Result<(Connection, std::path::PathBuf), String> 
     let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
     conn.busy_timeout(Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
-    // 建表兜底：读命令可能在后台 init 建好 schema 之前的头几十毫秒就被调用，
-    // 那时 Connection::open 只创建了空库文件、minute_stats 还不存在，查询会以
-    // 「no such table」报错给前端（本该是「暂无数据」的空结果）。SCHEMA_SQL 全程
-    // IF NOT EXISTS：老库是无操作，全新库补出当前 schema（migrate_schema 随后
-    // 见到 start_ts 列即早退，不会重复迁移）。
+    // 建表兜底：读命令可能在后台 init 建好 schema 前的头几十毫秒就被调用，那时
+    // Connection::open 只建了空库文件、minute_stats 还没有，查询会报「no such table」
+    // 而不是返回空结果。SCHEMA_SQL 全程 IF NOT EXISTS：老库无操作，全新库补出当前
+    // schema，migrate_schema 随后见到 start_ts 列即早退。
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|e| format!("初始化历史库失败: {e}"))?;
     Ok((conn, path))
@@ -524,8 +523,8 @@ pub fn history_range_days(app: AppHandle, start: String, end: String) -> Result<
     // 边界交给 strftime：'utc' 修饰符把「本地墙上时间」换算成 unix 秒，
     // 与 SELECT 里的 'localtime' 正好互逆，时区口径和 ts 的写入端一致，
     // 也省掉为了算本地零点再引一个日期库。下界取当天本地零点；上界用 '+1 day' 修饰符
-    // 先在本地墙钟上跨到次日零点再转 UTC，而不是给下界固定加 86400 —— 后者在 DST 切换
-    // 当天（本地日 23h/25h）会偏移一小时，多算或少算边界那一小时的数据。
+    // 在本地墙钟上跨到次日零点再转 UTC，而不是固定加 86400 —— 后者在 DST 切换当天
+    // （本地日 23/25h）会偏一小时。
     let mut stmt = conn
         .prepare(
             "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,

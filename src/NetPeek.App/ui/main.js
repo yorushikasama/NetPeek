@@ -1244,7 +1244,7 @@ function chartOpts(extra) {
   }, extra);
 }
 
-// 暂停时曲线尾巴转虚线，从暂停那一刻起（§2.8）。存暂停的**时间戳**而非下标：
+// 暂停时曲线尾巴转虚线，从暂停那一刻起（§2.8）。存暂停时刻的时间戳而非下标：
 // samples 是每秒左移的环形缓冲，定下标会随缓冲滑动而漂移，接缝越跑越偏。
 let pausedT = 0;
 
@@ -1372,8 +1372,7 @@ function onSnapshot(snap) {
   rememberIcons(snap);
   pushSamples(snap);
   accumulateToday(snap);
-  // 暂停是从当前这一帧起虚线；恢复后回到全实线。记暂停时刻的时间戳（与 samples 的 t 同源），
-  // 而非环形缓冲里的下标 —— 下标会随缓冲每秒左移而漂移，时间戳配 pauseSeam 才钉得住接缝。
+  // 暂停从当前这一帧起虚线，恢复后回到全实线（存时刻而非下标的原因见 pausedT 声明处）
   pausedT = snap.Status === 'paused'
     ? (pausedT > 0 ? pausedT : ((snap.TimestampUnixMs || Date.now()) / 1000))
     : 0;
