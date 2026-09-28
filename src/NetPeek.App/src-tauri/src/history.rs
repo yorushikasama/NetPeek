@@ -127,7 +127,11 @@ fn minute_of(ts_secs: i64) -> i64 {
 /// 把一条错误追加写入 netpeek.log（best-effort，日志写入失败也不影响主流程）。
 pub(crate) fn log_error(state: &HistoryState, msg: &str) {
     use std::io::Write;
-    let path = state.log_path.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let path = state
+        .log_path
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if path.as_os_str().is_empty() {
         return;
     }
@@ -291,7 +295,7 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
         return; // 暂停 / 异常期间速率为 0，无增量可记
     }
     // 本帧被判定为「增量不是一秒的量」而丢弃的进程数，帧末统一留痕（见下）。
-    let mut dropped_frame_bytes = 0usize;
+    let mut dropped_frame_procs = 0usize;
     let now = now_secs();
     let ts = snap
         .get("TimestampUnixMs")
@@ -343,11 +347,15 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
         // 这里只挡超额的那一项，另一项（通常是正常量级）照记 ——
         // 把整行丢掉会连正常的那一半一起损失。
         let (down, up) = (
-            if down > MAX_FRAME_DELTA_BYTES { 0 } else { down },
+            if down > MAX_FRAME_DELTA_BYTES {
+                0
+            } else {
+                down
+            },
             if up > MAX_FRAME_DELTA_BYTES { 0 } else { up },
         );
         if down <= 0 && up <= 0 {
-            dropped_frame_bytes += 1;
+            dropped_frame_procs += 1;
             continue;
         }
         // 启动时间（unix 毫秒）转秒，与 pid 组成身份键，区分同一分钟内被复用的 PID。
@@ -388,11 +396,11 @@ pub fn record(state: &Arc<HistoryState>, snap: &Value) {
     // 丢帧留痕。写进库那一刻就没法分辨「这行是正常的还是被钳过的」，
     // 所以必须在这里说一声 —— 事后对不上账时能查到是这里丢的，而不是去怀疑采集。
     // 频率上它只在异常时出现（正常帧不会有任何进程越过 MAX_FRAME_DELTA_BYTES）。
-    if dropped_frame_bytes > 0 {
+    if dropped_frame_procs > 0 {
         log_error(
             state,
             &format!(
-                "丢弃 {dropped_frame_bytes} 个进程的本帧增量：单帧超过 {MAX_FRAME_DELTA_BYTES} 字节，疑似含停机期间累积的存量"
+                "丢弃 {dropped_frame_procs} 个进程的本帧增量：单帧超过 {MAX_FRAME_DELTA_BYTES} 字节，疑似含停机期间累积的存量"
             ),
         );
     }
@@ -470,17 +478,26 @@ fn collect_daily(
     serde_json::to_string(&out).map_err(|e| format!("日聚合序列化失败: {e}"))
 }
 
-/// `YYYY-MM-DD` 形状检查。合法性交给 SQLite 的 strftime 判，
-/// 这里只挡住明显不是日期的输入 —— strftime 拿到坏输入会返回 NULL，
-/// 而 NULL 比较不成立，查询会静默变空，界面读起来像「那几天没有流量」。
+/// `YYYY-MM-DD` 形状 + 月/日范围检查。日的合法性（如 2 月 30 日）交给 SQLite 的
+/// strftime 归一，但**月/日越界**（2026-13-45 这类）strftime 会直接返回 NULL —— 而
+/// NULL 比较不成立，查询会静默变空，界面读起来像「那几天没有流量」。这里把这类明显
+/// 越界的输入挡在查询之前，避免无声空结果。
 fn is_iso_day(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b.iter()
-            .enumerate()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !b
+        .iter()
+        .enumerate()
+        .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return false;
+    }
+    // 全为 ASCII 数字，按字节切片解析月/日安全。
+    let month = s[5..7].parse::<u32>().unwrap_or(0);
+    let day = s[8..10].parse::<u32>().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
 /// 按天聚合（本地时区），最近 `days` 天：返回 `[{day:"2026-05-18", name, down, up}]`。
@@ -489,9 +506,9 @@ fn is_iso_day(s: &str) -> bool {
 #[tauri::command]
 pub fn history_daily(app: AppHandle, days: i64) -> Result<String, String> {
     let (conn, _) = open_db(&app)?;
-    // 夹到 [1 天, 10 年]，与 history_process_totals 的上下限钳位口径一致：
+    // 夹到 [1 天, RETENTION_MAX_DAYS]，与 history_process_totals 的上下限钳位口径一致：
     // 只 max(1) 不设上限时，一个超大 days 会算出远古下界（返回全部数据），是个 foot-gun。
-    let cutoff = now_secs() - days.clamp(1, 3660) * 86_400;
+    let cutoff = now_secs() - days.clamp(1, RETENTION_MAX_DAYS) * 86_400;
     let mut stmt = conn
         .prepare(
             "SELECT date(ts, 'unixepoch', 'localtime') AS day, name,
@@ -1190,7 +1207,11 @@ mod range_tests {
 
         let rows = query_range_buckets(&conn, base - 60, base + 7200, HOUR, 0).unwrap();
         assert!(!rows.is_empty());
-        assert_eq!(rows.iter().map(|r| r.down).sum::<i64>(), 70, "分桶后总量守恒");
+        assert_eq!(
+            rows.iter().map(|r| r.down).sum::<i64>(),
+            70,
+            "分桶后总量守恒"
+        );
         for r in &rows {
             let hms: String = conn
                 .query_row(
@@ -1246,7 +1267,10 @@ mod range_tests {
             )
             .unwrap();
         assert_eq!(hms, "00:00", "桶键落在本地整点");
-        assert!(rows[0].ts <= base && base - rows[0].ts < HOUR, "base 落在它的桶内");
+        assert!(
+            rows[0].ts <= base && base - rows[0].ts < HOUR,
+            "base 落在它的桶内"
+        );
     }
 
     #[test]

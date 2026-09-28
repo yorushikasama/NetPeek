@@ -58,9 +58,12 @@ public sealed class SnapshotControlServer : BackgroundService
             }
             catch (Exception ex)
             {
-                // 兜住一切非 IO 意外（如管道名被抢占时 Create/WaitForConnectionAsync 抛
-                // UnauthorizedAccessException）。逃出 ExecuteAsync 会命中默认 StopHost，把整个
-                // Host 连同采集一起拖停——控制通道故障不该牵连采集。同 CollectorService：记录后退避重试。
+                // 必须兜住一切：本类是 BackgroundService，逃出 ExecuteAsync 的异常会命中
+                // .NET 默认策略（BackgroundServiceExceptionBehavior.StopHost），把整个采集
+                // 进程连同快照推流一起静默停掉，界面只表现为「管道断开」。
+                // NamedPipeServerStreamAcl.Create / WaitForConnectionAsync 也可能抛
+                // UnauthorizedAccessException 等非 IOException —— 与 CollectorService 同策略：
+                // 记日志、退避、继续监听，让控制通道自愈而不牵连主服务。
                 _logger.LogError(ex, "控制管道意外异常，500ms 后重新监听");
                 await Task.Delay(500, stoppingToken);
             }
