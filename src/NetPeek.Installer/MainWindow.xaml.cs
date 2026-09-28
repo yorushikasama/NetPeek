@@ -155,7 +155,7 @@ public partial class MainWindow : Window
         SwitchTo(DonePage);
         Bar.Value = 100;
         DoneNote.Text = "已安装到 " + Defs.DefaultInstallDir +
-                        "\n采集服务已随系统启动，随时打开主界面即可查看实时流量。";
+                        "\n采集服务已随系统启动，打开主界面即可查看实时流量。";
     }
 
     // ---------- 页面切换与步骤渲染 ----------
@@ -267,6 +267,6 @@ public partial class MainWindow : Window
         SwitchTo(DonePage);
         DoneNote.Text = "已安装到 " + dir +
                         (_preview ? "\n（预览模式：未写入任何文件、未注册任何服务）"
-                                  : "\n采集服务已随系统启动，随时打开主界面即可查看实时流量。");
+                                  : "\n采集服务已随系统启动，打开主界面即可查看实时流量。");
     }
 }
