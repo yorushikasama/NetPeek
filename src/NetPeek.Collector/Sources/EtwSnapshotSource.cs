@@ -774,10 +774,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         var upDelta = now.Sent - prev.Sent;
 
         snapshot.UnattributedKnown = true;
-        // 差额为负说明接口增量小于进程合计。这会发生，而且不是故障：
-        // ETW 的 size 是网络栈口径的载荷字节，接口计数在另一层采样，两者不严格包含；
-        // 接口在帧间隙里断开重连也会让增量偏小。钳到 0 —— 负的「未归因流量」
-        // 是个没有意义的读数，显示出来只会让人以为坏了。
+        // 差额为负钳到 0（不是故障，理由见方法 summary）。
         snapshot.UnattributedDownloadBytes =
             (ulong)Math.Max(0, downDelta - (long)snapshot.TotalDownloadBytes);
         snapshot.UnattributedUploadBytes =

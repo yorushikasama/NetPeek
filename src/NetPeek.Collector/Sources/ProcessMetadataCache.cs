@@ -558,16 +558,8 @@ public sealed class ProcessMetadataCache : IDisposable
             return string.Empty;
         }
 
-        try
-        {
-            var n = System.IO.Path.GetFileNameWithoutExtension(image);
-            return string.IsNullOrEmpty(n) ? image : n;
-        }
-        catch
-        {
-            // 非法路径字符：退回原串，总比空名强。
-            return image;
-        }
+        var n = System.IO.Path.GetFileNameWithoutExtension(image);
+        return string.IsNullOrEmpty(n) ? image : n;
     }
 
     /// <summary>

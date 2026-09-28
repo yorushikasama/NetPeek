@@ -92,7 +92,7 @@
         return { v: n >= 100 ? String(Math.round(n)) : n.toFixed(n >= 10 ? 1 : 2), u: unit };
       }
     }
-    return { v: String(Math.min(9999, Math.round(bps))), u: 'B/s' };
+    return { v: String(Math.round(bps)), u: 'B/s' };
   }
 
   function fmtFull(bps) {

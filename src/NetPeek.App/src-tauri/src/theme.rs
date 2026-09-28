@@ -125,7 +125,7 @@ pub fn save_background_image(app: AppHandle, data_url: String) -> Result<String,
         .ok_or("背景图格式必须是 data URL")?;
     // MIME 子类型 → 扩展名白名单。直接拿子类型当扩展名的话，svg 会落盘成
     // "*.svg+xml"，读回时对不上 MIME 表、按 image/png 返回，图必坏。
-    let ext = match body.split([';', ',']).next().unwrap_or("png") {
+    let ext = match body.split([';', ',']).next().unwrap_or("") {
         "png" => "png",
         "jpg" | "jpeg" => "jpg",
         "gif" => "gif",
