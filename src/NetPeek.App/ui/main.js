@@ -1384,8 +1384,10 @@ function onSnapshot(snap) {
   renderAll(snap);
 }
 
-// 断线：数字停在最后一帧，图只留坐标轴，表格换成可重试的异常态（§2.8）
+// 断线：快照失效，数字留空，图只留坐标轴，表格换成可重试的异常态（§2.8）
 function onDisconnected() {
+  // 切屏、显隐和单位等重绘入口不能重放旧帧；重连后也要等新快照。
+  lastSnapshot = null;
   setStatus('offline');
   setProcState('offline');
   setFieldsOffline();

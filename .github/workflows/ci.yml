@@ -55,6 +55,9 @@ jobs:
       - name: 构建 .NET 侧
         run: dotnet build NetPeek.sln --nologo
 
+      - name: 采集端单测
+        run: dotnet test NetPeek.sln --no-build --nologo
+
       # 前端单测：纯 Node，不需要浏览器。这条链路原来是 headless Chrome 驱动的，
       # 本机 Chrome 升到 152 之后 headless 起不来（GPU 进程 0xC0000005），
       # 于是改成了从 IIFE 里抽纯函数直接跑——顺带跑得比浏览器快得多。

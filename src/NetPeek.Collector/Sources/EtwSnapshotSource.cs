@@ -732,8 +732,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 基线帧到此消费完毕，从下一帧起正常报速率。
         // 放在循环之后而不是开头：循环中途抛异常时标志仍然有效，
         // 下一帧还会再走一次基线，宁可多一帧 0 速率，也不要漏报一次假尖峰。
-        // 两个标志一起清：这一帧已经把两侧的存量都拉平了。
-        if (baseline)
+        // 暂停帧未推进 LastTotal，必须保留标志到恢复首帧；真正拉平存量后两个标志一起清。
+        if (baseline && !paused)
         {
             _rateBaselinePending = false;
             _sessionBaselinePending = false;

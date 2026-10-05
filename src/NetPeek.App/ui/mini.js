@@ -608,6 +608,8 @@
   listen('mini-shown', () => realignShape());
   listen('pipe-status', (e) => {
     if (e.payload === 'connected') return;
+    // 断线使补画缓存失效；正常隐藏仍缓存，重连后必须等新快照。
+    lastSnap = null;
     els.dot.className = 'panel-dot is-error';
     els.dot.title = '未连接采集服务';
     els.dot.setAttribute('aria-label', '未连接采集服务');

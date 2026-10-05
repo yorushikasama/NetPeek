@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
@@ -87,7 +87,15 @@ type Bucket = HashMap<(i64, i64), (String, i64, i64)>;
 /// 正常情况下里面只有 1～2 个分钟（当前分钟 + 刚翻过去还没写出的那个）。
 type Pending = BTreeMap<i64, Bucket>;
 
+/// 从取桶到提交或重新入队始终持有协调锁，清空历史不能插入这个过程。
+struct DueBatch<'a> {
+    minutes: Vec<(i64, Bucket)>,
+    _guard: MutexGuard<'a, ()>,
+}
+
 pub struct HistoryState {
+    /// 锁顺序：flush_gate → conn → pending；record 只锁 pending，不等待磁盘写入。
+    flush_gate: Mutex<()>,
     conn: Mutex<Connection>,
     /// 按分钟分层的待落库数据。帧归哪一分钟由帧的时间戳决定，不受落库线程的轮询节奏影响。
     pending: Mutex<Pending>,
@@ -103,6 +111,7 @@ pub struct HistoryState {
 impl HistoryState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            flush_gate: Mutex::new(()),
             // 占位内存库，init() 打开真实文件库后替换。
             conn: Mutex::new(Connection::open_in_memory().expect("创建占位内存库失败")),
             pending: Mutex::new(BTreeMap::new()),
@@ -213,58 +222,85 @@ fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 /// 取出所有「已经结束」的分钟（< 截止分钟）。当前分钟留在桶里继续累加。
 /// 传 i64::MAX 表示连当前分钟一起取走（退出前的收尾落库）。
-fn take_due(state: &HistoryState, before_minute: i64) -> Vec<(i64, Bucket)> {
+fn take_due(state: &HistoryState, before_minute: i64) -> DueBatch<'_> {
+    // 必须先取得协调锁再移出桶；否则 clear_all 看不到已取出但尚未写入的数据。
+    let guard = state.flush_gate.lock().unwrap_or_else(|e| e.into_inner());
     let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
     // BTreeMap 有序，due 的分钟一定是前缀，split_off 一刀切开即可。
     let mut due = std::mem::take(&mut *pending);
     let keep = due.split_off(&before_minute);
     *pending = keep;
-    due.into_iter().collect()
+    DueBatch {
+        minutes: due.into_iter().collect(),
+        _guard: guard,
+    }
 }
 
-/// 把若干个整分钟写进库并清理过期行。落库线程与退出收尾共用。
-fn flush_due(state: &Arc<HistoryState>, due: Vec<(i64, Bucket)>) {
-    if due.is_empty() {
+/// 重新入队未提交的分钟；调用者仍须持有批次的协调锁，避免清空后旧数据复活。
+fn requeue_minutes(state: &HistoryState, minutes: Vec<(i64, Bucket)>, reason: &str) {
+    if minutes.is_empty() {
         return;
     }
-    // 库还没就绪就把数据放回去等下一轮：占位内存库没有建表，写进去等于丢。
-    // init 是在后台线程里开库的，正常只需等几十毫秒；但它也可能彻底失败
-    //（磁盘满、目录不可写），那时候不能无限攒 —— 只保留最近 MAX_PENDING_MINUTES 分钟，
-    // 更早的丢掉并记一条日志，宁可丢一段历史也不能把内存吃穿。
-    if !state.db_ready.load(Ordering::SeqCst) {
-        let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        for (minute, bucket) in due {
-            let slot = pending.entry(minute).or_default();
-            for (key, (name, down, up)) in bucket {
-                let e = slot.entry(key).or_insert_with(|| (String::new(), 0, 0));
-                e.0 = name;
-                e.1 += down;
-                e.2 += up;
-            }
-        }
-        // log_error 锁的是 log_path，与 pending 是两把不相干的锁，这里不会自锁。
-        while pending.len() > MAX_PENDING_MINUTES {
-            let oldest = *pending.keys().next().expect("len > 0 时必有首键");
-            pending.remove(&oldest);
-            log_error(
-                state,
-                &format!(
-                    "历史库未就绪，丢弃积压分钟 {oldest}（超出 {MAX_PENDING_MINUTES} 分钟上限）"
-                ),
-            );
-        }
-        return;
-    }
-    let mut conn = state.conn.lock().unwrap_or_else(|e| e.into_inner());
-    for (minute, bucket) in &due {
+    let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
+    for (minute, bucket) in minutes {
         if bucket.is_empty() {
             continue;
         }
-        if let Err(e) = flush_minute(&mut conn, bucket, *minute) {
+        let slot = pending.entry(minute).or_default();
+        for (key, (name, down, up)) in bucket {
+            slot.entry(key)
+                .and_modify(|(n, d, u)| {
+                    // 桶被取走后仍可能收到同分钟的新帧：累加字节，保留更新的非空名称。
+                    if n.is_empty() {
+                        *n = name.clone();
+                    }
+                    *d += down;
+                    *u += up;
+                })
+                .or_insert((name, down, up));
+        }
+    }
+    let mut dropped = Vec::new();
+    while pending.len() > MAX_PENDING_MINUTES {
+        let (oldest, _) = pending.pop_first().expect("积压超限时必有首键");
+        dropped.push(oldest);
+    }
+    drop(pending);
+    // 记录日志时不占用聚合锁，磁盘故障不能进一步阻塞采集线程。
+    for minute in dropped {
+        log_error(
+            state,
+            &format!("{reason}，丢弃积压分钟 {minute}（超出 {MAX_PENDING_MINUTES} 分钟上限）"),
+        );
+    }
+}
+
+/// 把若干个整分钟写进库并清理过期行。落库线程与退出收尾共用。
+fn flush_due(state: &Arc<HistoryState>, due: DueBatch<'_>) {
+    // 命名的 _guard 一直持有到函数返回，覆盖提交及失败重新入队的完整过程。
+    let DueBatch { minutes, _guard } = due;
+    if minutes.is_empty() {
+        return;
+    }
+    // 占位内存库没有建表，未就绪时保留数据；与写入失败共用有界积压逻辑。
+    if !state.db_ready.load(Ordering::SeqCst) {
+        requeue_minutes(state, minutes, "历史库未就绪");
+        return;
+    }
+    let mut conn = state.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut failed = Vec::new();
+    for (minute, bucket) in minutes {
+        if bucket.is_empty() {
+            continue;
+        }
+        if let Err(e) = flush_minute(&mut conn, &bucket, minute) {
             log_error(state, &format!("历史落库失败（分钟 {minute}）：{e}"));
+            // 每分钟是独立事务：只重试失败分钟，成功分钟重放会被累加 UPSERT 重复计量。
+            failed.push((minute, bucket));
         }
     }
     drop(conn);
+    requeue_minutes(state, failed, "历史落库失败");
     if let Err(e) = prune(state) {
         log_error(state, &format!("历史清理失败：{e}"));
     }
@@ -724,12 +760,29 @@ pub fn history_process_totals(app: AppHandle, hours: i64) -> Result<String, Stri
 /// 清空全部历史并 VACUUM 回收空间。
 #[tauri::command]
 pub fn clear_history(app: AppHandle) -> Result<(), String> {
-    let (conn, _) = open_db(&app)?;
-    // DELETE 是真正要保证的操作；VACUUM 只是回收磁盘空间，属 best-effort。
-    // 分两步执行：并发写入时 VACUUM 可能撞 busy_timeout 返回 Err，但此时 DELETE 已提交
-    // ——若一并 map_err 会向用户报「清空失败」，而数据其实已经清掉了（口径与事实相反）。
+    let state = app
+        .try_state::<Arc<HistoryState>>()
+        .ok_or_else(|| "历史数据库尚未就绪，请稍后重试".to_string())?;
+    clear_all(&state)
+}
+
+fn clear_all(state: &HistoryState) -> Result<(), String> {
+    if !state.db_ready.load(Ordering::SeqCst) {
+        return Err("历史数据库尚未就绪，请稍后重试".to_string());
+    }
+    // 等在途批次提交或重新入队完毕；清空返回后不能再被旧批次写回。
+    let _guard = state.flush_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let conn = state.conn.lock().unwrap_or_else(|e| e.into_inner());
+    // DELETE 是真正要保证的操作；失败时不能动 pending，否则会丢掉尚未持久化的数据。
     conn.execute("DELETE FROM minute_stats", [])
         .map_err(|e| format!("清空历史失败: {e}"))?;
+    // 以清空 pending 为新旧流量边界。record 只短暂竞争此锁，不等待 DELETE/VACUUM；
+    // 此后入队的帧属于新历史，VACUUM 期间也可以继续聚合。
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     // VACUUM 失败不致命：数据已清，空间回收可等下次；只记日志不向用户报错。
     if let Err(e) = conn.execute_batch("VACUUM") {
         eprintln!("[netpeek] VACUUM 失败（空间未回收，数据已清空）: {e}");
@@ -1003,9 +1056,10 @@ mod tests {
                 .insert((1, 0), ("a".into(), 3, 0));
         }
         let due = take_due(&state, 720);
-        assert_eq!(due.len(), 2, "只取走 720 之前的分钟");
-        assert_eq!(due[0].0, 600, "按时间顺序取出");
-        assert_eq!(due[1].0, 660);
+        assert_eq!(due.minutes.len(), 2, "只取走 720 之前的分钟");
+        assert_eq!(due.minutes[0].0, 600, "按时间顺序取出");
+        assert_eq!(due.minutes[1].0, 660);
+        assert!(state.flush_gate.try_lock().is_err(), "在途批次须持有协调锁");
         let pending = state.pending.lock().unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending.contains_key(&720), "当前分钟留在桶里");
@@ -1023,7 +1077,7 @@ mod tests {
                 .insert((1, 0), ("a".into(), 3, 0));
         }
         let due = take_due(&state, i64::MAX);
-        assert_eq!(due.len(), 1, "收尾落库连当前分钟一起取");
+        assert_eq!(due.minutes.len(), 1, "收尾落库连当前分钟一起取");
         assert!(state.pending.lock().unwrap().is_empty());
     }
 
@@ -1038,7 +1092,8 @@ mod tests {
         let minute = minute_of(now_secs());
         let mut bucket: Bucket = HashMap::new();
         bucket.insert((1, 100), ("a.exe".into(), 10, 1));
-        flush_due(&state, vec![(minute, bucket)]);
+        state.pending.lock().unwrap().insert(minute, bucket);
+        flush_on_exit(&state);
 
         assert!(!state.db_ready.load(Ordering::SeqCst));
         let kept = bucket_at(&state, minute);
@@ -1074,12 +1129,372 @@ mod tests {
         for i in 0..(MAX_PENDING_MINUTES as i64 + 50) {
             let mut bucket: Bucket = HashMap::new();
             bucket.insert((1, 0), ("a.exe".into(), 1, 0));
-            flush_due(&state, vec![(i * 60, bucket)]);
+            state.pending.lock().unwrap().insert(i * 60, bucket);
+            flush_on_exit(&state);
         }
         let pending = state.pending.lock().unwrap();
         assert_eq!(pending.len(), MAX_PENDING_MINUTES, "积压分钟数封顶");
         // 丢的是最早的那些，留下的是最近的 —— 近期数据比远期更有价值。
         assert!(pending.contains_key(&((MAX_PENDING_MINUTES as i64 + 49) * 60)));
+    }
+
+    fn ready_state() -> Arc<HistoryState> {
+        let state = HistoryState::new();
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(SCHEMA_SQL)
+            .unwrap();
+        state.db_ready.store(true, Ordering::SeqCst);
+        apply_retention(&state, 0);
+        state
+    }
+
+    fn test_bucket(down: i64, up: i64) -> Bucket {
+        HashMap::from([((1, 100), ("a.exe".into(), down, up))])
+    }
+
+    fn stored_totals(state: &HistoryState) -> (i64, i64, i64) {
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(down), 0), COALESCE(SUM(up), 0) FROM minute_stats",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn flush_due_retries_only_failed_minutes_without_loss_or_double_counting() {
+        let state = ready_state();
+        // 第二个分钟写入第二行时失败，验证整个分钟回滚，前后成功分钟均不重放。
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_minute BEFORE INSERT ON minute_stats
+             WHEN NEW.ts = 660 AND (SELECT COUNT(*) FROM minute_stats WHERE ts = 660) > 0
+             BEGIN SELECT RAISE(ABORT, '模拟写入失败'); END;",
+            )
+            .unwrap();
+        let mut failed = test_bucket(20, 2);
+        failed.insert((2, 200), ("b.exe".into(), 30, 3));
+        state.pending.lock().unwrap().extend([
+            (600, test_bucket(10, 1)),
+            (660, failed),
+            (720, test_bucket(40, 4)),
+        ]);
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (2, 50, 5), "失败分钟必须整批回滚");
+        assert_eq!(bucket_at(&state, 660).len(), 2, "失败分钟应重新入队");
+        assert_eq!(state.pending.lock().unwrap().len(), 1, "成功分钟不能重试");
+
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_minute")
+            .unwrap();
+        let due = take_due(&state, i64::MAX);
+        flush_due(&state, due);
+        assert_eq!(stored_totals(&state), (4, 100, 10), "重试后总量守恒");
+        assert!(state.pending.lock().unwrap().is_empty());
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (4, 100, 10), "退出不能重复计量");
+    }
+
+    #[test]
+    fn flush_due_merges_retries_with_new_frames_in_the_same_minute() {
+        for ready in [false, true] {
+            let state = if ready {
+                ready_state()
+            } else {
+                HistoryState::new()
+            };
+            if ready {
+                state
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_write BEFORE INSERT ON minute_stats
+                     BEGIN SELECT RAISE(ABORT, '模拟写入失败'); END;",
+                    )
+                    .unwrap();
+            }
+            let minute = this_minute();
+            let mut old = test_bucket(10, 1);
+            old.insert((2, 200), ("b.exe".into(), 30, 3));
+            state.pending.lock().unwrap().insert(minute, old);
+            let due = take_due(&state, i64::MAX);
+            // 批次在途时同一分钟继续进帧，旧数据回队不能覆盖新数据或更新的名称。
+            record(
+                &state,
+                &json!({
+                    "Status": "ok", "TimestampUnixMs": minute * 1000,
+                    "Processes": [
+                        {"Pid": 1, "StartTimeUnixMs": 100000, "Name": "renamed.exe",
+                         "DownloadBytes": 3, "UploadBytes": 1},
+                        {"Pid": 2, "StartTimeUnixMs": 200000, "Name": "",
+                         "DownloadBytes": 4, "UploadBytes": 2},
+                    ],
+                }),
+            );
+            flush_due(&state, due);
+            let bucket = bucket_at(&state, minute);
+            assert_eq!(bucket.get(&(1, 100)), Some(&("renamed.exe".into(), 13, 2)));
+            assert_eq!(bucket.get(&(2, 200)), Some(&("b.exe".into(), 34, 5)));
+            if ready {
+                assert_eq!(stored_totals(&state), (0, 0, 0));
+                state
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER fail_write")
+                    .unwrap();
+            } else {
+                state
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch(SCHEMA_SQL)
+                    .unwrap();
+                state.db_ready.store(true, Ordering::SeqCst);
+                apply_retention(&state, 0);
+            }
+            flush_on_exit(&state);
+            assert_eq!(stored_totals(&state), (2, 47, 7), "新旧增量必须各计一次");
+            assert!(state.pending.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn flush_due_caps_backlog_when_writes_keep_failing() {
+        let state = ready_state();
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_write BEFORE INSERT ON minute_stats
+             BEGIN SELECT RAISE(ABORT, '模拟持续写入失败'); END;",
+            )
+            .unwrap();
+        let end = MAX_PENDING_MINUTES as i64 + 50;
+        for i in 0..end {
+            state
+                .pending
+                .lock()
+                .unwrap()
+                .insert(i * 60, test_bucket(10, 1));
+            flush_on_exit(&state);
+        }
+        {
+            let pending = state.pending.lock().unwrap();
+            assert_eq!(pending.len(), MAX_PENDING_MINUTES);
+            assert_eq!(pending.first_key_value().map(|(ts, _)| *ts), Some(50 * 60));
+            assert_eq!(
+                pending.last_key_value().map(|(ts, _)| *ts),
+                Some((end - 1) * 60)
+            );
+        }
+        assert_eq!(stored_totals(&state), (0, 0, 0));
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_write")
+            .unwrap();
+        flush_on_exit(&state);
+        let count = MAX_PENDING_MINUTES as i64;
+        assert_eq!(stored_totals(&state), (count, count * 10, count));
+        assert!(state.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_all_removes_pending_data_and_keeps_new_traffic() {
+        let state = ready_state();
+        let minute = this_minute();
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .insert(minute - 60, test_bucket(10, 1));
+        flush_on_exit(&state);
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .insert(minute, test_bucket(20, 2));
+        clear_all(&state).unwrap();
+        assert_eq!(stored_totals(&state), (0, 0, 0));
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (0, 0, 0), "清空后旧内存桶不能复活");
+
+        record(
+            &state,
+            &json!({
+                "Status": "ok",
+                "TimestampUnixMs": minute * 1000,
+                "Processes": [{"Pid": 1, "StartTimeUnixMs": 100000, "Name": "a.exe",
+                               "DownloadBytes": 3, "UploadBytes": 1}],
+            }),
+        );
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (1, 3, 1), "清空后的新流量仍正常记录");
+    }
+
+    #[test]
+    fn clear_all_waits_for_in_flight_commit_or_requeue() {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+
+        for fail_write in [false, true] {
+            let state = ready_state();
+            if fail_write {
+                state
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_write BEFORE INSERT ON minute_stats
+                     BEGIN SELECT RAISE(ABORT, '模拟写入失败'); END;",
+                    )
+                    .unwrap();
+            }
+            state
+                .pending
+                .lock()
+                .unwrap()
+                .insert(600, test_bucket(10, 1));
+            let due = take_due(&state, i64::MAX);
+            assert!(
+                state.pending.lock().unwrap().is_empty(),
+                "旧桶已移出内存队列"
+            );
+            let (started_tx, started_rx) = channel();
+            let (done_tx, done_rx) = channel();
+            let clearing_state = Arc::clone(&state);
+            let clearer = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                done_tx.send(clear_all(&clearing_state)).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let early = done_rx.recv_timeout(Duration::from_millis(100));
+            let waited = matches!(&early, Err(RecvTimeoutError::Timeout));
+            // 在原线程完成携锁批次：既覆盖成功提交，也覆盖失败重新入队。
+            flush_due(&state, due);
+            let cleared = match early {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => {
+                    done_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                }
+                Err(error) => panic!("清空线程提前退出: {error}"),
+            };
+            clearer.join().unwrap();
+            cleared.unwrap();
+            assert!(waited, "清空必须等待在途批次，不能只清数据库和 pending");
+            assert_eq!(stored_totals(&state), (0, 0, 0));
+            assert!(state.pending.lock().unwrap().is_empty());
+            if fail_write {
+                state
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER fail_write")
+                    .unwrap();
+            }
+            flush_on_exit(&state);
+            assert_eq!(
+                stored_totals(&state),
+                (0, 0, 0),
+                "重试或退出不能复活已清空数据"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_all_preserves_pending_when_database_is_unready_or_delete_fails() {
+        let unready = HistoryState::new();
+        unready
+            .pending
+            .lock()
+            .unwrap()
+            .insert(600, test_bucket(10, 1));
+        assert!(clear_all(&unready).unwrap_err().contains("尚未就绪"));
+        assert_eq!(bucket_at(&unready, 600), test_bucket(10, 1));
+
+        let state = ready_state();
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .insert(600, test_bucket(10, 1));
+        flush_on_exit(&state);
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .insert(600, test_bucket(20, 2));
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_delete BEFORE DELETE ON minute_stats
+             BEGIN SELECT RAISE(ABORT, '模拟清空失败'); END;",
+            )
+            .unwrap();
+        assert!(clear_all(&state).unwrap_err().contains("清空历史失败"));
+        assert_eq!(stored_totals(&state), (1, 10, 1));
+        assert_eq!(
+            bucket_at(&state, 600),
+            test_bucket(20, 2),
+            "删除失败不能丢待写数据"
+        );
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_delete")
+            .unwrap();
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (1, 30, 3), "删除失败后仍可正常落库");
+        clear_all(&state).unwrap();
+        assert_eq!(stored_totals(&state), (0, 0, 0));
+    }
+
+    #[test]
+    fn record_does_not_wait_for_database_or_flush_gate() {
+        let state = ready_state();
+        let minute = this_minute();
+        let due = take_due(&state, i64::MAX);
+        let conn = state.conn.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let recording_state = Arc::clone(&state);
+        let recorder = std::thread::spawn(move || {
+            record(
+                &recording_state,
+                &json!({
+                    "Status": "ok", "TimestampUnixMs": minute * 1000,
+                    "Processes": [{"Pid": 1, "StartTimeUnixMs": 100000, "Name": "a.exe",
+                                   "DownloadBytes": 3, "UploadBytes": 1}],
+                }),
+            );
+            done_tx.send(()).unwrap();
+        });
+        let recorded = done_rx.recv_timeout(Duration::from_secs(5));
+        // 即使回归失败也先释放锁，让测试线程可以退出而非永久卡住。
+        drop(conn);
+        flush_due(&state, due);
+        recorder.join().unwrap();
+        recorded.expect("数据库忙或清空协调锁被持有时，采集仍应能聚合");
+        flush_on_exit(&state);
+        assert_eq!(stored_totals(&state), (1, 3, 1));
     }
 
     /// 保留期必须能从设置灌进来。老实现里 settings.retentionDays 只在用户改动

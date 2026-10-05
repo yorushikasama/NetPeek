@@ -773,10 +773,20 @@
       els.granNote.textContent = '';
       return;
     }
+    const draft = { start, end, startTime: els.startTime.value, endTime: els.endTime.value };
+    const { a, b } = rangeBounds(draft);
+    // planQuery 对反向范围 / 未来起点也会退回 day，但那不代表区间过长。
+    // 保留时刻字段供原地修正；具体错误由提交侧按日期、时刻的顺序提示。
+    if (a > b || a.getTime() > Date.now()) {
+      els.startTimeWrap.hidden = false;
+      els.endTimeWrap.hidden = false;
+      els.granNote.textContent = '';
+      return;
+    }
     // 回执读的是**将要画出来的那一份**，不是把 planQuery 的输入重念一遍：
     // 小时数走 hourKeysBetween（同一套骨架），天数走 dayKeysBetween 的计数口径，
     // 于是「共 N 小时」和点完之后柱图上真有的根数永远一致。
-    const plan = planQuery({ start, end, startTime: els.startTime.value, endTime: els.endTime.value });
+    const plan = planQuery(draft);
     const hourly = plan.unit === 'hour';
     els.startTimeWrap.hidden = !hourly;
     els.endTimeWrap.hidden = !hourly;
@@ -842,12 +852,10 @@
     e.preventDefault();
     const start = els.startDate.value;
     const end = els.endDate.value;
-    // 收起字段不会清掉它的 value（这是故意的，见 syncGranularity），读之前先按当前
-    // 粒度归一：整日档一律交空串，让 rangeBounds 补整日边界，否则上一次填的 08:00
-    // 会被当成这次的选择 —— 屏幕上那个字段当时根本不在。
-    const hourly = !els.startTimeWrap.hidden;
-    const startTime = hourly ? els.startTime.value : '';
-    const endTime = hourly ? els.endTime.value : '';
+    // 必须先校验原始时刻：反向范围 / 未来起点也会让 planQuery 退回 day，
+    // 不能因为字段收起，就把非法时刻抹成全天并绕过校验。
+    const startTime = els.startTime.value;
+    const endTime = els.endTime.value;
     const today = dayKeys(1)[0];
     if (!start || !end) {
       showRangeError('请选择开始日期和结束日期。');
@@ -883,7 +891,10 @@
       showRangeError('开始时间不能晚于当前时间。');
       return;
     }
-    customRange = draft;
+    // 原始范围合法后才归一长范围；粒度来自数据，不依赖控件显隐。
+    customRange = planQuery(draft).unit === 'hour'
+      ? draft
+      : { ...draft, startTime: '', endTime: '' };
     // 不动 days：它只表达「预设档的天数」。自定义区间有自己的 customRange，
     // 所有读 days 的路径都以 customRange 为先决条件，混写只会埋语义坑。
     // 三个预设胶囊都取消激活，把激活态交给「自定义…」——否则整组胶囊没有任何一个

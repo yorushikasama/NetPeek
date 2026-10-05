@@ -188,7 +188,11 @@
     els.autostart.addEventListener('change', async () => {
       state.autostart = els.autostart.checked;
       await save();
-      try { els.autostart.checked = await invoke('get_autostart'); } catch { /* 保持勾选态 */ }
+      try {
+        // 后续保存也必须沿用实际值，不能只纠正复选框。
+        state.autostart = await invoke('get_autostart');
+        els.autostart.checked = state.autostart;
+      } catch { /* 保持勾选态 */ }
     });
 
     els.recordUnattributed.addEventListener('change', () => {
@@ -390,7 +394,10 @@
       bind();
       notify();
       // 注册表是开机自启的真实状态，settings.json 可能过时
-      try { els.autostart.checked = await invoke('get_autostart'); } catch { /* 保持文件值 */ }
+      try {
+        state.autostart = await invoke('get_autostart');
+        els.autostart.checked = state.autostart;
+      } catch { /* 保持文件值 */ }
       try {
         // \ 后插零宽空格：换行断在目录分隔符上，不会把 com.netpeek.app 劈成两截
         const dir = await invoke('data_dir_path');
