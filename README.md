@@ -24,18 +24,24 @@ NetPeek.App (Tauri 2, 普通权限)  ←—Named Pipe—→  NetPeek.Collector (
 
 ## 安装
 
-生成 MSI（会顺带把采集服务注册成 LocalSystem 自动启动的 Windows 服务）：
+生成安装包（自研单文件安装器，会顺带把采集服务注册成 LocalSystem 自动启动的 Windows 服务）：
 
 ```bash
 pwsh -File scripts/build-installer.ps1
-# 产物：src/NetPeek.App/src-tauri/target/release/bundle/msi/*.msi
+# 产物：dist/NetPeek.Setup.exe
 ```
 
-安装包会自动检测并按需获取 WebView2，升级时清理旧版本残留。
-**当前 MSI 尚未进行代码签名**，安装时 SmartScreen 会拦截一次。
+产物是**单文件 self-contained 安装器**：主程序与采集服务作为内嵌资源打包进去（安装器自身不依赖
+WebView2 或 .NET 运行时，免得「要装的东西还没装上，安装器自己先跑不起来」）。双击即装，
+默认装到 `C:\Program Files\NetPeek\`。
 
-从 Git Bash 手动调 `msiexec` 会被 MSYS 改写 `/i` `/qn` 这类参数导致挂起，
-要装/卸请用 PowerShell 的 `Start-Process -ArgumentList @(...)` 数组传参。
+- 缺 WebView2 运行时时自动下载官方引导器静默安装（下载后验签，签名者非 Microsoft 一律拒绝执行）
+- 装过的旧版（含早期 WiX/MSI 版）会在覆盖安装时自动迁移清理
+- 同一个 exe 挂 `--uninstall` 兼任卸载器；控制面板「应用」里的「卸载 NetPeek」指向它
+
+**当前安装包尚未进行代码签名**，双击时 SmartScreen 会拦截一次。
+
+卸载会停止并删除采集服务，并**清除全部数据**（历史库、设置、WebView2 缓存）。
 
 ## 从源码开发
 
@@ -96,9 +102,10 @@ pwsh -File scripts/verify-etw-scenarios.ps1                          # 短连接
 ```text
 src/NetPeek.Shared/       IPC 协议 DTO 与帧格式常量（服务与 UI 共用契约）
 src/NetPeek.Collector/    .NET 8 Windows Service（ETW + 聚合 + 命名管道服务端）
+src/NetPeek.Installer/    WPF 自研安装器（安装 + 卸载，payload 内嵌主程序与采集服务）
 src/NetPeek.App/          Tauri 2：src-tauri Rust 外壳（管道客户端、托盘、历史库、主题落盘）
                                    ui   无打包器前端（原生 JS + 自绘 canvas 图表）
-scripts/                  验证脚本与 MSI 打包脚本
+scripts/                  验证脚本与单文件安装包构建脚本
 docs/                     技术选型、执行计划、功能清单、开发进度、UI 规格
 ```
 
@@ -124,7 +131,10 @@ docs/                     技术选型、执行计划、功能清单、开发进
 | `netpeek.log` | 历史库的错误日志 |
 
 设置屏有「清空历史」；这个目录的完整路径显示在设置屏检查栏的「关于」里。
-卸载仅移除服务和 `C:\Program Files\NetPeek\`，不会删除该目录，历史与主题数据将予以保留。
+WebView2 的用户数据目录（缓存）在 `%LOCALAPPDATA%\com.netpeek.app\`。
+
+卸载会移除服务与 `C:\Program Files\NetPeek\`，并**清除上述两个数据目录**——历史与主题数据不保留。
+这是有意为之（用户拍板「数据全部清理」），需要留档请先自行备份 `history.db`。
 
 ## 界面
 
@@ -151,7 +161,7 @@ tooltip 也会写清「已暂停监控 / 采集服务未连接」；关闭主窗
 
 ## 已知限制
 
-- **MSI 未签名**，安装会触发 SmartScreen。
+- **安装包未签名**，双击运行会触发 SmartScreen。
 - 开发与实测都在 Windows 11 上，**Windows 10 22H2 未验证**。休眠恢复、浏览器大文件下载归因也还是人工待验项。
 - 存活时间短于一个快照周期（1s）的进程，**字节归因完整但取不到进程名**，界面显示「(系统/未归因)」，归因覆盖率不计入。
 - 主题的 AI 模式需自行填写模型 endpoint 和 key，项目不内置任何服务。

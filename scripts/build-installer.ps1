@@ -22,6 +22,45 @@ function Remove-Tree([string]$path) {
     }
 }
 
+# 停掉正在运行的采集服务实例，让 MSBuild 能覆盖它的 exe。
+# 服务实例以 LocalSystem 运行，普通令牌杀不掉，只能借一次 UAC 跑 taskkill
+# （与 dev-collector.ps1 的 Stop-Collector 同款做法）。
+function Stop-Collector {
+    $procs = @(Get-Process -Name 'NetPeek.Collector' -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) { return }
+
+    $ids = ($procs | ForEach-Object { $_.Id }) -join ', '
+    Write-Host "停止运行中的采集服务（PID $ids）..." -ForegroundColor Cyan
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if ($isAdmin) {
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        $killArgs = @('/F') + ($procs | ForEach-Object { '/PID'; "$($_.Id)" })
+        try {
+            # 绝对路径：UseShellExecute 下裸名 taskkill 也会按搜索顺序解析，
+            # 装在 PATH 前段的同名 exe 能骗过这一次提权执行。
+            $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            Start-Process -FilePath $taskkill -ArgumentList $killArgs `
+                -Verb RunAs -WindowStyle Hidden -Wait | Out-Null
+        }
+        catch {
+            throw "无法结束采集服务进程（PID $ids）：$($_.Exception.Message)`n请手动结束后重试，或用管理员窗口重跑本脚本。"
+        }
+    }
+
+    # 进程真正退出、映像锁释放不是瞬时的，等它消失再往下走，否则紧接着的
+    # publish 会撞「文件被占用」。
+    for ($i = 0; $i -lt 40; $i++) {
+        if (@(Get-Process -Name 'NetPeek.Collector' -ErrorAction SilentlyContinue).Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw '旧采集服务未能在 10 秒内退出，请手动处理后重试。'
+}
+
 # ---------- 1. 主程序（release 编译，不打 bundle） ----------
 # 显式找 npm.cmd：PowerShell 5.1 的 Get-Command npm 会先命中 npm.ps1，
 # 执行策略可能拦截 .ps1 且报错不进日志（本次构建静默失败的原因）。
@@ -54,6 +93,12 @@ if (-not (Test-Path $mainExe)) { throw "主程序 exe 未找到（试过 NetPeek
 Write-Host ("主程序: {0:N1} MB" -f ((Get-Item $mainExe).Length / 1MB)) -ForegroundColor Green
 
 # ---------- 2. 采集服务 ----------
+# 先停掉正在跑的采集服务实例再 publish：dev-collector.ps1 起的实例（或装过的
+# Windows 服务）会独占 NetPeek.Collector.exe 的映像，覆盖它就是 MSB3021
+# 「文件被锁定」。这个坑只在采集端**真的改过**时才暴露 —— 没改动时 MSBuild 判定
+# 输出最新、跳过拷贝，看起来一切正常，所以容易被当成偶发。做法与 dev-collector 一致。
+Stop-Collector
+
 Write-Host '发布采集服务（self-contained 单文件 win-x64，压缩）...' -ForegroundColor Cyan
 Remove-Tree $payloadDir
 New-Item -ItemType Directory -Path $payloadDir | Out-Null

@@ -3,7 +3,7 @@ name: CI
 # 每次推到 main 和每个 PR 都跑。verification 是硬门禁：任何一步红了就别合。
 #
 # 只跑 windows-latest：这个产品是 Windows 专用的（ETW 内核会话、命名管道 ACL、
-# WiX MSI 打包、注册表自启），别的平台连编译都过不去。跑三平台矩阵纯属白烧机器时间。
+# WPF 安装器、注册表服务与自启），别的平台连编译都过不去。跑三平台矩阵纯属白烧机器时间。
 # 参考 Sniffnet 的 rust.yml（它连 Windows 的 Npcap 依赖都跳过 PR 构建），
 # 但我们没有外部驱动依赖，所以全量跑得起。
 #

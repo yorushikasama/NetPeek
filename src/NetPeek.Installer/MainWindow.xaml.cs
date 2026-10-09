@@ -39,8 +39,9 @@ public partial class MainWindow : Window
                 _cts = new CancellationTokenSource();
                 _flow = new InstallFlow(Defs.DefaultInstallDir, desktopShortcut: true);
                 SwitchTo(ProgressPage);
-                BuildStepList(_flow.BuildSteps());
-                RunSteps(_flow.BuildSteps(), Defs.DefaultInstallDir);
+                var steps = _flow.BuildSteps();
+                BuildStepList(steps);
+                RunSteps(steps, Defs.DefaultInstallDir);
             };
         }
         // App 是 OnExplicitShutdown：窗口关了进程不会自己退（正常完成/中途取消都走
@@ -117,8 +118,9 @@ public partial class MainWindow : Window
         _cts = new CancellationTokenSource();
         _flow = new InstallFlow(dir, DesktopShortcutBox.IsChecked == true);
         SwitchTo(ProgressPage);
-        BuildStepList(_flow.BuildSteps());
-        RunSteps(_flow.BuildSteps(), dir);
+        var steps = _flow.BuildSteps();
+        BuildStepList(steps);
+        RunSteps(steps, dir);
     }
 
     private void OnFinishClick(object sender, RoutedEventArgs e)

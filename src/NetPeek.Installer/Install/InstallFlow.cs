@@ -15,11 +15,12 @@ internal sealed class InstallFlow
     public sealed record Step(string Title, Func<string> Run);
 
     public string InstallDir { get; }
-    public bool DesktopShortcut { get; init; } = true;
+    public bool DesktopShortcut { get; }
 
     public InstallFlow(string installDir, bool desktopShortcut = true)
     {
         InstallDir = installDir;
+        DesktopShortcut = desktopShortcut;
     }
 
     /// 步骤按依赖排序：先清场（旧版/旧服务），再写文件（此时文件锁一定已释放），
@@ -56,6 +57,8 @@ internal sealed class InstallFlow
             string.Equals(root, full, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("不能安装到盘根目录，请选择一个专用子目录。");
 
+        // 特殊目录逐个取：ProgramFilesX86 在纯 64 位系统上返回空串，空串进
+        // Path.GetFullPath 会抛 ArgumentException，把「允许安装」变成「一律拒绝」。
         var protectedRoots = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
@@ -64,8 +67,10 @@ internal sealed class InstallFlow
             Environment.GetFolderPath(Environment.SpecialFolder.System),
             @"C:\",
             @"C:",
-        };
-        if (protectedRoots.Any(r => string.Equals(Path.GetFullPath(r).TrimEnd('\\'), full, StringComparison.OrdinalIgnoreCase)))
+        }
+        .Where(r => !string.IsNullOrWhiteSpace(r))
+        .Select(r => Path.GetFullPath(r).TrimEnd('\\'));
+        if (protectedRoots.Any(r => string.Equals(r, full, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("不能安装到该目录（系统目录或盘根），请选择一个专用子目录。");
         return full;
     }
