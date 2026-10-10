@@ -11,7 +11,7 @@ const UNATTR = '(系统/未归因)';
 
 const proc = (over) => Object.assign({
   Pid: 1000, Name: 'app.exe', Path: '', StartTimeUnixMs: 1_700_000_000_000,
-  DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0, RetransmitTotal: 0,
+  DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0, RetransmitBytes: 0, RetransmitTotal: 0,
   TopRemoteIp: '', TopRemotePort: 0, TopRemoteCountry: '',
 }, over);
 

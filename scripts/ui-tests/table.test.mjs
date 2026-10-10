@@ -67,7 +67,7 @@ const proc = (over) => Object.assign({
   UploadBytes: 0,
   DownloadTotal: 0,
   UploadTotal: 0,
-  RetransmitTotal: 0,
+  RetransmitBytes: 0, RetransmitTotal: 0,
   TopRemoteIp: '',
   TopRemotePort: 0,
   TopRemoteCountry: '',
@@ -222,12 +222,12 @@ section('visibleProcesses 应用聚合');
     Processes: [
       proc({
         Pid: 10, Name: 'msedge', StartTimeUnixMs: 5000,
-        DownloadBytes: 100, UploadBytes: 10, DownloadTotal: 1000, RetransmitTotal: 7,
+        DownloadBytes: 100, UploadBytes: 10, DownloadTotal: 1000, RetransmitBytes: 7, RetransmitTotal: 7,
         TopRemoteIp: '1.1.1.1', TopRemotePort: 443, TopRemoteCountry: 'US',
       }),
       proc({
         Pid: 11, Name: 'msedge', StartTimeUnixMs: 3000,
-        DownloadBytes: 400, UploadBytes: 20, DownloadTotal: 2000, RetransmitTotal: 3,
+        DownloadBytes: 400, UploadBytes: 20, DownloadTotal: 2000, RetransmitBytes: 3, RetransmitTotal: 3,
         TopRemoteIp: '2.2.2.2', TopRemotePort: 80, TopRemoteCountry: 'JP',
       }),
       proc({ Pid: 12, Name: 'chrome', DownloadBytes: 50 }),
@@ -241,7 +241,8 @@ section('visibleProcesses 应用聚合');
   eq(edge.DownloadBytes, 500, '瞬时下载相加');
   eq(edge.UploadBytes, 30, '瞬时上传相加');
   eq(edge.DownloadTotal, 3000, '累计下载相加');
-  eq(edge.RetransmitTotal, 10, '重传相加');
+  eq(edge.RetransmitBytes, 10, '重传增量相加');
+  eq(edge.RetransmitTotal, 10, '重传累计相加');
   eq(edge.Pid, 2, '聚合行的 Pid 字段改用成员个数');
   eq(edge.Members.length, 2, 'Members 记下成员，供 60 秒曲线逐槽相加');
   eq(edge.Members.join(','), '10:5000,11:3000', 'Members 用 pid:startMs，不是裸 pid');

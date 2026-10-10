@@ -54,6 +54,80 @@ public class EtwSnapshotBaselineTests
         AssertFrame(source.GetSnapshot(), "ok", delta: 0, total: 705);
     }
 
+    /// <summary>
+    /// 重传也必须按每帧增量报，不能直接把会话累计值透给界面。
+    ///
+    /// 背景：<c>RetransmitTotal</c> 是单调增长到进程结束的累计量，而检查栏里它和
+    /// 「PID」「会话时长」这些累计语义的项并列显示，读者会当成「刚刚重传了这么多」。
+    /// 修法是照下载/上传的基线相减加一个 <c>RetransmitBytes</c>；这里钉住三件事：
+    /// 增量按帧相减、基线帧归零（否则把断开期间的重传一次性算进「这一秒」）、
+    /// 累计值本身不受影响（会话总量仍可从 tooltip 拿）。
+    /// </summary>
+    [Fact]
+    public void Retransmit_is_reported_as_a_per_frame_delta_not_the_running_total()
+    {
+        using var metadata = new ProcessMetadataCache();
+        using var icons = new ProcessIconCache();
+        using var source = CreateSource(metadata, icons, out var counter);
+
+        SetField(counter, "DownloadTotal", 0L);
+        SetField(counter, "UploadTotal", 0L);
+        SetField(counter, "RetransmitTotal", 1000L);   // 会话已累计 1000 字节
+        SetField(counter, "LastDownloadTotal", 0L);
+        SetField(counter, "LastUploadTotal", 0L);
+        SetField(counter, "LastRetransmitTotal", 1000L);
+
+        // 第一帧：累计没动 → 增量 0（不是 1000）
+        var f1 = source.GetSnapshot();
+        Assert.Equal(0UL, OnlyProcess(f1).RetransmitBytes);
+        Assert.Equal(1000UL, OnlyProcess(f1).RetransmitTotal);
+
+        // 第二帧：又重传了 40 字节 → 增量 40，累计 1040
+        SetField(counter, "RetransmitTotal", 1040L);
+        var f2 = source.GetSnapshot();
+        Assert.Equal(40UL, OnlyProcess(f2).RetransmitBytes);
+        Assert.Equal(1040UL, OnlyProcess(f2).RetransmitTotal);
+
+        // 第三帧：没再重传 → 增量归零，累计不变
+        var f3 = source.GetSnapshot();
+        Assert.Equal(0UL, OnlyProcess(f3).RetransmitBytes);
+        Assert.Equal(1040UL, OnlyProcess(f3).RetransmitTotal);
+    }
+
+    /// <summary>
+    /// 基线帧（重连后的第一帧）必须把重传增量也归零 —— 与下载/上传同一口径。
+    /// 否则 UI 断开期间累积的重传会一次性显示成「这一秒重传了 N 字节」，
+    /// 界面上是一跳而下的假尖峰。
+    /// </summary>
+    [Fact]
+    public void Baseline_frame_reports_zero_retransmit_delta()
+    {
+        using var metadata = new ProcessMetadataCache();
+        using var icons = new ProcessIconCache();
+        using var source = CreateSource(metadata, icons, out var counter);
+
+        SetField(counter, "DownloadTotal", 0L);
+        SetField(counter, "UploadTotal", 0L);
+        SetField(counter, "LastDownloadTotal", 0L);
+        SetField(counter, "LastUploadTotal", 0L);
+        SetField(counter, "LastRetransmitTotal", 0L);
+
+        // 断开期间攒下 500 字节重传
+        SetField(counter, "RetransmitTotal", 500L);
+        source.ResetRateBaseline();
+
+        var frame = source.GetSnapshot();
+        Assert.Equal(0UL, OnlyProcess(frame).RetransmitBytes);
+        Assert.Equal(500UL, OnlyProcess(frame).RetransmitTotal);   // 累计仍是 500，不丢
+        Assert.Equal(500L, GetField<long>(counter, "LastRetransmitTotal")); // 基线已拉平
+    }
+
+    private static ProcessTraffic OnlyProcess(TrafficSnapshot snap)
+    {
+        Assert.Single(snap.Processes);
+        return snap.Processes[0];
+    }
+
     private static EtwSnapshotSource CreateSource(
         ProcessMetadataCache metadata, ProcessIconCache icons, out object counter)
     {

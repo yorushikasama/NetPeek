@@ -40,6 +40,16 @@ public sealed class ProcessTraffic
     public ulong RetransmitTotal { get; set; }
 
     /// <summary>
+    /// 本采样周期（1 秒）的重传字节。
+    ///
+    /// 与 <see cref="DownloadBytes"/> / <see cref="UploadBytes"/> 同一口径 —— 那两个是每帧
+    /// 增量、靠基线相减得到；重传原本只有累计值，直接摆在检查栏里会被读成「刚刚发生了
+    /// 多少重传」，而它其实单调增长到进程结束。累计值保留，二者都发：
+    /// 增量对应「此刻」，累计对应「会话总量」。
+    /// </summary>
+    public ulong RetransmitBytes { get; set; }
+
+    /// <summary>
     /// 本采样周期内该进程流量最大的远端 IP（对端）。
     /// 取自 ETW 事件的源/目的地址：发送取目的端、接收取源端；无端点信息时为空串。
     /// 每帧重置，代表的是「这一秒谁在说话」，不是会话累计。

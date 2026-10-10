@@ -736,14 +736,16 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         {
             long down = Interlocked.Read(ref counter.DownloadTotal);
             long up = Interlocked.Read(ref counter.UploadTotal);
+            long retransmit = Interlocked.Read(ref counter.RetransmitTotal);
 
-            long downDelta, upDelta;
+            long downDelta, upDelta, retransmitDelta;
             if (paused)
             {
                 // 暂停时冻结增量：不推进 LastTotal，速率显示 0，但累计值保持。
                 // 暂停期间 Add 已短路，计数不会再增长；恢复后增量从冻结点继续。
                 downDelta = 0;
                 upDelta = 0;
+                retransmitDelta = 0;
             }
             else
             {
@@ -763,6 +765,7 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                         -Interlocked.Read(ref counter.RetransmitTotal));
                     down = 0;
                     up = 0;
+                    retransmit = 0;
                 }
 
                 counter.StartTimeUtcFileTime = meta.StartTimeUtcFileTime;
@@ -790,12 +793,18 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                     }
                     downDelta = 0;
                     upDelta = 0;
+                    // 重传同理：基线帧不报增量，否则会把 UI 断开那段时间的重传
+                    // 一次性算进「这一秒」，界面跳出一个巨大的重传数。
+                    retransmitDelta = 0;
                 }
                 else
                 {
                     downDelta = down - counter.LastDownloadTotal;
                     upDelta = up - counter.LastUploadTotal;
+                    retransmitDelta = retransmit - counter.LastRetransmitTotal;
                 }
+
+                counter.LastRetransmitTotal = retransmit;
 
                 counter.LastDownloadTotal = down;
                 counter.LastUploadTotal = up;
@@ -853,7 +862,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
                 UploadBytes = (ulong)Math.Max(0, upDelta),
                 DownloadTotal = (ulong)down,
                 UploadTotal = (ulong)up,
-                RetransmitTotal = (ulong)Interlocked.Read(ref counter.RetransmitTotal),
+                RetransmitBytes = (ulong)Math.Max(0, retransmitDelta),
+                RetransmitTotal = (ulong)retransmit,
                 TopRemoteIp = topAddr?.ToString() ?? "",
                 TopRemotePort = topPort > 0 ? (ushort)Math.Min(topPort, ushort.MaxValue) : (ushort)0,
             });
@@ -1143,6 +1153,8 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 以下字段仅在快照线程访问（GetSnapshot 单线程调用）。
         public long LastDownloadTotal;
         public long LastUploadTotal;
+        /// <summary>上一帧的重传累计值，用来算本帧重传增量（与上面两个同理）。</summary>
+        public long LastRetransmitTotal;
         public long StartTimeUtcFileTime;
         public string Name = "";
         public string Path = "";

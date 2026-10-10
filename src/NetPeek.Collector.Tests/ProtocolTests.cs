@@ -36,6 +36,7 @@ public class ProtocolTests
                     UploadBytes = 2,
                     DownloadTotal = 3,
                     UploadTotal = 4,
+                    RetransmitBytes = 6,
                     RetransmitTotal = 5,
                 },
             ],
@@ -63,7 +64,8 @@ public class ProtocolTests
         foreach (var name in new[]
                  {
                      "Pid", "Name", "Path", "IconBase64", "StartTimeUnixMs",
-                     "DownloadBytes", "UploadBytes", "DownloadTotal", "UploadTotal", "RetransmitTotal",
+                     "DownloadBytes", "UploadBytes", "DownloadTotal", "UploadTotal",
+                     "RetransmitBytes", "RetransmitTotal",
                  })
         {
             Assert.True(proc.TryGetProperty(name, out _), $"ProcessTraffic 缺少契约字段 {name}");
@@ -75,6 +77,7 @@ public class ProtocolTests
         Assert.Equal(42u, back.Processes[0].Pid);
         Assert.Equal("data:image/png;base64,AA==", back.IconUpdates![@"C:\a.exe"]);
         Assert.Equal(5UL, back.Processes[0].RetransmitTotal);
+        Assert.Equal(6UL, back.Processes[0].RetransmitBytes);
     }
 
     [Fact]

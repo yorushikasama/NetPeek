@@ -625,7 +625,8 @@ function visibleProcesses(snap) {
       if (!agg) {
         agg = {
           Name: name, IconBase64: '', Pid: 0, Path: p.Path || '', StartTimeUnixMs: 0,
-          DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0, RetransmitTotal: 0,
+          DownloadBytes: 0, UploadBytes: 0, DownloadTotal: 0, UploadTotal: 0,
+          RetransmitBytes: 0, RetransmitTotal: 0,
           TopRemoteIp: '', TopRemotePort: 0, TopRemoteCountry: '', _memberBytes: -1,
           Members: [],
         };
@@ -641,6 +642,7 @@ function visibleProcesses(snap) {
       agg.UploadBytes += p.UploadBytes || 0;
       agg.DownloadTotal += p.DownloadTotal || 0;
       agg.UploadTotal += p.UploadTotal || 0;
+      agg.RetransmitBytes += p.RetransmitBytes || 0;
       agg.RetransmitTotal += p.RetransmitTotal || 0;
       if (!agg.IconBase64) agg.IconBase64 = iconOf(p);
       // 聚合行显示流量最大成员的对端（每秒都在变，取最热的一个有代表性）
@@ -1144,7 +1146,14 @@ function renderDetail(snap, p) {
   if (p.StartTimeUnixMs > 0) {
     parts.push(`会话 ${fmtDuration(((snap.TimestampUnixMs || Date.now()) - p.StartTimeUnixMs) / 1000)}`);
   }
-  if (p.RetransmitTotal > 0) parts.push(`重传 ${fmtBytes(p.RetransmitTotal)}`);
+  // 只报本秒的重传：RetransmitTotal 是会话累计、单调增长到进程结束，
+  // 直接显示会被读成「刚刚重传了这么多」。累计值仍在 tooltip 里给 wanting 的人看。
+  if (p.RetransmitBytes > 0) {
+    parts.push(`重传 ${fmtBytes(p.RetransmitBytes)}/s`);
+  }
+  if (p.RetransmitTotal > 0) {
+    els.inspPath.title = `${els.inspPath.title ? els.inspPath.title + '\n' : ''}会话累计重传 ${fmtBytes(p.RetransmitTotal)}`;
+  }
   // 本秒最热的对端也上详情行：检查栏是看「这个应用在和谁说话」最顺眼的地方。
   // 这一项带图标，所以是对象而不是字符串（国旗是节点，塞不进一个串里）。
   if (p.TopRemoteIp) {
