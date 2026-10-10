@@ -8,11 +8,17 @@ using NetPeek.Shared.Protocol;
 namespace NetPeek.Collector.Sources;
 
 /// <summary>
-/// ETW 数据源：订阅内核网络事件，按 payload PID 聚合 TCP/UDP 收发字节。
+/// ETW 数据源：订阅内核网络事件，按进程聚合 TCP/UDP 收发字节。
 ///
-/// 关键规则（见 docs/技术选型.md 第 1 节）：
-/// 1. 用事件 payload 的 PID，不能用事件头 PID —— TraceEvent 的 KernelTraceEventParser
-///    已在 FixupData 中把 payload PID 写回 ProcessID，故 <c>data.ProcessID</c> 即为 payload PID。
+/// 关键规则（见 docs/技术选型.md 第 1 节「归因口径的更正」）：
+/// 1. **TCP 用四元组查系统连接表拿属主，不用事件头 PID**；UDP 直接用事件头 PID。
+///    这条推翻了本文件早期的注释（那时写着「TraceEvent 已把 payload PID 写回
+///    ProcessID」）—— 那是把 manifest-based provider 的结论套到了 class-based
+///    parser 上：后者的 TCP/UDP 事件 payload 根本没有 PID 字段，
+///    <c>data.ProcessID</c> 读的是 <c>EVENT_HEADER.ProcessId</c>，并不总是 socket 属主。
+///    实测：外网 TCP 65,536 字节记到属主自己名下 **0 字节**（全落到不相干的进程上），
+///    外网 UDP 163,840/163,840 全对，回环 TCP 786,432/786,432 全对。
+///    细节与实测数据见 <see cref="TcpConnectionTable"/> 与 <see cref="CorrectTcpPid"/>。
 /// 2. 忽略 "Protocol copied data on behalf of user"（Event ID 18，TcpIpTCPCopy / TcpIpTCPCopyIPV6），
 ///    它与 Data received 是同一批数据的两次观察，累加会导致下载量翻倍。
 /// 3. 重传事件单独累计，不混入应用上传量。
@@ -34,6 +40,16 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     /// 那段真空：直接按进程存活性剪掉已退出的 PID（口径与 GetSnapshot 的 !Alive 剪枝一致）。
     /// </summary>
     private const int MaintenanceIntervalMs = 60_000;
+
+    /// <summary>
+    /// TCP 连接表快照的刷新周期（毫秒）。
+    ///
+    /// 1 秒的依据：<see cref="TcpConnectionTable"/> 的类注释里有本机实测数据 ——
+    /// 单次全表枚举约 0.1 ms（约 400 条连接），每秒一次 CPU 占用约 0.01%，可忽略。
+    /// 周期再长不会更省（那点开销本就无感），只会把「新建连接在首次快照前
+    /// 查不到属主」的窗口拉长 —— 那段时间的流量会退回 header PID，也就是今天全错的状态。
+    /// </summary>
+    private const int ConnTableRefreshMs = 1_000;
 
     private const string SessionName = "NetPeek.Collector";
 
@@ -132,6 +148,17 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     // 无 UI 连接期间清理已退出 PID 的低频维护定时器（见 MaintenanceIntervalMs / PruneDeadCounters）。
     private Timer? _maintenanceTimer;
 
+    // TCP 属主校正用的连接表快照（见 CorrectTcpPid）。读侧是 ETW 派发线程
+    // （每秒几十万次），写侧是刷新定时器，所以用 volatile 换引用做整体替换：
+    // 字典本身发布后只读，不再修改，读侧无需任何锁。
+    private volatile Dictionary<TcpConnectionTable.ConnKey, uint>? _connTable;
+
+    // 连接表快照是否成功刷新过。从未成功过时 _connTable 为 null，校正直接跳过
+    // （照样退回 header PID），不为一个空表白花每事件一次字典查找。
+    private volatile bool _connTableReady;
+
+    private Timer? _connTableTimer;
+
     // EventsLost 是累计值且变化不频繁，无需每帧查询会话；缓存最近一次读数，按间隔刷新。
     private int _cachedEventsLost;
     private long _lastEventsLostReadMs;
@@ -194,6 +221,47 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 无 UI 连接时也要给 _counters 剪枝（GetSnapshot 只在有客户端时才跑），否则常驻
         // 服务的字典会随曾收发过的 PID 数无界增长。低频、按存活性剪，见 MaintenanceIntervalMs。
         _maintenanceTimer = new Timer(_ => PruneDeadCounters(), null, MaintenanceIntervalMs, MaintenanceIntervalMs);
+
+        // 连接表快照要先同步取一次再起定时器：定时器的首次触发是 1 秒后，
+        // 那之前若已有 TCP 事件进来，校正会一直空转（退回 header PID）。
+        RefreshConnTable();
+        _connTableTimer = new Timer(_ => RefreshConnTable(), null, ConnTableRefreshMs, ConnTableRefreshMs);
+    }
+
+    /// <summary>
+    /// 刷新 TCP 连接表快照。整体替换引用（读侧无锁），失败只记一次日志并保留上一版 ——
+    /// 一次枚举失败不该让已经校准好的流量反过来退回 header PID。
+    /// </summary>
+    private void RefreshConnTable()
+    {
+        if (_disposed) return;
+        try
+        {
+            var table = TcpConnectionTable.Read();
+            if (table.Count == 0)
+            {
+                // 空表几乎总是「解析出了问题」而不是「真的没有连接」——本机任何时刻
+                // 都有几十条 TCP 连接。保留上一版，别拿空表把校正能力整体关掉。
+                if (!_connTableReady)
+                {
+                    _logger.LogWarning("TCP 连接表为空，TCP 属主校正暂不可用，将退回事件头 PID");
+                }
+                return;
+            }
+            _connTable = table;
+            _connTableReady = true;
+        }
+        catch (Exception ex)
+        {
+            if (_connTableReady)
+            {
+                _logger.LogWarning(ex, "刷新 TCP 连接表失败，继续使用上一版快照");
+            }
+            else
+            {
+                _logger.LogWarning(ex, "首次读取 TCP 连接表失败，TCP 属主校正不可用");
+            }
+        }
     }
 
     /// <summary>
@@ -400,15 +468,18 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
 
     // 对端追踪：TCP 发送取目的端（daddr/dport）、接收取源端（saddr/sport）——
     // 「远端」永远是对面的那台机器。IPv6 事件类同名字段同理。
-    private void OnTcpSend(TcpIpSendTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
-    private void OnTcpRecv(TcpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
+    //
+    // TCP 走 AddTcp（带四元组）：事件头 PID 对 TCP 不可信，要查连接表校正属主，
+    // 见 CorrectTcpPid。UDP 走 Add：实测事件头 PID 对 UDP 是准确的，不必查表。
+    private void OnTcpSend(TcpIpSendTraceData data) => AddTcp(data.ProcessID, data.size, isUpload: true, data.saddr, data.sport, data.daddr, data.dport);
+    private void OnTcpRecv(TcpIpTraceData data) => AddTcp(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport, data.daddr, data.dport);
     private void OnUdpSend(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
     private void OnUdpRecv(UdpIpTraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
     // 注意：库把 IPv6 UDP 的类名拼成了 UpdIpV6TraceData（少了一个 d），这是 TraceEvent 3.2.6 的既有拼写。
     private void OnUdpSendV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
     private void OnUdpRecvV6(UpdIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
-    private void OnTcpSendV6(TcpIpV6SendTraceData data) => Add(data.ProcessID, data.size, isUpload: true, data.daddr, data.dport);
-    private void OnTcpRecvV6(TcpIpV6TraceData data) => Add(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport);
+    private void OnTcpSendV6(TcpIpV6SendTraceData data) => AddTcp(data.ProcessID, data.size, isUpload: true, data.saddr, data.sport, data.daddr, data.dport);
+    private void OnTcpRecvV6(TcpIpV6TraceData data) => AddTcp(data.ProcessID, data.size, isUpload: false, data.saddr, data.sport, data.daddr, data.dport);
     private void OnRetransmit(TcpIpTraceData data) => AddRetransmit(data.ProcessID, data.size, data.daddr);
     private void OnRetransmitV6(TcpIpV6TraceData data) => AddRetransmit(data.ProcessID, data.size, data.daddr);
 
@@ -460,6 +531,56 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         }
 
         TrackEndpoint(counter, remoteAddr, remotePort, size);
+    }
+
+    /// <summary>
+    /// TCP 事件的归因入口：先用四元组查连接表校正属主，再走 <see cref="Add"/> 累加。
+    /// 「远端」取对面那台机器——发送事件的对端是 daddr/dport，接收事件的是 saddr/sport；
+    /// 但**校正用键要本地与远端都传**，因为连接表是按双向四元组建的。
+    /// </summary>
+    private void AddTcp(int headerPid, int size, bool isUpload,
+                        IPAddress localAddr, int localPort, IPAddress remoteAddr, int remotePort)
+    {
+        if (_paused || size <= 0)
+        {
+            return;
+        }
+        Add(CorrectTcpPid(headerPid, localAddr, localPort, remoteAddr, remotePort), size, isUpload, remoteAddr, remotePort);
+    }
+
+    /// <summary>
+    /// 把 TCP 事件的属主从「事件头 PID」校正成「连接表里的真实属主」。
+    ///
+    /// 为什么要校正（2026-10-10 本机实测，见 <see cref="TcpConnectionTable"/> 类注释）：
+    /// <c>data.ProcessID</c> 读的是 <c>EVENT_HEADER.ProcessId</c>，它**不总是 socket 属主**。
+    /// 实测一个已知属主的进程发 65,536 字节外网 TCP，记到自己名下的字节是 **0**，
+    /// 全部落到了 ZCode / System / msedge 名下；同批 UDP 则是 163,840/163,840 全对。
+    /// 对照实验把同一套代码改测回环 TCP，786,432 字节全对 —— 说明这个字段是否可信
+    /// 取决于事件由哪个线程发出（回环由应用线程自己发，外网由协议栈/工作线程发），
+    /// 不是读错字段。没有这张表，按进程的下载流量会系统性地记到不相干的进程头上。
+    ///
+    /// 降级（用户拍板「保留原值」）：表未就绪、首次快照前的窗口、连接刚建立还没进表、
+    /// 或四元组查不到时，一律**沿用事件头 PID**。这不是静默掩盖 —— 那本来就是当前行为，
+    /// 且不可能更差；把流量丢进「未归因」反而会掩盖「表确实没覆盖到」这个事实。
+    ///
+    /// 只对 TCP 做：UDP 的事件头 PID 实测准确，查表纯属白付开销（UDP 表远大于 TCP 表）。
+    /// </summary>
+    private int CorrectTcpPid(int headerPid, IPAddress localAddr, int localPort,
+                              IPAddress remoteAddr, int remotePort)
+    {
+        var table = _connTable;
+        if (table is null || headerPid <= 0) return headerPid;
+
+        // 端口缺失（内核没填）时查表必然落空，不必构造键。
+        if (localPort <= 0 || remotePort <= 0 || localAddr is null || remoteAddr is null)
+        {
+            return headerPid;
+        }
+
+        var key = TcpConnectionTable.ConnKey.Create(localAddr, localPort, remoteAddr, remotePort);
+        // TryGetValue 而非索引器：查不到是常态（新建连接的第一个包就在窗口里），
+        // 走索引器会抛 KeyNotFoundException，在每秒几十万次的路径上不可接受。
+        return table.TryGetValue(key, out var owner) && owner > 4 ? (int)owner : headerPid;
     }
 
     /// <summary>
@@ -964,6 +1085,10 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
         // 维护定时器先停：无参 Dispose 不阻塞在途回调，但 _disposed 已置位使 PruneDeadCounters 立即返回。
         _maintenanceTimer?.Dispose();
         _maintenanceTimer = null;
+
+        // 连接表刷新定时器同理；置 _disposed 后 RefreshConnTable 也不再重取快照。
+        _connTableTimer?.Dispose();
+        _connTableTimer = null;
 
         // 等启动线程收工。_disposed 已置位，它建完会在 _sessionGate 内自查（adopted=false）
         // 自行拆掉刚建的会话 —— 本方法读空 _session 与它认领已由锁串行化，不会漏拆。
