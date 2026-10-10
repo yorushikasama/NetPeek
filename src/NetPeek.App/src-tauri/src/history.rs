@@ -640,7 +640,18 @@ fn query_range_buckets(
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     } else if bucket == WEEK {
-        "SELECT ((ts - ?3)/604800)*604800 + ?3 AS bts, name, SUM(down) AS down, SUM(up) AS up
+        // 以锚点做整周对齐。难点是 SQLite 的整数除法与 % 都是**向零**截断，
+        // 不是 floor：直接写 ((ts - ?3)/604800)*604800 会让锚点之前那一周的行
+        //（ts - ?3 ∈ [-604799, -1]）算出 0 而被归进锚点桶 —— 与 floor 正好相反，
+        // 它们本该属于上一周。前端骨架按自己的周键排，多出来这一周对不上任何
+        // 槽位，整周数据会被 buildBuckets 丢掉（合计偏少、图缺一根）。
+        //
+        // floor() 也不能直接写函数：bundled SQLite 3.46 没编译
+        // SQLITE_ENABLE_MATH_FUNCTIONS，调用会报「no such function」（本机 sqlite3
+        // CLI 的 3.50 有，那是另一份构建，别被骗）。这里用取模归一化手写 floor：
+        // 先算 r = x % 604800，把负的 r 折进 [0, 604800)，x - r 即该桶起点。
+        // 对 x 为任意整数都成立，见 query_range_buckets_week_floors_before_anchor。
+        "SELECT (ts - ?3) - (((ts - ?3) % 604800 + 604800) % 604800) + ?3 AS bts, name, SUM(down) AS down, SUM(up) AS up
          FROM minute_stats WHERE ts >= ?1 AND ts < ?2
          GROUP BY bts, name ORDER BY bts"
     } else {
@@ -696,10 +707,11 @@ pub fn history_range(
     bucket: i64,
     anchor: i64,
 ) -> Result<String, String> {
-    let path = data_dir(&app)?.join(DB_FILE);
-    let conn = Connection::open(&path).map_err(|e| format!("打开历史库失败: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(3))
-        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+    // 走 open_db 而不是自己开连接：建表兜底（SCHEMA_SQL）只写在 open_db 里，
+    // 漏了它这条命令就成了唯一一条会撞「no such table: minute_stats」的读路径 ——
+    // 落在后台 init 建好 schema 前的竞态窗口里时，前端把错误 catch 成空数组，
+    // 历史屏整片空白且与「真的没流量」无法区分。
+    let (conn, _path) = open_db(&app)?;
     let rows = query_range_buckets(&conn, start, end, bucket, anchor)
         .map_err(|e| format!("查询区间聚合失败: {e}"))?;
     serde_json::to_string(&rows).map_err(|e| format!("区间聚合序列化失败: {e}"))
@@ -758,12 +770,21 @@ pub fn history_process_totals(app: AppHandle, hours: i64) -> Result<String, Stri
 }
 
 /// 清空全部历史并 VACUUM 回收空间。
+///
+/// async + spawn_blocking：VACUUM 要重写整个库文件，几十 MB 的库能跑好几秒，
+/// 而 DELETE 期间还持着 conn 与 flush_gate 两把锁。留在同步命令里就是主线程干等 ——
+/// 窗口拖不动、关不掉、托盘也点不动（托盘的可见性查询同样走主线程）。
+/// 整段搬进 spawn_blocking，锁仍只在一处同步上下文内持有。
 #[tauri::command]
-pub fn clear_history(app: AppHandle) -> Result<(), String> {
-    let state = app
-        .try_state::<Arc<HistoryState>>()
-        .ok_or_else(|| "历史数据库尚未就绪，请稍后重试".to_string())?;
-    clear_all(&state)
+pub async fn clear_history(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app
+            .try_state::<Arc<HistoryState>>()
+            .ok_or_else(|| "历史数据库尚未就绪，请稍后重试".to_string())?;
+        clear_all(&state)
+    })
+    .await
+    .map_err(|e| format!("清空历史任务失败: {e}"))?
 }
 
 fn clear_all(state: &HistoryState) -> Result<(), String> {
@@ -802,6 +823,11 @@ pub fn apply_retention(state: &Arc<HistoryState>, days: i64) {
 }
 
 /// 调整保留天数（0 = 永久保留），并立即清理一次。
+///
+/// db_ready 守卫不可省：flush_due 与 clear_all 都先查它，未就绪时 conn 里那张
+/// 占位内存库没有 minute_stats 表，prune 的 DELETE 会报「no such table」，
+/// 而前端把这类错误静默吞掉 —— 用户看到的是「改了保留期但没反应」。
+/// 更重要的是保留期本身仍要落进内存态：那一份不依赖库就绪。
 #[tauri::command]
 pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
     // 用 try_state：窗口页面可能在 setup 完成前就 invoke，state 未就绪时仅落文件。
@@ -810,7 +836,9 @@ pub fn set_retention(app: AppHandle, days: i64) -> Result<(), String> {
         state
             .retention_days
             .store(days.clamp(0, RETENTION_MAX_DAYS), Ordering::SeqCst);
-        prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
+        if state.db_ready.load(Ordering::SeqCst) {
+            prune(&state).map_err(|e| format!("按保留期清理失败: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -1712,6 +1740,43 @@ mod range_tests {
         assert_eq!((rows[0].ts, rows[0].down), (anchor, 10));
         assert_eq!((rows[1].ts, rows[1].down), (anchor + WEEK, 20));
         assert_eq!(rows[0].ts % WEEK, anchor % WEEK, "桶对齐到锚点而非 UTC 周");
+    }
+
+    /// 锚点**之前**的那一周必须归到 anchor - WEEK，不能被算进锚点桶。
+    ///
+    /// SQLite 的整数除法向零截断（-1/604800 == 0），所以修复前
+    /// `((ts - anchor)/WEEK)*WEEK + anchor` 对 ts ∈ [anchor-WEEK, anchor) 会得到
+    /// `anchor`：上一周的数据混进第 0 周，且不对应前端任何槽位 → 整周被丢弃。
+    /// 现有的 week_uses_anchor 只用正值，罩不住这个方向。
+    #[test]
+    fn query_range_buckets_week_floors_before_anchor() {
+        let state = HistoryState::new();
+        let conn = state.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+
+        let anchor = 1_700_000_000i64;
+        let cases = [
+            (anchor - WEEK + 1, 11i64), // 上一周最后一秒
+            (anchor - WEEK / 2, 12i64), // 上一周中间
+            (anchor - 1, 13i64),        // 锚点前一秒
+            (anchor + 3600, 10i64),     // 第 0 周
+        ];
+        for (ts, down) in cases {
+            conn.execute(
+                "INSERT INTO minute_stats (ts, pid, start_ts, name, down, up) VALUES (?1, 1, 0, 'a.exe', ?2, 0)",
+                params![ts, down],
+            )
+            .unwrap();
+        }
+
+        let rows = query_range_buckets(&conn, anchor - WEEK, anchor + WEEK, WEEK, anchor).unwrap();
+        assert_eq!(rows.len(), 2, "锚点前一周与第 0 周各一桶");
+        assert_eq!(
+            (rows[0].ts, rows[0].down),
+            (anchor - WEEK, 36),
+            "锚点之前的行向下取整归到上一周（三行合计 11+12+13）"
+        );
+        assert_eq!((rows[1].ts, rows[1].down), (anchor, 10));
     }
 
     #[test]

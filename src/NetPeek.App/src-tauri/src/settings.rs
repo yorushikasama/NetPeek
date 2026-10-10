@@ -154,6 +154,13 @@ pub fn country_db_path(state: &SettingsState) -> String {
         .to_string()
 }
 
+/// 取设置里记录的 autostart 值。只反映文件/内存态，**不代表注册表真值** ——
+/// 那要问 get_autostart。这里只用来判断「这次保存是否翻转了自启」，
+/// 好省掉改其它字段时那次无谓的 reg.exe 调用。
+pub fn autostart_of(inner: &serde_json::Value) -> Option<bool> {
+    inner.get("autostart").and_then(|v| v.as_bool())
+}
+
 /// 按设置内容切换国家库。失败只回错误串，不动全局状态（见 geo::apply 的说明）。
 fn apply_country_db(value: &serde_json::Value) -> Result<crate::geo::DbInfo, String> {
     crate::geo::apply(value.get("countryDbPath").and_then(|v| v.as_str()))
@@ -286,8 +293,19 @@ pub fn load_settings(app: AppHandle) -> Result<String, String> {
 }
 
 /// 覆盖保存设置（整体写入，避免并发写局部字段），并同步注册表 autostart。
+///
+/// async + spawn_blocking：本命令在设置屏每次改动（拖滑杆、换单位）时都会调，
+/// 里面既有 8MB MMDB 的读与解析、原子落盘，还要 spawn 一次 reg.exe 并等它退出 ——
+/// 留在同步命令里会占住主线程，表现为拖滑杆时整个窗口发涩。整体搬进 spawn_blocking，
+/// 顺带保证内部那几把 Mutex 仍在一处同步上下文里，不会跨 await 持有。
 #[tauri::command]
-pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
+pub async fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_settings_blocking(app, json))
+        .await
+        .map_err(|e| format!("保存设置任务失败: {e}"))?
+}
+
+fn save_settings_blocking(app: AppHandle, json: String) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(&json).map_err(|e| format!("设置 JSON 解析失败: {e}"))?;
 
@@ -326,8 +344,18 @@ pub fn save_settings(app: AppHandle, json: String) -> Result<(), String> {
         *state.inner.lock().unwrap_or_else(|e| e.into_inner()) = value.clone();
     }
 
-    if let Some(autostart) = value.get("autostart").and_then(|v| v.as_bool()) {
-        set_autostart_impl(autostart)?;
+    // 只在 autostart 真的翻转时才碰注册表：改个速率单位也要 spawn 一次 reg.exe
+    // 是纯浪费（原实现无条件执行）。旧值从内存态取 —— 文件里那份可能过时，
+    // 但 get_autostart 每次都以注册表为准，这里只是省掉一次无意义的写入。
+    let want = value.get("autostart").and_then(|v| v.as_bool());
+    let have = app
+        .try_state::<SettingsState>()
+        .and_then(|s| autostart_of(&s.inner.lock().unwrap_or_else(|e| e.into_inner())));
+    if let Some(want) = want {
+        // have 为 None = 内存态里压根没有这一项（首次保存），当作与 want 不同，写一次。
+        if Some(want) != have {
+            set_autostart_impl(want)?;
+        }
     }
     Ok(())
 }
@@ -357,7 +385,10 @@ pub fn set_country_db(app: AppHandle, path: String) -> Result<String, String> {
         None => merged_with_defaults(read_settings_file(&data_dir(&app)?.join(SETTINGS_FILE))),
     };
     value["countryDbPath"] = serde_json::Value::String(trimmed.to_string());
-    save_settings(
+    // 调阻塞版而非 async 的 save_settings：本命令是同步命令，不能跨 await。
+    // 代价是这条路径上会阻塞主线程，但它只在用户手动挑库时触发一次，
+    // 且下面已经先 probe 过文件，真正贵的读盘解析只发生一次。
+    save_settings_blocking(
         app,
         serde_json::to_string(&value).map_err(|e| e.to_string())?,
     )?;
@@ -426,24 +457,35 @@ pub fn open_collector_log() -> Result<String, String> {
 }
 
 /// 读取注册表确认开机自启真实状态（settings.json 可能过时）。
+///
+/// async + spawn_blocking：`reg query` 要等子进程退出（几十毫秒），而本命令在设置屏
+/// 打开时被调用；留在同步命令里会占住主线程，窗口当场冻住。async 命令本身跑在 tokio
+/// 工作线程上，但里面直接调 `.output()` 一样是阻塞 —— 必须再套一层 spawn_blocking。
 #[tauri::command]
-pub fn get_autostart() -> Result<bool, String> {
-    let out = std::process::Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-            "/v",
-            AUTOSTART_VALUE,
-        ])
-        .output()
-        .map_err(|e| format!("读取开机自启失败: {e}"))?;
-    Ok(out.status.success())
+pub async fn get_autostart() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                AUTOSTART_VALUE,
+            ])
+            .output()
+            .map_err(|e| format!("读取开机自启失败: {e}"))?;
+        Ok(out.status.success())
+    })
+    .await
+    .map_err(|e| format!("读取开机自启任务失败: {e}"))?
 }
 
 /// 设置/取消开机自启：写/删 HKCU\...\Run\NetPeek，值为当前 exe 路径。
+/// 同 get_autostart：阻塞的 reg 调用放 spawn_blocking，不占主线程。
 #[tauri::command]
-pub fn set_autostart(enabled: bool) -> Result<(), String> {
-    set_autostart_impl(enabled)
+pub async fn set_autostart(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_autostart_impl(enabled))
+        .await
+        .map_err(|e| format!("设置开机自启任务失败: {e}"))?
 }
 
 fn set_autostart_impl(enabled: bool) -> Result<(), String> {

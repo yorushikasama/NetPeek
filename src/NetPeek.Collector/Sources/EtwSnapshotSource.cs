@@ -354,34 +354,46 @@ public sealed class EtwSnapshotSource : ISnapshotSource, IDisposable
     }
 
     /// <summary>
-    /// ETW 事件分发线程入口。session.Source.Process() 是长驻阻塞调用，
-    /// 裸调时一旦抛异常就是线程级未捕获异常——直接崩掉整个服务进程，且日志无痕。
-    /// 这里兜住并留痕：事后能区分「采集停了」是权限/会话问题还是分发线程炸了。
+    /// ETW 事件分发线程入口。session.Source.Process() 是长驻阻塞调用，正常情况下永不返回；
+    /// 两条退出路径都必须走同一条自愈，否则采集会永久停摆却仍对外报「健康」。
+    ///
+    /// ① 抛异常：裸调时是线程级未捕获异常——直接崩掉整个服务进程，且日志无痕。这里兜住并留痕。
+    /// ② **正常返回**：会话被外部停掉时（另一个 ETW 工具、logman、驱动介入）TraceEvent
+    ///    只是结束分发循环，并不抛异常。若只在 catch 里处理，这条路径会静默退出：_state 仍是
+    ///    Running、GetSnapshot 继续报 Status="ok" 与陈旧计数，而 IsActive 也为真（我们自己
+    ///    那个句柄没被停），于是采集彻底死掉而界面显示一切正常，只能靠重启服务复活。
+    ///    故失效处理放 finally，catch 只负责记日志——正常返回也要留痕（不挂异常，便于排障时
+    ///    区分「被外部停掉」与「分发线程炸了」）。
     /// </summary>
     private void ProcessEvents(TraceEventSession session)
     {
         try
         {
             session.Source.Process();
+            // 走到这里说明分发循环自己结束了（正常返回）。会话已不再产出事件，
+            // 按失效处理并排程重建 —— 与抛异常路径同一条自愈。
+            _logger.LogError("ETW 事件分发线程正常退出（会话可能被外部停止），采集已停止，{Seconds} 秒后重试。", RetryIntervalMs / 1000);
         }
         catch (Exception ex)
         {
-            _state = SessionState.Failed;
             _logger.LogError(ex, "ETW 事件线程异常退出，采集已停止，{Seconds} 秒后重试。", RetryIntervalMs / 1000);
+        }
+        finally
+        {
+            _state = SessionState.Failed;
 
-            // 这个会话的分发线程已经死了，会话对象不可能再产出事件：显式停掉并释放。
+            // 这个会话的分发线程已经结束，会话对象不可能再产出事件：显式停掉并释放。
             // 不这么做的话，下面的自愈重试会在 StartSession 里把 _session 覆写成新会话，
-            // 崩掉的这个托管会话对象就再没人释放（内核会话靠残留清理兜底，托管句柄泄漏）。
+            // 结束的这个托管会话对象就再没人释放（内核会话靠残留清理兜底，托管句柄泄漏）。
             try { session.Stop(); } catch { /* 会话可能已被外部停掉 */ }
             try { session.Dispose(); } catch { /* 忽略释放失败 */ }
-            // 仅当 _session 仍指向这个崩掉的会话时才清空：重试线程或 Dispose 可能已把
+            // 仅当 _session 仍指向这个失效的会话时才清空：重试线程或 Dispose 可能已把
             // _session 换成新会话，CompareExchange 保证不误清别人的引用。
             Interlocked.CompareExchange(ref _session, null, session);
 
-            // 武装自愈定时器：分发线程一旦抛异常（一个畸形事件、会话被外部停掉等）就
-            // 整个退出，若不在这里重排程，采集会永久停到进程重启为止 —— 而重试此前
-            // 只在 StartSession 启动失败时武装。与启动失败同一条自愈路径：新建会话、
-            // 重开事件线程。已 Dispose 或已有排程时不重复武装。
+            // 武装自愈定时器：分发线程一旦结束（抛异常或正常返回——一个畸形事件、
+            // 会话被外部停掉等），若不在这里重排程，采集会永久停到进程重启为止。
+            // 与启动失败同一条自愈路径：新建会话、重开事件线程。已 Dispose 或已有排程时不重复武装。
             ArmRetryTimer();
         }
     }

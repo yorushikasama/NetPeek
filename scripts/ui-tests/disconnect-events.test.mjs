@@ -124,7 +124,16 @@ async function fixture(kind) {
   await settle(t);
   eq(ctx.NetPeekCommon._missingIds.length, 0, `${kind} 真实 HTML 包含完整脚本需要的节点`);
   if (kind === 'main') {
-    eq(trace.slice(0, 3).join(','), 'listen:snapshot,listen:pipe-status,invoke:frontend_ready', '先注册数据和断线监听，再通知宿主就绪');
+    // 断言的是「数据与断线监听必须早于 frontend_ready 就绪通知」这个不变量，
+    // 而不是头部三格的精确序列：显隐信号 win-visibility 也是启动关键路径的监听
+    // （漏了它，主窗隐藏到托盘后仍每秒重绘），插在前面是合理的。
+    // 原来写成 trace.slice(0,3) 的等值比较，新增一个监听就会被无关地判红。
+    const readyAt = trace.indexOf('invoke:frontend_ready');
+    const snapshotAt = trace.indexOf('listen:snapshot');
+    const statusAt = trace.indexOf('listen:pipe-status');
+    ok(snapshotAt >= 0 && statusAt >= 0 && readyAt >= 0, '注册了数据、断线与就绪通知');
+    ok(snapshotAt < readyAt && statusAt < readyAt,
+      '先注册数据和断线监听，再通知宿主就绪');
     ok(t.el('setRateUnit').listeners.has('change'), '真实设置模块完成初始化并注册单位 change');
     eq(resized.size, 1, '真实窗口装饰流程已注册宿主尺寸监听');
     eq(t.chart()?.axesOnly, true, '启动首绘没有伪造实时数据');
@@ -407,6 +416,40 @@ section('主窗：正常隐藏继续缓存、采样、记账和收图标，恢�
   eq(mainRates(t), '7.00|MB/s|14.00|MB/s', '非实时屏恢复可见也不提前绘制实时件');
   await navigate(t, 'live');
   mainFrame(t, background, '8.00|MB/s|16.00|MB/s');
+}
+
+// 主窗的宿主显隐广播（Rust 侧 notify_visibility 在 show/hide 时发，label 为 'main'）。
+async function mainVisibility(t, visible, label = 'main') {
+  await t.emit('win-visibility', { label, visible });
+}
+
+// 主窗：托盘隐藏（win-visibility）后停止重绘。
+// 这条对应 §4.1 的硬性验收项 —— document.hidden 在 WebView2 隐藏宿主窗口时不保证触发，
+// 只判它会让隐藏的主窗继续每秒全量重绘（DOM 重建 + canvas 重画）白烧 CPU。
+// 与下面小窗那条同构，只是主窗过去漏了这个门控。
+section('主窗：宿主隐藏停止重绘，双信号门控与恢复补画');
+{
+  const t = await fixture('main');
+  const first = snapshot(1);
+  await t.emit('snapshot', first);
+  mainFrame(t, first, '1.00|MB/s|2.00|MB/s');
+
+  await mainVisibility(t, false);
+  const before = t.drawings.length;
+  await t.emit('snapshot', snapshot(2, 'ok', { IconUpdates: { 'C:\\Apps\\browser.exe': ICON } }));
+  const latest = snapshot(3);
+  await t.emit('snapshot', latest);
+  eq(t.drawings.length, before, '宿主隐藏后不再重画图表');
+  eq(t.el('totalDownValue').textContent, '1.00', '宿主隐藏后顶栏保留最后一帧的数');
+  eq(t.ctx.NetPeekLive.lastSnapshot()?.TimestampUnixMs, latest.TimestampUnixMs, '隐藏期间仍缓存最新帧');
+
+  // document 可见（另一条信号）不能越过宿主隐藏门控
+  await visibility(t, false);
+  eq(t.drawings.length, before, 'document 可见不能越过宿主隐藏门控');
+
+  // 恢复后立即补画最新帧，不等下一秒
+  await mainVisibility(t, true);
+  mainFrame(t, latest, '3.00|MB/s|6.00|MB/s');
 }
 
 // 迷你窗口：断线、等待新帧及两路显隐缓存。

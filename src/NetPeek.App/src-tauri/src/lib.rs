@@ -359,7 +359,11 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(8));
                     if let Some(w) = app_handle.get_webview_window("main") {
-                        if !w.is_visible().unwrap_or(true) {
+                        // 兜底窗口的全部意义就是「前端没能把窗口显示出来时强制拉起来」，
+                        // 所以判断必须以「显示不出来」为准。unwrap_or(true) 让 is_visible()
+                        // 出错时被当成「窗口可见」→ !true = false → 恰好在最该生效的
+                        // 那一刻不显示；取反成 false（出错即视为不可见）才是安全网的语义。
+                        if !w.is_visible().unwrap_or(false) {
                             let _ = w.show();
                         }
                     }

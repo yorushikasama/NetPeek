@@ -129,17 +129,21 @@ fn open(bytes: Vec<u8>) -> Result<Reader<Vec<u8>>, String> {
 ///
 /// 先构造成功再替换，失败时全局状态保持原样——设置里填了一个坏路径不该
 /// 让国家解析整个瘫掉（那种表现是「所有对端突然都变成未知」）。
+///
+/// 写锁只覆盖最后的替换动作，不包住文件读取与解析：country_code 走读锁，而它被
+/// 管道线程每秒调用几十次（每帧每个带对端的进程一次）。持写锁读 8 MB 的 MMDB
+/// 会让整条采集管线的国家解析阻塞几百毫秒。MutexGuard 不是 Send，但这段没有
+/// await，纯同步作用域下提前 drop 就够了。
 pub fn apply(path: Option<&str>) -> Result<DbInfo, String> {
     let wanted = path.map(str::trim).filter(|p| !p.is_empty());
-    let mut guard = db().write().unwrap_or_else(|e| e.into_inner());
 
-    match wanted {
+    // 锁外完成全部准备工作：读盘 + 构造 + 提取描述信息。
+    let (next, info) = match wanted {
         None => {
             let reader =
                 Reader::from_source(BUILTIN_BYTES).map_err(|e| format!("内嵌国家库损坏：{e}"))?;
             let info = describe("builtin", "（内嵌）".into(), &reader.metadata);
-            *guard = Db::Builtin(Box::new(reader));
-            Ok(info)
+            (Db::Builtin(Box::new(reader)), info)
         }
         Some(p) => {
             let file = PathBuf::from(p);
@@ -150,13 +154,20 @@ pub fn apply(path: Option<&str>) -> Result<DbInfo, String> {
                 file.to_string_lossy().to_string(),
                 &reader.metadata,
             );
-            *guard = Db::Custom {
-                reader: Box::new(reader),
-                path: file,
-            };
-            Ok(info)
+            (
+                Db::Custom {
+                    reader: Box::new(reader),
+                    path: file,
+                },
+                info,
+            )
         }
-    }
+    };
+
+    let mut guard = db().write().unwrap_or_else(|e| e.into_inner());
+    *guard = next;
+    drop(guard);
+    Ok(info)
 }
 
 /// 当前生效库的描述。额外做一次内嵌回退的探测，好在设置屏说清「为什么外面看没有国家」。

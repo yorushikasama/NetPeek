@@ -88,6 +88,9 @@
   let windowDays = 0;     // rows 覆盖的「最近 N 天」天数；自定义区间时为 0
   let inspectorRows = null; // 检查栏 30 天曲线的独立缓存，理由见 dailyFor
   let inspectorSpan = 0;
+  // 30 天缓存的并发守卫。查询在 await 之后才写缓存，不加这个就会让慢到的旧查询
+  // 覆盖新查询的结果（污染缓存本身，绘制层的守卫挡不住）。见 dailyFor。
+  let inspectorSeq = 0;
   let buckets = [];       // 图上每一组：{ key, label, full, slots: [slot], down, up }
   let selected = -1;      // 选中的柱索引，-1 = 看整个区间
   let hit = null;         // charts.bars 返回的命中测试
@@ -208,15 +211,27 @@
   // 按小时档的骨架：从起点所在整点到「最后一个有数据的整点」。
   // 结束时刻正好压在整点上时要退一格 —— 「08:00 ~ 12:00」是 08/09/10/11 四根柱，
   // 不是五根：最后一根覆盖 [12:00, 12:00) 恒为空，画出来像掉数据。
+  //
+  // 递增必须走绝对毫秒（t += HOUR_MS），不能用 setHours(getHours() + 1)：
+  // 后者按**本地墙钟小时**加一，夏令时两处都会出错——
+  //   · 春季跳变（本地 02:00 那一刻不存在）：加到这一格时被规范化成 03:00，
+  //     该小时整格被跳过，骨架少一根，而数据里那一格仍在 perSlot 中 ——
+  //     buildBuckets 只遍历骨架键，于是这格被静默丢弃，合计与排行一起少算。
+  //   · 秋季回拨（本地 01:00 出现两次）：两格算出同一个 hourKey，后者覆盖前者。
+  // 绝对毫秒递增后逐格取本地整点，两种情况都不重不漏。
   function hourKeysBetween(startMs, endMs) {
     const out = [];
     let last = floorHour(endMs);
     const e = new Date(endMs);
     if (e.getMinutes() === 0 && e.getSeconds() === 0 && e.getMilliseconds() === 0) last -= HOUR_MS;
-    const d = new Date(floorHour(startMs));
-    while (d.getTime() <= last && out.length < MAX_RANGE_HOURS) {
-      out.push(hourKey(d));
-      d.setHours(d.getHours() + 1);
+    let t = floorHour(startMs);
+    // 去重兜底：非整小时偏移的时区（如 UTC+5:30）里两次 floorHour 可能落回同一个
+    // 本地小时键。那不是 DST，是键本身的歧义 —— 宁可少一根，也不要两根同键互相覆盖。
+    const seen = new Set();
+    while (t <= last && out.length < MAX_RANGE_HOURS) {
+      const key = hourKey(new Date(t));
+      if (!seen.has(key)) { seen.add(key); out.push(key); }
+      t += HOUR_MS;
     }
     return out;
   }
@@ -949,8 +964,29 @@
     firstDay = null;
     inspectorRows = null;
     inspectorSpan = 0;
+    // 同时作废在途的 30 天查询：它回来后写进缓存的是「清空前」的库快照，
+    // 会让屏上继续摆着已经删掉的数据（而且因为缓存有值，之后不再重查）。
+    inspectorSeq++;
     loadRows();
   });
+
+  // 把一份日聚合行摊成最近 n 天的曲线数据。dailyFor 抽出来用，是因为它现在有两个
+  // 出口：正常查完缓存后，以及并发过期时改用现有 rows 直接出结果（不写缓存）。
+  function dailyForSource(source, name, n) {
+    const keys = dayKeys(n);
+    const perDay = new Map(keys.map((k) => [k, 0]));
+    // 未归因流量在库里 name 是空串，而选中它时传入的是 unattrName()（如「(系统/未归因)」）。
+    // 两侧都把空串归一到 unattrName()，否则精确比对永不相等，未归因选中项的 30 天图会全 0
+    //（与近 24 小时列 buildDay24 的口径对齐）。
+    const unattr = unattrName().toLowerCase();
+    const key = name ? String(name).toLowerCase() : null;
+    for (const r of source) {
+      const rn = r.name ? String(r.name).toLowerCase() : unattr;
+      if (key && rn !== key) continue;
+      if (perDay.has(r.slot)) perDay.set(r.slot, perDay.get(r.slot) + r.down);
+    }
+    return keys.map((k) => ({ key: k, label: labelOf(k), value: perDay.get(k) }));
+  }
 
   window.NetPeekHistoryUI = {
     // 进入历史屏时拉一次；库每整分钟才落一次，不需要更勤。
@@ -992,34 +1028,30 @@
       } else if (inspectorRows && inspectorSpan >= n) {
         source = inspectorRows;
       } else {
+        // 共享缓存的写守卫：与 loadRows 的 loadSeq 同一套理由。两次调用并发时
+        // （用户快速点选不同进程行），先发的查询后到会把后发的结果覆盖掉 ——
+        // render30Day 自身的 last30Name 守卫能挡住**绘制**串，但挡不住**缓存**已经脏：
+        // 缓存被污染后，下一次任何命中它的调用都会画出别的进程的 30 天曲线。
+        // 只认最后一次发出的查询，过期结果整份丢弃。
+        const seq = ++inspectorSeq;
         // fallback 固定按 30 天兜底，不掺当前档位：days 在自定义区间下是区间长度
         // （最长 3660），拿它当查询跨度会拉全库日聚合，纯属浪费。
         const span = Math.max(n, 30);
         try {
           const raw = await window.__TAURI__.core.invoke('history_daily', { days: span });
+          if (seq !== inspectorSeq) return dailyForSource(rows, name, n); // 过期：直接用现有行
           inspectorRows = JSON.parse(raw || '[]').map((row) => ({
             slot: row.day, name: row.name, down: row.down, up: row.up,
           }));
           inspectorSpan = span;
         } catch {
+          if (seq !== inspectorSeq) return dailyForSource(rows, name, n);
           inspectorRows = []; // 查不动就先不用缓存，下次选中行再试
           inspectorSpan = 0;
         }
         source = inspectorRows;
       }
-      const keys = dayKeys(n);
-      const perDay = new Map(keys.map((k) => [k, 0]));
-      // 未归因流量在库里 name 是空串，而选中它时传入的是 unattrName()（如「(系统/未归因)」）。
-      // 两侧都把空串归一到 unattrName()，否则精确比对永不相等，未归因选中项的 30 天图会全 0
-      //（与近 24 小时列 buildDay24 的口径对齐）。
-      const unattr = unattrName().toLowerCase();
-      const key = name ? String(name).toLowerCase() : null;
-      for (const r of source) {
-        const rn = r.name ? String(r.name).toLowerCase() : unattr;
-        if (key && rn !== key) continue;
-        if (perDay.has(r.slot)) perDay.set(r.slot, perDay.get(r.slot) + r.down);
-      }
-      return keys.map((k) => ({ key: k, label: labelOf(k), value: perDay.get(k) }));
+      return dailyForSource(source, name, n);
     },
   };
 })();

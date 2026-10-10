@@ -66,6 +66,9 @@ const els = {
 // ===== 状态 =====
 
 let lastSnapshot = null;
+// 主窗被 hide 到托盘时为 true。Rust 侧每次 show/hide 都广播 win-visibility（见 lib.rs
+// notify_visibility），那是权威信号；document.hidden 单独不可靠。与 mini.js 同一份约定。
+let winHidden = false;
 let query = '';
 // 排序状态。sortKey 为空串 = 「未排序」，表格走默认顺序（见 DEFAULT_SORT）且表头不标箭头。
 // 这一态是必须存在的：以前只有「按某列升/降序」两种，点完列头就再也回不到默认呈现，
@@ -1379,7 +1382,9 @@ function onSnapshot(snap) {
   if (window.NetPeekSettingsUI) window.NetPeekSettingsUI.updateService(snap);
   // 窗口隐藏到托盘后不做任何渲染：记账照跑（今日合计、采样缓冲），省掉每秒
   // 一轮的 DOM 更新和 canvas 重画。恢复可见时补一帧，不等下一秒。
-  if (document.hidden) return;
+  // 两个条件都要判：document.hidden 在 WebView2 隐藏宿主窗口时不保证触发（与 mini.js
+  // 同一原因，见 lib.rs notify_visibility），只判它会让隐藏的主窗继续每秒全量重绘。
+  if (document.hidden || winHidden) return;
   if (screen !== 'live') return;         // 别的屏不用重画实时件
   renderAll(snap);
 }
@@ -1599,13 +1604,20 @@ function bindControls() {
       if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
     }, 120);
   });
-
-  // 从托盘恢复可见：onSnapshot 在隐藏期间提前返回了，这里立即补一帧，
-  // 否则界面要干等到下一秒的快照才更新。
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
-  });
 }
+
+// 从托盘恢复可见：onSnapshot 在隐藏期间提前返回了，这里立即补一帧，
+// 否则界面要干等到下一秒的快照才更新。
+// 两个信号都接到这一个 repaint：document.hidden 与 win-visibility 各自都会触发，
+// 而只有一方变化时（WebView2 不发 visibilitychange，或托盘显隐不发它）都得能补帧。
+// 定义在模块作用域而非 bindControls 内 —— boot() 里的 win-visibility 监听也要用它。
+function repaint() {
+  if (document.hidden || winHidden) return;
+  if (screen === 'live' && lastSnapshot) renderAll(lastSnapshot);
+  if (screen === 'history' && window.NetPeekHistoryUI) window.NetPeekHistoryUI.redraw();
+}
+
+document.addEventListener('visibilitychange', repaint);
 
 // ===== 启动 =====
 
@@ -1625,6 +1637,17 @@ async function boot() {
   setProcState('connecting');
   bindTable();
   bindControls();
+
+  // 显隐信号挂上：托盘把主窗隐藏后要立刻停止每秒重绘（§4.1）。与数据监听同一批登记，
+  // 位置在它之前 —— 两者都是「宿主推过来的信号」，缺任何一个都会让状态与实际脱节
+  // （漏 listen:snapshot 丢数据帧，漏 win-visibility 则隐藏后继续白烧 CPU）。
+  if (window.__TAURI__) {
+    await listen('win-visibility', (e) => {
+      if (e.payload.label !== 'main') return;
+      winHidden = !e.payload.visible;
+      repaint();
+    });
+  }
 
   // 管道监听先挂上：后面的主题、设置、首绘任何一步抛错都不该让界面收不到快照
   if (window.__TAURI__) {
